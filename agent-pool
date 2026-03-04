@@ -79,6 +79,18 @@ print('yes' if sys.argv[1] in data.get('projects', {}) else 'no')
     return
   fi
 
+  # Count registered projects — if more than one, require explicit -p flag
+  local proj_count
+  proj_count=$(read_projects | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print(len(data.get('projects', {})))
+")
+  if [[ "$proj_count" -gt 1 ]]; then
+    echo "Error: multiple projects registered — you must specify -p <project>. Run 'agent-pool project list' to see available projects." >&2
+    exit 1
+  fi
+
   local default_proj
   default_proj=$(read_projects | /usr/bin/python3 -c "
 import json, sys
@@ -1338,6 +1350,106 @@ json.dump(data, sys.stdout, indent=2)
   release_task_lock "$tasks_file"
 }
 
+cmd_approvals() {
+  local approvals_dir="$POOL_DIR/approvals"
+  mkdir -p "$approvals_dir"
+
+  local found=false
+  local now
+  now=$(date +%s)
+
+  printf "\033[1m%-28s %-10s %-12s %-40s %s\033[0m\n" "ID" "Agent" "Tool" "Input" "Age"
+  printf "%-28s %-10s %-12s %-40s %s\n" "---" "-----" "----" "-----" "---"
+
+  for f in "$approvals_dir"/req-*.json; do
+    [[ -f "$f" ]] || continue
+    local status
+    status=$(jq -r '.status' "$f" 2>/dev/null) || continue
+    [[ "$status" == "pending" ]] || continue
+    found=true
+
+    local id agent tool input ts
+    id=$(jq -r '.id' "$f")
+    agent=$(jq -r '.agent' "$f")
+    tool=$(jq -r '.tool' "$f")
+    input=$(jq -r '.input' "$f" | head -c 40)
+    ts=$(jq -r '.timestamp' "$f")
+
+    # Calculate age
+    local req_epoch age_str
+    req_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null || echo "$now")
+    local age_s=$(( now - req_epoch ))
+    if [[ $age_s -lt 60 ]]; then
+      age_str="${age_s}s"
+    elif [[ $age_s -lt 3600 ]]; then
+      age_str="$(( age_s / 60 ))m"
+    else
+      age_str="$(( age_s / 3600 ))h"
+    fi
+
+    printf "%-28s %-10s %-12s %-40s %s\n" "$id" "$agent" "$tool" "$input" "$age_str"
+  done
+
+  if [[ "$found" == false ]]; then
+    echo "No pending approval requests."
+  fi
+}
+
+cmd_approve() {
+  local target="${1:-}"
+  if [[ -z "$target" ]]; then
+    echo "Usage: agent-pool approve <request-id|--all>"
+    exit 1
+  fi
+
+  local approvals_dir="$POOL_DIR/approvals"
+  mkdir -p "$approvals_dir"
+  local decided_at
+  decided_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  if [[ "$target" == "--all" ]]; then
+    local count=0
+    for f in "$approvals_dir"/req-*.json; do
+      [[ -f "$f" ]] || continue
+      local status
+      status=$(jq -r '.status' "$f" 2>/dev/null) || continue
+      [[ "$status" == "pending" ]] || continue
+      jq --arg da "$decided_at" '.status = "approved" | .decided_at = $da' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+      count=$((count + 1))
+    done
+    echo "Approved $count pending request(s)."
+  else
+    local req_file="$approvals_dir/${target}.json"
+    if [[ ! -f "$req_file" ]]; then
+      echo "Error: request '$target' not found." >&2
+      exit 1
+    fi
+    jq --arg da "$decided_at" '.status = "approved" | .decided_at = $da' "$req_file" > "$req_file.tmp" && mv "$req_file.tmp" "$req_file"
+    echo "Approved $target."
+  fi
+}
+
+cmd_deny() {
+  local target="${1:-}"
+  if [[ -z "$target" ]]; then
+    echo "Usage: agent-pool deny <request-id>"
+    exit 1
+  fi
+
+  local approvals_dir="$POOL_DIR/approvals"
+  mkdir -p "$approvals_dir"
+  local decided_at
+  decided_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  local req_file="$approvals_dir/${target}.json"
+  if [[ ! -f "$req_file" ]]; then
+    echo "Error: request '$target' not found." >&2
+    exit 1
+  fi
+  jq --arg da "$decided_at" '.status = "denied" | .decided_at = $da' "$req_file" > "$req_file.tmp" && mv "$req_file.tmp" "$req_file"
+  echo "Denied $target."
+}
+
 cmd_help() {
   cat <<'HELP'
 agent-pool — manage a warm pool of isolated repo clones for parallel Claude sessions
@@ -1375,6 +1487,11 @@ Commands:
   unblock <id>          Move blocked → pending
   backlog <id>          Move any → backlogged
   activate <id>         Move backlogged → pending
+
+  Approval Queue:
+  approvals             List pending approval requests
+  approve <id|--all>    Approve a pending request (or all)
+  deny <id>             Deny a pending request
 
   Maintenance:
   refresh <n|--all>     Reset clone(s) to project branch, clean branches, run setup
@@ -1426,8 +1543,11 @@ case "$cmd" in
   tasks)    cmd_tasks "$@" ;;
   unblock)  cmd_unblock "$@" ;;
   backlog)  cmd_backlog "$@" ;;
-  activate) cmd_activate "$@" ;;
-  refresh)  cmd_refresh "$@" ;;
+  activate)  cmd_activate "$@" ;;
+  approvals) cmd_approvals "$@" ;;
+  approve)   cmd_approve "$@" ;;
+  deny)      cmd_deny "$@" ;;
+  refresh)   cmd_refresh "$@" ;;
   release)  cmd_release "$@" ;;
   restart)  cmd_restart "$@" ;;
   destroy)  cmd_destroy "$@" ;;
