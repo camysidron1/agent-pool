@@ -3,7 +3,8 @@
 # The driver can approve/deny via: agent-pool approvals | approve | deny
 set -euo pipefail
 
-APPROVALS_DIR="$HOME/.agent-pool/approvals"
+POOL_DIR="${POOL_DIR:-$HOME/.agent-pool}"
+APPROVALS_DIR="$POOL_DIR/approvals"
 mkdir -p "$APPROVALS_DIR"
 
 # Read hook payload from stdin

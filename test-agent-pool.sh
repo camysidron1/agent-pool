@@ -475,6 +475,274 @@ print(data['clones'][0]['locked'])
   assert_eq "False" "$locked" "clone should be released after runner exits"
 }
 
+# --- approval queue tests ---
+
+test_approvals_empty() {
+  local output
+  output=$("$AGENT_POOL" approvals)
+  assert_contains "$output" "No pending approval requests."
+}
+
+test_approvals_lists_pending() {
+  mkdir -p "$TEST_DIR/approvals"
+  echo '{"id":"req-100-ap-01","agent":"ap-01","tool":"Bash","input":"echo hello","timestamp":"2026-03-04T12:00:00Z","status":"pending","decided_at":null}' \
+    > "$TEST_DIR/approvals/req-100-ap-01.json"
+
+  local output
+  output=$("$AGENT_POOL" approvals)
+  assert_contains "$output" "req-100-ap-01"
+  assert_contains "$output" "ap-01"
+  assert_contains "$output" "Bash"
+}
+
+test_approvals_ignores_non_pending() {
+  mkdir -p "$TEST_DIR/approvals"
+  echo '{"id":"req-200-ap-02","agent":"ap-02","tool":"Edit","input":"x","timestamp":"2026-03-04T12:00:00Z","status":"approved","decided_at":"2026-03-04T12:01:00Z"}' \
+    > "$TEST_DIR/approvals/req-200-ap-02.json"
+
+  local output
+  output=$("$AGENT_POOL" approvals)
+  assert_contains "$output" "No pending approval requests."
+}
+
+test_approve_by_id() {
+  mkdir -p "$TEST_DIR/approvals"
+  echo '{"id":"req-300-ap-01","agent":"ap-01","tool":"Bash","input":"rm -rf","timestamp":"2026-03-04T12:00:00Z","status":"pending","decided_at":null}' \
+    > "$TEST_DIR/approvals/req-300-ap-01.json"
+
+  local output
+  output=$("$AGENT_POOL" approve req-300-ap-01)
+  assert_contains "$output" "Approved req-300-ap-01"
+
+  local status
+  status=$(jq -r '.status' "$TEST_DIR/approvals/req-300-ap-01.json")
+  assert_eq "approved" "$status"
+
+  local decided_at
+  decided_at=$(jq -r '.decided_at' "$TEST_DIR/approvals/req-300-ap-01.json")
+  [[ "$decided_at" != "null" ]] || { echo "    FAIL: decided_at should be set"; return 1; }
+}
+
+test_approve_all() {
+  mkdir -p "$TEST_DIR/approvals"
+  echo '{"id":"req-400-ap-01","agent":"ap-01","tool":"Bash","input":"x","timestamp":"2026-03-04T12:00:00Z","status":"pending","decided_at":null}' \
+    > "$TEST_DIR/approvals/req-400-ap-01.json"
+  echo '{"id":"req-401-ap-02","agent":"ap-02","tool":"Write","input":"y","timestamp":"2026-03-04T12:00:00Z","status":"pending","decided_at":null}' \
+    > "$TEST_DIR/approvals/req-401-ap-02.json"
+  # Already approved — should not be counted
+  echo '{"id":"req-402-ap-03","agent":"ap-03","tool":"Edit","input":"z","timestamp":"2026-03-04T12:00:00Z","status":"approved","decided_at":"2026-03-04T12:01:00Z"}' \
+    > "$TEST_DIR/approvals/req-402-ap-03.json"
+
+  local output
+  output=$("$AGENT_POOL" approve --all)
+  assert_contains "$output" "Approved 2 pending request(s)."
+
+  assert_eq "approved" "$(jq -r '.status' "$TEST_DIR/approvals/req-400-ap-01.json")"
+  assert_eq "approved" "$(jq -r '.status' "$TEST_DIR/approvals/req-401-ap-02.json")"
+}
+
+test_deny_by_id() {
+  mkdir -p "$TEST_DIR/approvals"
+  echo '{"id":"req-500-ap-01","agent":"ap-01","tool":"Bash","input":"danger","timestamp":"2026-03-04T12:00:00Z","status":"pending","decided_at":null}' \
+    > "$TEST_DIR/approvals/req-500-ap-01.json"
+
+  local output
+  output=$("$AGENT_POOL" deny req-500-ap-01)
+  assert_contains "$output" "Denied req-500-ap-01"
+
+  local status
+  status=$(jq -r '.status' "$TEST_DIR/approvals/req-500-ap-01.json")
+  assert_eq "denied" "$status"
+}
+
+test_approve_not_found() {
+  if "$AGENT_POOL" approve nonexistent 2>&1; then
+    echo "    FAIL: expected non-zero exit for missing request"
+    return 1
+  fi
+}
+
+test_deny_not_found() {
+  if "$AGENT_POOL" deny nonexistent 2>&1; then
+    echo "    FAIL: expected non-zero exit for missing request"
+    return 1
+  fi
+}
+
+test_hook_writes_request_json() {
+  # Simulate what the hook does: feed it stdin and run from a clone dir
+  mkdir -p "$TEST_DIR/approvals"
+  mkdir -p "$TEST_DIR/ap-03"
+
+  local hook_script="$SCRIPT_DIR/hooks/approval-hook.sh"
+
+  # Run hook in background so we can check the file it creates, then kill it
+  (
+    cd "$TEST_DIR/ap-03"
+    echo '{"tool_name":"Bash","tool_input":{"command":"echo test"},"session_id":"s1","hook_event_name":"PreToolUse"}' \
+      | "$hook_script" &
+    HOOK_PID=$!
+    # Give it a moment to write the file
+    sleep 2
+    kill $HOOK_PID 2>/dev/null || true
+  ) &>/dev/null &
+  local outer_pid=$!
+
+  sleep 3
+  kill "$outer_pid" 2>/dev/null || true
+  wait "$outer_pid" 2>/dev/null || true
+
+  # Find the request file
+  local req_files=("$TEST_DIR/approvals"/req-*-ap-03.json)
+  [[ -f "${req_files[0]}" ]] || { echo "    FAIL: no request file created"; return 1; }
+
+  local agent tool status
+  agent=$(jq -r '.agent' "${req_files[0]}")
+  tool=$(jq -r '.tool' "${req_files[0]}")
+  status=$(jq -r '.status' "${req_files[0]}")
+  assert_eq "ap-03" "$agent"
+  assert_eq "Bash" "$tool"
+  assert_eq "pending" "$status"
+
+  # Clean up
+  rm -f "${req_files[0]}"
+}
+
+test_hook_exits_on_approve() {
+  # Start hook, approve its request, verify it exits 0
+  mkdir -p "$TEST_DIR/approvals"
+  mkdir -p "$TEST_DIR/ap-04"
+
+  local hook_script="$SCRIPT_DIR/hooks/approval-hook.sh"
+
+  (
+    cd "$TEST_DIR/ap-04"
+    echo '{"tool_name":"Write","tool_input":{"file_path":"/tmp/x"},"session_id":"s2","hook_event_name":"PreToolUse"}' \
+      | "$hook_script"
+  ) &
+  local hook_pid=$!
+
+  # Wait for request file to appear
+  local waited=0
+  local req_file=""
+  while [[ $waited -lt 5 ]]; do
+    for f in "$TEST_DIR/approvals"/req-*-ap-04.json; do
+      [[ -f "$f" ]] && req_file="$f" && break 2
+    done
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  [[ -n "$req_file" ]] || { echo "    FAIL: no request file appeared"; kill "$hook_pid" 2>/dev/null; return 1; }
+
+  # Approve it
+  jq '.status = "approved" | .decided_at = "now"' "$req_file" > "$req_file.tmp" && mv "$req_file.tmp" "$req_file"
+
+  # Wait for hook to exit
+  local exit_code=0
+  wait "$hook_pid" || exit_code=$?
+  assert_eq "0" "$exit_code" "hook should exit 0 on approval"
+}
+
+test_hook_exits_on_deny() {
+  mkdir -p "$TEST_DIR/approvals"
+  mkdir -p "$TEST_DIR/ap-05"
+
+  local hook_script="$SCRIPT_DIR/hooks/approval-hook.sh"
+
+  (
+    cd "$TEST_DIR/ap-05"
+    echo '{"tool_name":"Bash","tool_input":{"command":"bad"},"session_id":"s3","hook_event_name":"PreToolUse"}' \
+      | "$hook_script"
+  ) 2>/dev/null &
+  local hook_pid=$!
+
+  # Wait for request file
+  local waited=0
+  local req_file=""
+  while [[ $waited -lt 5 ]]; do
+    for f in "$TEST_DIR/approvals"/req-*-ap-05.json; do
+      [[ -f "$f" ]] && req_file="$f" && break 2
+    done
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  [[ -n "$req_file" ]] || { echo "    FAIL: no request file appeared"; kill "$hook_pid" 2>/dev/null; return 1; }
+
+  # Deny it
+  jq '.status = "denied" | .decided_at = "now"' "$req_file" > "$req_file.tmp" && mv "$req_file.tmp" "$req_file"
+
+  # Wait for hook to exit
+  local exit_code=0
+  wait "$hook_pid" || exit_code=$?
+  assert_eq "2" "$exit_code" "hook should exit 2 on denial"
+}
+
+test_runner_installs_approval_hook() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 1 -p foo
+
+  # Create a settings.json with existing hooks
+  mkdir -p "$TEST_DIR/foo-01/.claude"
+  echo '{"enabledPlugins":{},"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"test.sh"}]}]}}' \
+    > "$TEST_DIR/foo-01/.claude/settings.json"
+
+  # Simulate what agent-runner does (extract the merge logic)
+  local settings_file="$TEST_DIR/foo-01/.claude/settings.json"
+  local hook_entry='{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"~/.agent-pool/hooks/approval-hook.sh","timeout":310000}]}]}}'
+  local merged
+  merged=$(jq --argjson entry "$hook_entry" '
+    .hooks //= {} |
+    .hooks.PreToolUse //= [] |
+    .hooks.PreToolUse = [.hooks.PreToolUse[] | select(
+      (.hooks // []) | all(.command | test("approval-hook\\.sh") | not)
+    )] |
+    .hooks.PreToolUse += $entry.hooks.PreToolUse
+  ' "$settings_file") && echo "$merged" > "$settings_file"
+
+  # Verify: existing SessionStart hook preserved
+  local session_cmd
+  session_cmd=$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$settings_file")
+  assert_eq "test.sh" "$session_cmd" "existing SessionStart hook should be preserved"
+
+  # Verify: approval hook added to PreToolUse
+  local approval_cmd
+  approval_cmd=$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$settings_file")
+  assert_contains "$approval_cmd" "approval-hook.sh" "approval hook should be added"
+
+  # Verify: enabledPlugins preserved
+  local plugins
+  plugins=$(jq -r '.enabledPlugins | keys | length' "$settings_file")
+  assert_eq "0" "$plugins" "enabledPlugins should be preserved (empty object)"
+}
+
+test_runner_merge_is_idempotent() {
+  # Running the merge twice should not duplicate the hook
+  mkdir -p "$TEST_DIR/approvals"
+  local settings_file="$TEST_DIR/settings-test.json"
+  echo '{"hooks":{}}' > "$settings_file"
+
+  local hook_entry='{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"~/.agent-pool/hooks/approval-hook.sh","timeout":310000}]}]}}'
+
+  # Apply twice
+  for _ in 1 2; do
+    local merged
+    merged=$(jq --argjson entry "$hook_entry" '
+      .hooks //= {} |
+      .hooks.PreToolUse //= [] |
+      .hooks.PreToolUse = [.hooks.PreToolUse[] | select(
+        (.hooks // []) | all(.command | test("approval-hook\\.sh") | not)
+      )] |
+      .hooks.PreToolUse += $entry.hooks.PreToolUse
+    ' "$settings_file") && echo "$merged" > "$settings_file"
+  done
+
+  local count
+  count=$(jq '.hooks.PreToolUse | length' "$settings_file")
+  assert_eq "1" "$count" "should have exactly 1 PreToolUse hook entry after two merges"
+}
+
 # --- main ---
 
 printf "\n\033[1;34m=== agent-pool multi-project test suite ===\033[0m\n\n"
@@ -502,6 +770,21 @@ run_test test_destroy_project
 run_test test_runner_uses_project_tasks
 run_test test_runner_uses_project_branch
 run_test test_runner_releases_lock_on_exit
+
+# Approval queue tests
+run_test test_approvals_empty
+run_test test_approvals_lists_pending
+run_test test_approvals_ignores_non_pending
+run_test test_approve_by_id
+run_test test_approve_all
+run_test test_deny_by_id
+run_test test_approve_not_found
+run_test test_deny_not_found
+run_test test_hook_writes_request_json
+run_test test_hook_exits_on_approve
+run_test test_hook_exits_on_deny
+run_test test_runner_installs_approval_hook
+run_test test_runner_merge_is_idempotent
 
 printf "\n\033[1;34m=== Results ===\033[0m\n"
 printf "  Total: %d  Passed: \033[32m%d\033[0m  Failed: \033[31m%d\033[0m\n" "$TESTS_RUN" "$TESTS_PASSED" "$TESTS_FAILED"
