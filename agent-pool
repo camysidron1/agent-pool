@@ -1071,23 +1071,28 @@ for c in data['clones']:
     return
   fi
 
-  local -A ws_clones
-  local ws_order=()
-  while IFS=$'\t' read -r idx ws; do
-    if [[ -n "$ws" ]]; then
-      if [[ -z "${ws_clones[$ws]:-}" ]]; then
-        ws_order+=("$ws")
-      fi
-      ws_clones[$ws]="${ws_clones[$ws]:-} $idx"
-    fi
-  done <<< "$clone_data"
-
   local runner_perms_flag=""
   [[ "$skip_perms" == true ]] && runner_perms_flag=" --skip-permissions"
 
+  # Group clones by workspace using python (avoids bash 4+ associative arrays)
+  local grouped
+  grouped=$(echo "$clone_data" | /usr/bin/python3 -c "
+import sys
+from collections import OrderedDict
+groups = OrderedDict()
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    idx, ws = line.split('\t', 1)
+    groups.setdefault(ws, []).append(idx)
+for ws, idxs in groups.items():
+    print(ws + '|' + ','.join(idxs))
+")
+
   local restarted=0
 
-  for ws in "${ws_order[@]}"; do
+  while IFS='|' read -r ws idx_list; do
+    [[ -z "$ws" ]] && continue
     local surfaces
     surfaces=$(cmux --json list-pane-surfaces --workspace "$ws" 2>/dev/null | /usr/bin/python3 -c "
 import json, sys
@@ -1101,8 +1106,7 @@ for s in data.get('surfaces', []):
       continue
     fi
 
-    local idxs
-    read -ra idxs <<< "${ws_clones[$ws]}"
+    IFS=',' read -ra idxs <<< "$idx_list"
     local i=0
     while IFS= read -r surface; do
       if [[ $i -ge ${#idxs[@]} ]]; then
@@ -1128,7 +1132,7 @@ for s in data.get('surfaces', []):
       restarted=$((restarted + 1))
       i=$((i + 1))
     done <<< "$surfaces"
-  done
+  done <<< "$grouped"
 
   printf "Restarted %d agents.\n" "$restarted"
 }
