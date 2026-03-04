@@ -860,6 +860,8 @@ cmd_launch() {
 
   if [[ "$mode" == "here" ]]; then
     lock_clone "$pool_file" "$idx" "here-$idx-$(date +%s)"
+    # Auto-release lock when this process exits (for --no-queue mode; runner has its own trap)
+    trap "unlock_clone '$pool_file' '$idx' 2>/dev/null || true" EXIT
     printf "Launched %s in %s\n" "$label" "$clone_path"
     if [[ -n "$env_name" ]]; then
       printf "  Environment: %s\n" "$env_name"
@@ -867,11 +869,12 @@ cmd_launch() {
     cd "$clone_path"
     if [[ "$no_queue" == true ]]; then
       if [[ -n "$env_name" ]]; then
-        exec env ENV="$env_name" nenv claude$perms_flag
+        ENV="$env_name" nenv claude$perms_flag || true
       else
-        exec claude$perms_flag
+        claude$perms_flag || true
       fi
     else
+      # Runner has its own release trap, so exec is fine here
       if [[ -n "$env_name" ]]; then
         exec "$RUNNER_SCRIPT" "$idx" --project "$proj" "$env_name"$runner_perms_flag
       else

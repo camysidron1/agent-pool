@@ -144,11 +144,45 @@ with open('$TASKS_JSON', 'w') as f:
   release_lock
 }
 
+# Auto-release clone lock on exit (Ctrl+C, kill, normal exit)
+CLONE_RELEASED=false
+release_clone_lock() {
+  [[ "$CLONE_RELEASED" == true ]] && return
+  CLONE_RELEASED=true
+  local pool_json="$POOL_DIR/pool-${PROJECT_NAME}.json"
+  if [[ -f "$pool_json" ]]; then
+    /usr/bin/python3 -c "
+import json, sys
+with open(sys.argv[1], 'r') as f:
+    data = json.load(f)
+idx = int(sys.argv[2])
+for c in data['clones']:
+    if c['index'] == idx:
+        c['locked'] = False
+        c['workspace_id'] = ''
+        c['locked_at'] = ''
+        break
+with open(sys.argv[1], 'w') as f:
+    json.dump(data, f, indent=2)
+" "$pool_json" "$CLONE_INDEX" 2>/dev/null || true
+    printf "\033[1;36m%s\033[0m released clone %02d\n" "$AGENT_ID" "$CLONE_INDEX" 2>/dev/null || true
+  fi
+}
+trap release_clone_lock EXIT
+trap 'release_clone_lock; exit 130' INT
+trap 'release_clone_lock; exit 143' TERM
+
 printf "\033[1;36m%s\033[0m ready — polling for tasks (project: %s)...\n" "$AGENT_ID" "$PROJECT_NAME"
+
+# Interruptible sleep using read with timeout (signals delivered between iterations)
+isleep() {
+  # bash 3.2 read -t works and is interruptible by signals
+  read -t "$1" -r _ < /dev/null 2>/dev/null || true
+}
 
 while true; do
   result=$(claim_task 2>/dev/null) || {
-    sleep "$poll_interval"
+    isleep "$poll_interval"
     continue
   }
 

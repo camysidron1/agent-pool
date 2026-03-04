@@ -431,6 +431,50 @@ test_runner_uses_project_branch() {
   assert_dir_exists "$TEST_DIR/foo-01"
 }
 
+test_runner_releases_lock_on_exit() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 1 -p foo
+
+  # Simulate runner start: lock the clone
+  /usr/bin/python3 -c "
+import json, time
+with open('$TEST_DIR/pool-foo.json') as f:
+    data = json.load(f)
+for c in data['clones']:
+    if c['index'] == 1:
+        c['locked'] = True
+        c['workspace_id'] = 'here-test'
+        c['locked_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+with open('$TEST_DIR/pool-foo.json', 'w') as f:
+    json.dump(data, f, indent=2)
+"
+  # Verify locked
+  local locked
+  locked=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/pool-foo.json') as f:
+    data = json.load(f)
+print(data['clones'][0]['locked'])
+")
+  assert_eq "True" "$locked" "clone should be locked"
+
+  # Start runner in background with a subshell that kills it after brief delay
+  "$AGENT_RUNNER" 1 --project foo &>/dev/null &
+  local runner_pid=$!
+  sleep 1
+  kill "$runner_pid" 2>/dev/null || true
+  sleep 1
+
+  # Check that lock was released
+  locked=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/pool-foo.json') as f:
+    data = json.load(f)
+print(data['clones'][0]['locked'])
+")
+  assert_eq "False" "$locked" "clone should be released after runner exits"
+}
+
 # --- main ---
 
 printf "\n\033[1;34m=== agent-pool multi-project test suite ===\033[0m\n\n"
@@ -457,6 +501,7 @@ run_test test_refresh_project_clone
 run_test test_destroy_project
 run_test test_runner_uses_project_tasks
 run_test test_runner_uses_project_branch
+run_test test_runner_releases_lock_on_exit
 
 printf "\n\033[1;34m=== Results ===\033[0m\n"
 printf "  Total: %d  Passed: \033[32m%d\033[0m  Failed: \033[31m%d\033[0m\n" "$TESTS_RUN" "$TESTS_PASSED" "$TESTS_FAILED"
