@@ -1503,6 +1503,98 @@ cmd_deny() {
   echo "Denied $target."
 }
 
+cmd_docs() {
+  local target="${1:-}"
+  local docs_dir="$POOL_DIR/docs"
+
+  if [[ ! -d "$docs_dir" ]]; then
+    echo "No docs directory yet. Docs are created when agents run."
+    return
+  fi
+
+  if [[ -z "$target" ]]; then
+    # List all agent doc directories and shared
+    printf "%-20s %-8s %s\n" "Directory" "Files" "Last Modified"
+    printf "%-20s %-8s %s\n" "---------" "-----" "-------------"
+
+    if [[ -d "$docs_dir/shared" ]]; then
+      local count last_mod
+      count=$(find "$docs_dir/shared" -maxdepth 1 -type f | wc -l | tr -d ' ')
+      last_mod=$(find "$docs_dir/shared" -maxdepth 1 -type f -exec stat -f '%m %N' {} + 2>/dev/null | sort -rn | head -1 | cut -d' ' -f1)
+      if [[ -n "$last_mod" ]]; then
+        last_mod=$(date -r "$last_mod" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "-")
+      else
+        last_mod="-"
+      fi
+      printf "%-20s %-8s %s\n" "shared" "$count" "$last_mod"
+    fi
+
+    if [[ -d "$docs_dir/agents" ]]; then
+      for agent_dir in "$docs_dir/agents"/*/; do
+        [[ -d "$agent_dir" ]] || continue
+        local agent_name count last_mod
+        agent_name=$(basename "$agent_dir")
+        count=$(find "$agent_dir" -maxdepth 1 -type f | wc -l | tr -d ' ')
+        last_mod=$(find "$agent_dir" -maxdepth 1 -type f -exec stat -f '%m %N' {} + 2>/dev/null | sort -rn | head -1 | cut -d' ' -f1)
+        if [[ -n "$last_mod" ]]; then
+          last_mod=$(date -r "$last_mod" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "-")
+        else
+          last_mod="-"
+        fi
+        printf "%-20s %-8s %s\n" "$agent_name" "$count" "$last_mod"
+      done
+    fi
+  elif [[ "$target" == "shared" ]]; then
+    local target_dir="$docs_dir/shared"
+    if [[ ! -d "$target_dir" ]]; then
+      echo "No shared docs yet."
+      return
+    fi
+    printf "Shared docs (%s):\n\n" "$target_dir"
+    local found=false
+    for f in "$target_dir"/*; do
+      [[ -f "$f" ]] || continue
+      found=true
+      local fname
+      fname=$(basename "$f")
+      if [[ "$fname" == *.md ]]; then
+        printf "=== %s ===\n" "$fname"
+        cat "$f"
+        printf "\n"
+      else
+        printf "  %s\n" "$fname"
+      fi
+    done
+    if [[ "$found" == false ]]; then
+      echo "  (empty)"
+    fi
+  else
+    local target_dir="$docs_dir/agents/$target"
+    if [[ ! -d "$target_dir" ]]; then
+      echo "No docs for agent '$target'."
+      return
+    fi
+    printf "Docs for %s (%s):\n\n" "$target" "$target_dir"
+    local found=false
+    for f in "$target_dir"/*; do
+      [[ -f "$f" ]] || continue
+      found=true
+      local fname
+      fname=$(basename "$f")
+      if [[ "$fname" == *.md ]]; then
+        printf "=== %s ===\n" "$fname"
+        cat "$f"
+        printf "\n"
+      else
+        printf "  %s\n" "$fname"
+      fi
+    done
+    if [[ "$found" == false ]]; then
+      echo "  (empty)"
+    fi
+  fi
+}
+
 cmd_help() {
   cat <<'HELP'
 agent-pool — manage a warm pool of isolated repo clones for parallel Claude sessions
@@ -1548,6 +1640,11 @@ Commands:
   approvals             List pending approval requests
   approve <id|--all>    Approve a pending request (or all)
   deny <id>             Deny a pending request
+
+  Documentation:
+  docs                  List all agent doc directories with file counts
+  docs <agent-id>       Show files and .md contents for an agent
+  docs shared           Show shared documentation files
 
   Maintenance:
   refresh <n|--all>     Reset clone(s) to project branch, clean branches, run setup
@@ -1603,6 +1700,7 @@ case "$cmd" in
   approvals) cmd_approvals "$@" ;;
   approve)   cmd_approve "$@" ;;
   deny)      cmd_deny "$@" ;;
+  docs)      cmd_docs "$@" ;;
   refresh)   cmd_refresh "$@" ;;
   release)  cmd_release "$@" ;;
   restart)  cmd_restart "$@" ;;
