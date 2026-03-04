@@ -197,6 +197,28 @@ while true; do
   local_branch="${AGENT_ID}-${task_id}"
   git checkout -B "$local_branch" "origin/$BRANCH" -q 2>/dev/null || git checkout -B "$local_branch" "$BRANCH" -q
 
+  # Install approval hook (unless --skip-permissions)
+  if [[ "$SKIP_PERMS" != true ]]; then
+    local settings_file="$CLONE_PATH/.claude/settings.json"
+    mkdir -p "$(dirname "$settings_file")"
+    local hook_entry='{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"~/.agent-pool/hooks/approval-hook.sh","timeout":310000}]}]}}'
+    if [[ -f "$settings_file" ]]; then
+      # Merge: add our hook entry to existing PreToolUse array (or create it)
+      local merged
+      merged=$(jq --argjson entry "$hook_entry" '
+        .hooks //= {} |
+        .hooks.PreToolUse //= [] |
+        # Remove any existing approval-hook entries to avoid duplicates
+        .hooks.PreToolUse = [.hooks.PreToolUse[] | select(
+          (.hooks // []) | all(.command | test("approval-hook\\.sh") | not)
+        )] |
+        .hooks.PreToolUse += $entry.hooks.PreToolUse
+      ' "$settings_file") && echo "$merged" > "$settings_file"
+    else
+      echo "$hook_entry" | jq '.' > "$settings_file"
+    fi
+  fi
+
   # Run claude interactively with the task prompt
   claude_args=("$prompt")
   [[ "$SKIP_PERMS" == true ]] && claude_args+=(--dangerously-skip-permissions)
