@@ -1,0 +1,1429 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+POOL_DIR="${POOL_DIR:-$HOME/.agent-pool}"
+PROJECTS_JSON="$POOL_DIR/projects.json"
+RUNNER_SCRIPT="$POOL_DIR/agent-runner.sh"
+
+# --- project config layer ---
+
+ensure_projects_json() {
+  if [[ ! -f "$PROJECTS_JSON" ]]; then
+    echo '{"default":"","projects":{}}' > "$PROJECTS_JSON"
+  fi
+}
+
+auto_migrate() {
+  # Backward compat: if pool.json exists but projects.json doesn't, migrate
+  if [[ -f "$POOL_DIR/pool.json" ]] && [[ ! -f "$PROJECTS_JSON" ]]; then
+    local source_repo="$HOME/Documents/GitHub/nebari-mvp"
+    /usr/bin/python3 -c "
+import json, os
+projects = {
+    'default': 'nebari',
+    'projects': {
+        'nebari': {
+            'source': os.path.expanduser('$source_repo'),
+            'prefix': 'nebari',
+            'branch': 'stg',
+            'setup': None
+        }
+    }
+}
+with open('$PROJECTS_JSON', 'w') as f:
+    json.dump(projects, f, indent=2)
+"
+    # Rename state files
+    [[ -f "$POOL_DIR/pool.json" ]] && mv "$POOL_DIR/pool.json" "$POOL_DIR/pool-nebari.json"
+    [[ -f "$POOL_DIR/tasks.json" ]] && mv "$POOL_DIR/tasks.json" "$POOL_DIR/tasks-nebari.json"
+  fi
+}
+
+read_projects() {
+  ensure_projects_json
+  cat "$PROJECTS_JSON"
+}
+
+write_projects() {
+  local tmp="$PROJECTS_JSON.tmp"
+  cat > "$tmp"
+  mv "$tmp" "$PROJECTS_JSON"
+}
+
+get_project_field() {
+  local project_name="$1" field="$2"
+  read_projects | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+p = data.get('projects', {}).get(sys.argv[1], {})
+val = p.get(sys.argv[2], '')
+print('' if val is None else val)
+" "$project_name" "$field"
+}
+
+resolve_project() {
+  # If PROJECT is already set (from -p flag), use it. Otherwise use default.
+  if [[ -n "${PROJECT:-}" ]]; then
+    # Verify it exists
+    local exists
+    exists=$(read_projects | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print('yes' if sys.argv[1] in data.get('projects', {}) else 'no')
+" "$PROJECT")
+    if [[ "$exists" != "yes" ]]; then
+      echo "Error: project '$PROJECT' not found. Run 'agent-pool project list' to see available projects." >&2
+      exit 1
+    fi
+    echo "$PROJECT"
+    return
+  fi
+
+  local default_proj
+  default_proj=$(read_projects | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print(data.get('default', ''))
+")
+  if [[ -z "$default_proj" ]]; then
+    echo "Error: no project specified and no default set. Use -p <project> or run 'agent-pool project default <name>'." >&2
+    exit 1
+  fi
+  echo "$default_proj"
+}
+
+# --- per-project state accessors ---
+
+get_pool_json_path() {
+  local proj="$1"
+  echo "$POOL_DIR/pool-${proj}.json"
+}
+
+get_tasks_json_path() {
+  local proj="$1"
+  echo "$POOL_DIR/tasks-${proj}.json"
+}
+
+get_clone_prefix() {
+  local proj="$1"
+  get_project_field "$proj" "prefix"
+}
+
+get_source_repo() {
+  local proj="$1"
+  local source
+  source=$(get_project_field "$proj" "source")
+  # Expand ~ manually
+  echo "${source/#\~/$HOME}"
+}
+
+get_project_branch() {
+  local proj="$1"
+  get_project_field "$proj" "branch"
+}
+
+get_project_setup() {
+  local proj="$1"
+  get_project_field "$proj" "setup"
+}
+
+# --- pool helpers (parameterized by project) ---
+
+ensure_pool_json() {
+  local pool_file="$1"
+  if [[ ! -f "$pool_file" ]] || [[ ! -s "$pool_file" ]]; then
+    echo '{"clones":[]}' > "$pool_file"
+  fi
+}
+
+read_pool() {
+  local pool_file="$1"
+  ensure_pool_json "$pool_file"
+  cat "$pool_file"
+}
+
+write_pool() {
+  local pool_file="$1"
+  local tmp="${pool_file}.tmp"
+  cat > "$tmp"
+  mv "$tmp" "$pool_file"
+}
+
+next_index() {
+  local pool_file="$1"
+  local max
+  max=$(read_pool "$pool_file" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+indexes = [c['index'] for c in data['clones']]
+print(max(indexes) if indexes else 0)
+")
+  echo "$max"
+}
+
+find_free_clone() {
+  local pool_file="$1"
+  read_pool "$pool_file" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for c in data['clones']:
+    if not c.get('locked', False):
+        print(c['index'])
+        sys.exit(0)
+sys.exit(1)
+" 2>/dev/null
+}
+
+get_clone_path() {
+  local prefix="$1" idx="$2"
+  printf '%s/%s-%02d' "$POOL_DIR" "$prefix" "$idx"
+}
+
+lock_clone() {
+  local pool_file="$1" idx="$2" workspace_id="$3"
+  read_pool "$pool_file" | /usr/bin/python3 -c "
+import json, sys, time
+data = json.load(sys.stdin)
+idx = int(sys.argv[1])
+ws = sys.argv[2]
+for c in data['clones']:
+    if c['index'] == idx:
+        c['locked'] = True
+        c['workspace_id'] = ws
+        c['locked_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+        break
+json.dump(data, sys.stdout, indent=2)
+" "$idx" "$workspace_id" | write_pool "$pool_file"
+}
+
+unlock_clone() {
+  local pool_file="$1" idx="$2"
+  read_pool "$pool_file" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+idx = int(sys.argv[1])
+for c in data['clones']:
+    if c['index'] == idx:
+        c['locked'] = False
+        c['workspace_id'] = ''
+        c['locked_at'] = ''
+        break
+json.dump(data, sys.stdout, indent=2)
+" "$idx" | write_pool "$pool_file"
+}
+
+add_clone_entry() {
+  local pool_file="$1" idx="$2" branch="$3"
+  read_pool "$pool_file" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+idx = int(sys.argv[1])
+branch = sys.argv[2]
+data['clones'].append({
+    'index': idx,
+    'locked': False,
+    'workspace_id': '',
+    'locked_at': '',
+    'branch': branch
+})
+data['clones'].sort(key=lambda c: c['index'])
+json.dump(data, sys.stdout, indent=2)
+" "$idx" "$branch" | write_pool "$pool_file"
+}
+
+remove_clone_entry() {
+  local pool_file="$1" idx="$2"
+  read_pool "$pool_file" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+idx = int(sys.argv[1])
+data['clones'] = [c for c in data['clones'] if c['index'] != idx]
+json.dump(data, sys.stdout, indent=2)
+" "$idx" | write_pool "$pool_file"
+}
+
+create_clone() {
+  local proj="$1" idx="$2"
+  local prefix source_repo branch setup_cmd pool_file clone_path
+  prefix=$(get_clone_prefix "$proj")
+  source_repo=$(get_source_repo "$proj")
+  branch=$(get_project_branch "$proj")
+  setup_cmd=$(get_project_setup "$proj")
+  pool_file=$(get_pool_json_path "$proj")
+  clone_path=$(get_clone_path "$prefix" "$idx")
+
+  printf "Creating clone %02d at %s...\n" "$idx" "$clone_path"
+
+  # Clone with hardlinks (fast, minimal extra disk for git objects)
+  git clone --local "$source_repo" "$clone_path" --no-checkout -q
+  cd "$clone_path"
+
+  # Point remote at GitHub (local clone sets origin to filesystem path, breaking gh)
+  local github_url
+  github_url=$(git -C "$source_repo" remote get-url origin 2>/dev/null || echo "")
+  if [[ -n "$github_url" ]]; then
+    git remote set-url origin "$github_url"
+  fi
+
+  git checkout "$branch" -q
+
+  # Trust mise config so tools resolve correctly
+  mise trust "$clone_path/mise.toml" 2>/dev/null || true
+
+  # Symlink .claude credentials
+  mkdir -p .claude
+  if [[ -e "$source_repo/.claude/session" ]]; then
+    ln -sf "$source_repo/.claude/session" .claude/session
+  fi
+  if [[ -d "$source_repo/.claude/sessions" ]]; then
+    ln -sf "$source_repo/.claude/sessions" .claude/sessions
+  fi
+
+  # Run setup command if configured
+  if [[ -n "$setup_cmd" ]]; then
+    printf "  Running setup...\n"
+    (cd "$clone_path" && eval "$setup_cmd") 2>/dev/null || true
+  fi
+
+  add_clone_entry "$pool_file" "$idx" "$branch"
+  printf "  Clone %02d ready.\n" "$idx"
+}
+
+# Detect stale locks by checking if cmux workspace still exists
+cleanup_stale_locks() {
+  local pool_file="$1"
+  local active_workspaces
+  active_workspaces=$(cmux list-workspaces 2>/dev/null || echo "")
+
+  read_pool "$pool_file" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+active = sys.argv[1]
+changed = False
+for c in data['clones']:
+    if c.get('locked') and c.get('workspace_id'):
+        ws = c['workspace_id']
+        # Only check workspace refs (workspace:N) against cmux — skip here/panel locks
+        if ws.startswith('workspace:') and ws not in active:
+            c['locked'] = False
+            c['workspace_id'] = ''
+            c['locked_at'] = ''
+            changed = True
+            print(f\"  Auto-released clone {c['index']:02d} (workspace gone)\", file=sys.stderr)
+json.dump(data, sys.stdout, indent=2)
+" "$active_workspaces" | write_pool "$pool_file"
+}
+
+# --- task queue helpers ---
+
+ensure_tasks_json() {
+  local tasks_file="$1"
+  if [[ ! -f "$tasks_file" ]] || [[ ! -s "$tasks_file" ]]; then
+    echo '{"tasks":[]}' > "$tasks_file"
+  fi
+}
+
+read_tasks() {
+  local tasks_file="$1"
+  ensure_tasks_json "$tasks_file"
+  cat "$tasks_file"
+}
+
+write_tasks() {
+  local tasks_file="$1"
+  local tmp="${tasks_file}.tmp"
+  cat > "$tmp"
+  mv "$tmp" "$tasks_file"
+}
+
+acquire_task_lock() {
+  local tasks_file="$1"
+  local lock_dir="${tasks_file}.lock"
+  local max_wait=5 waited=0
+  while ! mkdir "$lock_dir" 2>/dev/null; do
+    sleep 0.1
+    waited=$((waited + 1))
+    if [[ $waited -ge $((max_wait * 10)) ]]; then
+      echo "Failed to acquire task lock" >&2
+      return 1
+    fi
+  done
+  trap "rm -rf '$lock_dir'" EXIT
+}
+
+release_task_lock() {
+  local tasks_file="$1"
+  local lock_dir="${tasks_file}.lock"
+  rm -rf "$lock_dir"
+}
+
+# --- project subcommand ---
+
+cmd_project() {
+  local subcmd="${1:-}"
+  shift || true
+
+  case "$subcmd" in
+    add)
+      local name="" source="" branch="main" prefix="" setup=""
+      while [[ $# -gt 0 ]]; do
+        case $1 in
+          --source) source="$2"; shift 2 ;;
+          --branch) branch="$2"; shift 2 ;;
+          --prefix) prefix="$2"; shift 2 ;;
+          --setup) setup="$2"; shift 2 ;;
+          *) name="$1"; shift ;;
+        esac
+      done
+      if [[ -z "$name" ]] || [[ -z "$source" ]]; then
+        echo "Usage: agent-pool project add <name> --source <path> [--branch <branch>] [--prefix <prefix>] [--setup \"<cmd>\"]"
+        exit 1
+      fi
+      [[ -z "$prefix" ]] && prefix="$name"
+      ensure_projects_json
+      read_projects | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+name = sys.argv[1]
+data['projects'][name] = {
+    'source': sys.argv[2],
+    'prefix': sys.argv[3],
+    'branch': sys.argv[4],
+    'setup': sys.argv[5] if sys.argv[5] else None
+}
+# If this is the first project, set as default
+if not data.get('default'):
+    data['default'] = name
+json.dump(data, sys.stdout, indent=2)
+" "$name" "$source" "$prefix" "$branch" "$setup" | write_projects
+      printf "Added project '%s' (source: %s, branch: %s, prefix: %s)\n" "$name" "$source" "$branch" "$prefix"
+      ;;
+
+    list)
+      ensure_projects_json
+      read_projects | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+default = data.get('default', '')
+projects = data.get('projects', {})
+if not projects:
+    print('  (no projects)')
+    sys.exit(0)
+print(f\"{'Name':<16} {'Prefix':<12} {'Branch':<12} {'Source'}\")
+print(f\"{'----':<16} {'------':<12} {'------':<12} {'------'}\")
+for name, p in projects.items():
+    marker = ' *' if name == default else ''
+    print(f\"{name + marker:<16} {p.get('prefix',''):<12} {p.get('branch',''):<12} {p.get('source','')}\")
+"
+      ;;
+
+    remove)
+      local name="${1:-}"
+      if [[ -z "$name" ]]; then
+        echo "Usage: agent-pool project remove <name>"
+        exit 1
+      fi
+      read_projects | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+name = sys.argv[1]
+if name in data.get('projects', {}):
+    del data['projects'][name]
+    if data.get('default') == name:
+        data['default'] = ''
+    print(f\"Removed project '{name}'\", file=sys.stderr)
+else:
+    print(f\"Project '{name}' not found\", file=sys.stderr)
+    sys.exit(1)
+json.dump(data, sys.stdout, indent=2)
+" "$name" | write_projects
+      ;;
+
+    default)
+      local name="${1:-}"
+      if [[ -z "$name" ]]; then
+        echo "Usage: agent-pool project default <name>"
+        exit 1
+      fi
+      read_projects | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+name = sys.argv[1]
+if name not in data.get('projects', {}):
+    print(f\"Project '{name}' not found\", file=sys.stderr)
+    sys.exit(1)
+data['default'] = name
+json.dump(data, sys.stdout, indent=2)
+" "$name" | write_projects
+      printf "Default project set to '%s'\n" "$name"
+      ;;
+
+    *)
+      echo "Usage: agent-pool project <add|list|remove|default> [args...]"
+      exit 1
+      ;;
+  esac
+}
+
+# --- commands ---
+
+cmd_init() {
+  local count=4 launch=false env_name="" no_queue=false launch_here=false skip_perms=false
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --launch) launch=true; shift ;;
+      --env) env_name="$2"; shift 2 ;;
+      --no-queue) no_queue=true; shift ;;
+      --here) launch_here=true; launch=true; shift ;;
+      --skip-permissions) skip_perms=true; shift ;;
+      [0-9]*) count="$1"; shift ;;
+      *) shift ;;
+    esac
+  done
+
+  local proj
+  proj=$(resolve_project)
+  local pool_file prefix
+  pool_file=$(get_pool_json_path "$proj")
+  prefix=$(get_clone_prefix "$proj")
+
+  ensure_pool_json "$pool_file"
+  printf "Initializing %d clones for project '%s'...\n" "$count" "$proj"
+
+  local start_idx created_indexes=()
+  start_idx=$(next_index "$pool_file")
+  for ((i = 0; i < count; i++)); do
+    local idx=$((start_idx + i + 1))
+    local clone_path
+    clone_path=$(get_clone_path "$prefix" "$idx")
+    if [[ -d "$clone_path" ]]; then
+      printf "  Clone %02d already exists, skipping.\n" "$idx"
+      local in_pool
+      in_pool=$(read_pool "$pool_file" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print('yes' if any(c['index'] == int(sys.argv[1]) for c in data['clones']) else 'no')
+" "$idx")
+      [[ "$in_pool" == "no" ]] && add_clone_entry "$pool_file" "$idx" "$(get_project_branch "$proj")"
+      created_indexes+=("$idx")
+      continue
+    fi
+    create_clone "$proj" "$idx"
+    created_indexes+=("$idx")
+  done
+
+  if [[ "$launch" == true ]] && [[ ${#created_indexes[@]} -gt 0 ]]; then
+    if [[ "$launch_here" == true ]]; then
+      launch_here_all "$proj" "$env_name" "$no_queue" "$skip_perms" "${created_indexes[@]}"
+    else
+      launch_grid "$proj" "${env_name}" "$no_queue" "$skip_perms" "${created_indexes[@]}"
+    fi
+  else
+    printf "Done. Run 'agent-pool status -p %s' to see pool.\n" "$proj"
+  fi
+}
+
+# Launch agents in a 2x2 grid layout (up to 4 per workspace)
+launch_grid() {
+  local proj="$1"; shift
+  local env_name="$1"; shift
+  local no_queue="$1"; shift
+  local skip_perms="$1"; shift
+  local indexes=("$@")
+  local total=${#indexes[@]}
+
+  local pool_file prefix branch
+  pool_file=$(get_pool_json_path "$proj")
+  prefix=$(get_clone_prefix "$proj")
+  branch=$(get_project_branch "$proj")
+
+  printf "Launching %d agents...\n" "$total"
+
+  # Process in groups of 4 (one workspace per group)
+  local group=0
+  while [[ $((group * 4)) -lt $total ]]; do
+    local start=$((group * 4))
+    local end=$((start + 4))
+    [[ $end -gt $total ]] && end=$total
+    local batch=("${indexes[@]:$start:$((end - start))}")
+    local batch_size=${#batch[@]}
+
+    local perms_flag=""
+    [[ "$skip_perms" == true ]] && perms_flag=" --dangerously-skip-permissions"
+    local runner_perms_flag=""
+    [[ "$skip_perms" == true ]] && runner_perms_flag=" --skip-permissions"
+
+    build_launch_cmd() {
+      local idx=$1 clone_path
+      clone_path=$(get_clone_path "$prefix" "$idx")
+      if [[ "$no_queue" == true ]]; then
+        cd "$clone_path"
+        git fetch origin -q 2>/dev/null || true
+        local branch_name="agent-$(printf '%02d' "$idx")-$(date +%s)"
+        git checkout -B "$branch_name" "origin/$branch" -q 2>/dev/null || git checkout -B "$branch_name" "$branch" -q
+        if [[ -n "$env_name" ]]; then
+          echo "cd $clone_path && ENV=$env_name nenv claude$perms_flag"
+        else
+          echo "cd $clone_path && claude$perms_flag"
+        fi
+      else
+        if [[ -n "$env_name" ]]; then
+          echo "cd $clone_path && $RUNNER_SCRIPT $idx --project $proj $env_name$runner_perms_flag"
+        else
+          echo "cd $clone_path && $RUNNER_SCRIPT $idx --project $proj$runner_perms_flag"
+        fi
+      fi
+    }
+
+    local first_idx=${batch[0]}
+    local first_cmd
+    first_cmd=$(build_launch_cmd "$first_idx")
+    local ws_output
+    ws_output=$(cmux new-workspace --command "$first_cmd" 2>&1)
+    local workspace_uuid
+    workspace_uuid=$(echo "$ws_output" | grep -oE '[0-9A-Fa-f-]{36}' | head -1 || true)
+
+    local ws_ref=""
+    if [[ -n "$workspace_uuid" ]]; then
+      ws_ref=$(cmux --id-format both list-workspaces 2>/dev/null | grep -F "$workspace_uuid" | grep -oE 'workspace:[0-9]+' | head -1 || true)
+      ws_ref="${ws_ref:-$workspace_uuid}"
+    fi
+    ws_ref="${ws_ref:-ws-grid-$(date +%s)}"
+
+    local first_surface
+    first_surface=$(cmux --json list-pane-surfaces --workspace "$ws_ref" 2>/dev/null | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print(data['surfaces'][0]['ref'])
+" 2>/dev/null || true)
+
+    lock_clone "$pool_file" "$first_idx" "$ws_ref"
+    local label
+    label=$(printf "Agent %02d" "$first_idx")
+    printf "  %s (top-left)\n" "$label"
+
+    if [[ $batch_size -ge 2 ]]; then
+      local second_idx=${batch[1]}
+      local second_cmd
+      second_cmd=$(build_launch_cmd "$second_idx")
+      local split_out
+      split_out=$(cmux --json new-split right --workspace "$ws_ref" --surface "$first_surface" 2>&1)
+      local second_surface
+      second_surface=$(echo "$split_out" | /usr/bin/python3 -c "import json,sys;print(json.load(sys.stdin)['surface_ref'])" 2>/dev/null || true)
+      if [[ -n "$second_surface" ]]; then
+        cmux send --workspace "$ws_ref" --surface "$second_surface" "$second_cmd\\n" 2>/dev/null || true
+      fi
+      lock_clone "$pool_file" "$second_idx" "$ws_ref"
+      label=$(printf "Agent %02d" "$second_idx")
+      printf "  %s (top-right)\n" "$label"
+    fi
+
+    if [[ $batch_size -ge 3 ]]; then
+      local third_idx=${batch[2]}
+      local third_cmd
+      third_cmd=$(build_launch_cmd "$third_idx")
+      split_out=$(cmux --json new-split down --workspace "$ws_ref" --surface "$first_surface" 2>&1)
+      local third_surface
+      third_surface=$(echo "$split_out" | /usr/bin/python3 -c "import json,sys;print(json.load(sys.stdin)['surface_ref'])" 2>/dev/null || true)
+      if [[ -n "$third_surface" ]]; then
+        cmux send --workspace "$ws_ref" --surface "$third_surface" "$third_cmd\\n" 2>/dev/null || true
+      fi
+      lock_clone "$pool_file" "$third_idx" "$ws_ref"
+      label=$(printf "Agent %02d" "$third_idx")
+      printf "  %s (bottom-left)\n" "$label"
+    fi
+
+    if [[ $batch_size -ge 4 ]]; then
+      local fourth_idx=${batch[3]}
+      local fourth_cmd
+      fourth_cmd=$(build_launch_cmd "$fourth_idx")
+      split_out=$(cmux --json new-split down --workspace "$ws_ref" --surface "$second_surface" 2>&1)
+      local fourth_surface
+      fourth_surface=$(echo "$split_out" | /usr/bin/python3 -c "import json,sys;print(json.load(sys.stdin)['surface_ref'])" 2>/dev/null || true)
+      if [[ -n "$fourth_surface" ]]; then
+        cmux send --workspace "$ws_ref" --surface "$fourth_surface" "$fourth_cmd\\n" 2>/dev/null || true
+      fi
+      lock_clone "$pool_file" "$fourth_idx" "$ws_ref"
+      label=$(printf "Agent %02d" "$fourth_idx")
+      printf "  %s (bottom-right)\n" "$label"
+    fi
+
+    if [[ $batch_size -eq 1 ]]; then
+      cmux rename-workspace --workspace "$ws_ref" "Agent $(printf '%02d' "$first_idx")" >/dev/null 2>&1 || true
+    else
+      local last_idx=${batch[$((batch_size - 1))]}
+      cmux rename-workspace --workspace "$ws_ref" "Agents $(printf '%02d' "$first_idx")-$(printf '%02d' "$last_idx")" >/dev/null 2>&1 || true
+    fi
+
+    group=$((group + 1))
+  done
+
+  printf "Done. %d agents launched.\n" "$total"
+}
+
+# Launch agents in the current workspace as splits (no new workspace tab)
+launch_here_all() {
+  local proj="$1"; shift
+  local env_name="$1"; shift
+  local no_queue="$1"; shift
+  local skip_perms="$1"; shift
+  local indexes=("$@")
+  local total=${#indexes[@]}
+
+  local pool_file prefix branch
+  pool_file=$(get_pool_json_path "$proj")
+  prefix=$(get_clone_prefix "$proj")
+  branch=$(get_project_branch "$proj")
+
+  printf "Launching %d agents in current workspace...\n" "$total"
+
+  local perms_flag=""
+  [[ "$skip_perms" == true ]] && perms_flag=" --dangerously-skip-permissions"
+  local runner_perms_flag=""
+  [[ "$skip_perms" == true ]] && runner_perms_flag=" --skip-permissions"
+
+  build_launch_cmd_here() {
+    local idx=$1 clone_path
+    clone_path=$(get_clone_path "$prefix" "$idx")
+    if [[ "$no_queue" == true ]]; then
+      cd "$clone_path"
+      git fetch origin -q 2>/dev/null || true
+      local branch_name="agent-$(printf '%02d' "$idx")-$(date +%s)"
+      git checkout -B "$branch_name" "origin/$branch" -q 2>/dev/null || git checkout -B "$branch_name" "$branch" -q
+      if [[ -n "$env_name" ]]; then
+        echo "cd $clone_path && ENV=$env_name nenv claude$perms_flag"
+      else
+        echo "cd $clone_path && claude$perms_flag"
+      fi
+    else
+      if [[ -n "$env_name" ]]; then
+        echo "cd $clone_path && $RUNNER_SCRIPT $idx --project $proj $env_name$runner_perms_flag"
+      else
+        echo "cd $clone_path && $RUNNER_SCRIPT $idx --project $proj$runner_perms_flag"
+      fi
+    fi
+  }
+
+  local first_idx=${indexes[0]}
+  local first_cmd
+  first_cmd=$(build_launch_cmd_here "$first_idx")
+  local split_out first_surface
+  split_out=$(cmux --json new-pane --direction right 2>&1)
+  first_surface=$(echo "$split_out" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for key in ('surface_ref', 'ref', 'surface'):
+    if key in data:
+        print(data[key]); sys.exit(0)
+" 2>/dev/null || true)
+  if [[ -n "$first_surface" ]]; then
+    cmux send --surface "$first_surface" "$first_cmd\\n" 2>/dev/null || true
+  fi
+  lock_clone "$pool_file" "$first_idx" "here-$(date +%s)"
+  printf "  Agent %02d (right)\n" "$first_idx"
+
+  if [[ $total -ge 2 ]]; then
+    local second_idx=${indexes[1]}
+    local second_cmd
+    second_cmd=$(build_launch_cmd_here "$second_idx")
+    split_out=$(cmux --json new-pane --direction down 2>&1)
+    local second_surface
+    second_surface=$(echo "$split_out" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for key in ('surface_ref', 'ref', 'surface'):
+    if key in data:
+        print(data[key]); sys.exit(0)
+" 2>/dev/null || true)
+    if [[ -n "$second_surface" ]]; then
+      cmux send --surface "$second_surface" "$second_cmd\\n" 2>/dev/null || true
+    fi
+    lock_clone "$pool_file" "$second_idx" "here-$(date +%s)"
+    printf "  Agent %02d (below)\n" "$second_idx"
+  fi
+
+  if [[ $total -ge 3 ]]; then
+    local third_idx=${indexes[2]}
+    local third_cmd
+    third_cmd=$(build_launch_cmd_here "$third_idx")
+    if [[ -n "$first_surface" ]]; then
+      split_out=$(cmux --json new-split down --surface "$first_surface" 2>&1)
+    else
+      split_out=$(cmux --json new-pane --direction down 2>&1)
+    fi
+    local third_surface
+    third_surface=$(echo "$split_out" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for key in ('surface_ref', 'ref', 'surface'):
+    if key in data:
+        print(data[key]); sys.exit(0)
+" 2>/dev/null || true)
+    if [[ -n "$third_surface" ]]; then
+      cmux send --surface "$third_surface" "$third_cmd\\n" 2>/dev/null || true
+    fi
+    lock_clone "$pool_file" "$third_idx" "here-$(date +%s)"
+    printf "  Agent %02d (split)\n" "$third_idx"
+  fi
+
+  if [[ $total -ge 4 ]]; then
+    local fourth_idx=${indexes[3]}
+    local fourth_cmd
+    fourth_cmd=$(build_launch_cmd_here "$fourth_idx")
+    if [[ -n "$second_surface" ]]; then
+      split_out=$(cmux --json new-split down --surface "$second_surface" 2>&1)
+    else
+      split_out=$(cmux --json new-pane --direction down 2>&1)
+    fi
+    local fourth_surface
+    fourth_surface=$(echo "$split_out" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for key in ('surface_ref', 'ref', 'surface'):
+    if key in data:
+        print(data[key]); sys.exit(0)
+" 2>/dev/null || true)
+    if [[ -n "$fourth_surface" ]]; then
+      cmux send --surface "$fourth_surface" "$fourth_cmd\\n" 2>/dev/null || true
+    fi
+    lock_clone "$pool_file" "$fourth_idx" "here-$(date +%s)"
+    printf "  Agent %02d (split)\n" "$fourth_idx"
+  fi
+
+  printf "Done. %d agents launched in current workspace.\n" "$total"
+}
+
+cmd_launch() {
+  local env_name="" mode="panel" direction="right" no_queue=false skip_perms=false
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --env) env_name="$2"; shift 2 ;;
+      --workspace) mode="workspace"; shift ;;
+      --here) mode="here"; shift ;;
+      --down) direction="down"; shift ;;
+      --right) direction="right"; shift ;;
+      --no-queue) no_queue=true; shift ;;
+      --skip-permissions) skip_perms=true; shift ;;
+      *) echo "Unknown option: $1"; exit 1 ;;
+    esac
+  done
+
+  local proj
+  proj=$(resolve_project)
+  local pool_file prefix branch
+  pool_file=$(get_pool_json_path "$proj")
+  prefix=$(get_clone_prefix "$proj")
+  branch=$(get_project_branch "$proj")
+
+  ensure_pool_json "$pool_file"
+  cleanup_stale_locks "$pool_file"
+
+  local idx
+  if ! idx=$(find_free_clone "$pool_file"); then
+    printf "No free clones. Creating a new one...\n"
+    idx=$(( $(next_index "$pool_file") + 1))
+    create_clone "$proj" "$idx"
+  fi
+
+  local clone_path
+  clone_path=$(get_clone_path "$prefix" "$idx")
+  local label
+  label=$(printf "Agent %02d" "$idx")
+
+  local perms_flag=""
+  [[ "$skip_perms" == true ]] && perms_flag=" --dangerously-skip-permissions"
+  local runner_perms_flag=""
+  [[ "$skip_perms" == true ]] && runner_perms_flag=" --skip-permissions"
+
+  local launch_cmd
+  if [[ "$no_queue" == true ]]; then
+    cd "$clone_path"
+    git fetch origin -q 2>/dev/null || true
+    local branch_name="agent-$(printf '%02d' "$idx")-$(date +%s)"
+    git checkout -B "$branch_name" "origin/$branch" -q 2>/dev/null || git checkout -B "$branch_name" "$branch" -q
+    launch_cmd="cd $clone_path"
+    if [[ -n "$env_name" ]]; then
+      launch_cmd="$launch_cmd && ENV=$env_name nenv claude$perms_flag"
+    else
+      launch_cmd="$launch_cmd && claude$perms_flag"
+    fi
+  else
+    launch_cmd="cd $clone_path"
+    if [[ -n "$env_name" ]]; then
+      launch_cmd="$launch_cmd && $RUNNER_SCRIPT $idx --project $proj $env_name$runner_perms_flag"
+    else
+      launch_cmd="$launch_cmd && $RUNNER_SCRIPT $idx --project $proj$runner_perms_flag"
+    fi
+  fi
+
+  local workspace_id=""
+
+  if [[ "$mode" == "here" ]]; then
+    lock_clone "$pool_file" "$idx" "here-$idx-$(date +%s)"
+    printf "Launched %s in %s\n" "$label" "$clone_path"
+    if [[ -n "$env_name" ]]; then
+      printf "  Environment: %s\n" "$env_name"
+    fi
+    cd "$clone_path"
+    if [[ "$no_queue" == true ]]; then
+      if [[ -n "$env_name" ]]; then
+        exec env ENV="$env_name" nenv claude$perms_flag
+      else
+        exec claude$perms_flag
+      fi
+    else
+      if [[ -n "$env_name" ]]; then
+        exec "$RUNNER_SCRIPT" "$idx" --project "$proj" "$env_name"$runner_perms_flag
+      else
+        exec "$RUNNER_SCRIPT" "$idx" --project "$proj"$runner_perms_flag
+      fi
+    fi
+  elif [[ "$mode" == "panel" ]]; then
+    local pane_output
+    pane_output=$(cmux --json new-pane --direction "$direction" 2>&1)
+    local surface_ref
+    surface_ref=$(echo "$pane_output" | /usr/bin/python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    for key in ('surface_ref', 'ref', 'surface'):
+        if key in data:
+            print(data[key])
+            sys.exit(0)
+except:
+    pass
+" 2>/dev/null || true)
+
+    if [[ -n "$surface_ref" ]]; then
+      cmux send --surface "$surface_ref" "$launch_cmd\\n" 2>/dev/null || true
+    else
+      sleep 0.3
+      cmux send "$launch_cmd\\n" 2>/dev/null || true
+    fi
+    workspace_id="panel-$idx-$(date +%s)"
+  else
+    local ws_output
+    ws_output=$(cmux new-workspace --command "$launch_cmd" 2>&1)
+    local workspace_uuid
+    workspace_uuid=$(echo "$ws_output" | grep -oE '[0-9A-Fa-f-]{36}' | head -1 || true)
+
+    if [[ -n "$workspace_uuid" ]]; then
+      workspace_id=$(cmux --id-format both list-workspaces 2>/dev/null | grep -F "$workspace_uuid" | grep -oE 'workspace:[0-9]+' | head -1 || true)
+      workspace_id="${workspace_id:-$workspace_uuid}"
+    fi
+    workspace_id="${workspace_id:-ws-$idx-$(date +%s)}"
+
+    cmux rename-workspace --workspace "$workspace_id" "$label" >/dev/null 2>&1 || true
+  fi
+
+  lock_clone "$pool_file" "$idx" "$workspace_id"
+
+  printf "Launched %s as %s in %s\n" "$label" "$mode" "$clone_path"
+  if [[ -n "$env_name" ]]; then
+    printf "  Environment: %s\n" "$env_name"
+  fi
+}
+
+cmd_status() {
+  local proj
+  proj=$(resolve_project)
+  local pool_file prefix
+  pool_file=$(get_pool_json_path "$proj")
+  prefix=$(get_clone_prefix "$proj")
+
+  ensure_pool_json "$pool_file"
+  cleanup_stale_locks "$pool_file" 2>/dev/null || true
+
+  printf "Project: %s\n" "$proj"
+  printf "%-8s %-12s %-20s %-10s\n" "Clone" "Status" "Branch" "Workspace"
+  printf "%-8s %-12s %-20s %-10s\n" "-----" "------" "------" "---------"
+
+  read_pool "$pool_file" | /usr/bin/python3 -c "
+import json, sys, os
+data = json.load(sys.stdin)
+pool_dir = sys.argv[1]
+prefix = sys.argv[2]
+if not data['clones']:
+    print('  (no clones — run agent-pool init -p <project>)')
+    sys.exit(0)
+for c in data['clones']:
+    idx = f\"{c['index']:02d}\"
+    status = 'LOCKED' if c.get('locked') else 'free'
+    clone_path = os.path.join(pool_dir, f'{prefix}-{idx}')
+    try:
+        import subprocess
+        branch = subprocess.check_output(
+            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+            cwd=clone_path, stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except:
+        branch = c.get('branch', '?')
+    ws = c.get('workspace_id', '') or '-'
+    print(f'{idx:<8} {status:<12} {branch:<20} {ws}')
+" "$POOL_DIR" "$prefix"
+}
+
+cmd_refresh() {
+  local target="$1"
+  local proj
+  proj=$(resolve_project)
+  local pool_file prefix branch
+  pool_file=$(get_pool_json_path "$proj")
+  prefix=$(get_clone_prefix "$proj")
+  branch=$(get_project_branch "$proj")
+
+  ensure_pool_json "$pool_file"
+
+  if [[ "$target" == "--all" ]]; then
+    local indexes
+    indexes=$(read_pool "$pool_file" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for c in data['clones']:
+    print(c['index'])
+")
+    for idx in $indexes; do
+      refresh_one "$proj" "$idx"
+    done
+  else
+    refresh_one "$proj" "$target"
+  fi
+  printf "Refresh complete.\n"
+}
+
+refresh_one() {
+  local proj="$1" idx="$2"
+  local pool_file prefix branch setup_cmd clone_path
+  pool_file=$(get_pool_json_path "$proj")
+  prefix=$(get_clone_prefix "$proj")
+  branch=$(get_project_branch "$proj")
+  setup_cmd=$(get_project_setup "$proj")
+  clone_path=$(get_clone_path "$prefix" "$idx")
+
+  if [[ ! -d "$clone_path" ]]; then
+    printf "  Clone %02d does not exist.\n" "$idx"
+    return 1
+  fi
+
+  printf "Refreshing clone %02d...\n" "$idx"
+  cd "$clone_path"
+
+  git fetch origin -q 2>/dev/null || true
+  git checkout "$branch" -q 2>/dev/null || true
+  git reset --hard "origin/$branch" -q 2>/dev/null || git reset --hard "$branch" -q
+  git clean -fd -q
+
+  # Delete agent branches
+  git branch | grep -E '^\s+agent-' | xargs -r git branch -D 2>/dev/null || true
+
+  # Run setup if configured
+  if [[ -n "$setup_cmd" ]]; then
+    (cd "$clone_path" && eval "$setup_cmd") 2>/dev/null || true
+  fi
+
+  unlock_clone "$pool_file" "$idx"
+  printf "  Clone %02d refreshed to %s.\n" "$idx" "$branch"
+}
+
+cmd_release() {
+  local idx=$1
+  if [[ -z "$idx" ]]; then
+    echo "Usage: agent-pool release <clone-number>"
+    exit 1
+  fi
+  local proj
+  proj=$(resolve_project)
+  local pool_file
+  pool_file=$(get_pool_json_path "$proj")
+  unlock_clone "$pool_file" "$idx"
+  printf "Clone %02d released.\n" "$idx"
+}
+
+cmd_restart() {
+  local skip_perms=false env_name=""
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --skip-permissions) skip_perms=true; shift ;;
+      --env) env_name="$2"; shift 2 ;;
+      *) echo "Unknown option: $1"; exit 1 ;;
+    esac
+  done
+
+  local proj
+  proj=$(resolve_project)
+  local pool_file prefix
+  pool_file=$(get_pool_json_path "$proj")
+  prefix=$(get_clone_prefix "$proj")
+
+  ensure_pool_json "$pool_file"
+
+  local clone_data
+  clone_data=$(read_pool "$pool_file" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for c in data['clones']:
+    if c.get('locked'):
+        print(f\"{c['index']}\t{c.get('workspace_id', '')}\")
+")
+
+  if [[ -z "$clone_data" ]]; then
+    printf "No locked clones to restart.\n"
+    return
+  fi
+
+  local -A ws_clones
+  local ws_order=()
+  while IFS=$'\t' read -r idx ws; do
+    if [[ -n "$ws" ]]; then
+      if [[ -z "${ws_clones[$ws]:-}" ]]; then
+        ws_order+=("$ws")
+      fi
+      ws_clones[$ws]="${ws_clones[$ws]:-} $idx"
+    fi
+  done <<< "$clone_data"
+
+  local runner_perms_flag=""
+  [[ "$skip_perms" == true ]] && runner_perms_flag=" --skip-permissions"
+
+  local restarted=0
+
+  for ws in "${ws_order[@]}"; do
+    local surfaces
+    surfaces=$(cmux --json list-pane-surfaces --workspace "$ws" 2>/dev/null | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for s in data.get('surfaces', []):
+    print(s['ref'])
+" 2>/dev/null || true)
+
+    if [[ -z "$surfaces" ]]; then
+      printf "  Warning: no surfaces found for workspace %s, skipping\n" "$ws"
+      continue
+    fi
+
+    local idxs
+    read -ra idxs <<< "${ws_clones[$ws]}"
+    local i=0
+    while IFS= read -r surface; do
+      if [[ $i -ge ${#idxs[@]} ]]; then
+        break
+      fi
+      local clone_idx=${idxs[$i]}
+      local clone_path
+      clone_path=$(get_clone_path "$prefix" "$clone_idx")
+      local runner_cmd
+      if [[ -n "$env_name" ]]; then
+        runner_cmd="cd $clone_path && $RUNNER_SCRIPT $clone_idx --project $proj $env_name$runner_perms_flag"
+      else
+        runner_cmd="cd $clone_path && $RUNNER_SCRIPT $clone_idx --project $proj$runner_perms_flag"
+      fi
+
+      cmux send --surface "$surface" "\x03" 2>/dev/null || true
+      sleep 0.3
+      cmux send --surface "$surface" "\x03" 2>/dev/null || true
+      sleep 0.5
+      cmux send --surface "$surface" "$runner_cmd\\n" 2>/dev/null || true
+
+      printf "  Restarted agent-%02d on %s\n" "$clone_idx" "$surface"
+      restarted=$((restarted + 1))
+      i=$((i + 1))
+    done <<< "$surfaces"
+  done
+
+  printf "Restarted %d agents.\n" "$restarted"
+}
+
+cmd_destroy() {
+  local proj
+  proj=$(resolve_project)
+  local pool_file prefix
+  pool_file=$(get_pool_json_path "$proj")
+  prefix=$(get_clone_prefix "$proj")
+
+  printf "Destroying all clones for project '%s'...\n" "$proj"
+  read_pool "$pool_file" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for c in data['clones']:
+    print(c['index'])
+" | while read -r idx; do
+    local clone_path
+    clone_path=$(get_clone_path "$prefix" "$idx")
+    if [[ -d "$clone_path" ]]; then
+      printf "  Removing %s...\n" "$clone_path"
+      rm -rf "$clone_path"
+    fi
+  done
+  echo '{"clones":[]}' > "$pool_file"
+  printf "All clones for '%s' destroyed.\n" "$proj"
+}
+
+cmd_add() {
+  local status="pending" prompt=""
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --backlog) status="backlogged"; shift ;;
+      *) prompt="$1"; shift ;;
+    esac
+  done
+  if [[ -z "$prompt" ]]; then
+    echo "Usage: agent-pool add [--backlog] \"<prompt>\""
+    exit 1
+  fi
+
+  local proj
+  proj=$(resolve_project)
+  local tasks_file
+  tasks_file=$(get_tasks_json_path "$proj")
+
+  ensure_tasks_json "$tasks_file"
+  acquire_task_lock "$tasks_file"
+  read_tasks "$tasks_file" | /usr/bin/python3 -c "
+import json, sys, time
+data = json.load(sys.stdin)
+task = {
+    'id': 't-' + str(int(time.time())),
+    'prompt': sys.argv[1],
+    'status': sys.argv[2],
+    'claimed_by': None,
+    'created_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+    'started_at': None,
+    'completed_at': None
+}
+data['tasks'].append(task)
+json.dump(data, sys.stdout, indent=2)
+print(f\"Added task {task['id']} ({task['status']})\", file=sys.stderr)
+" "$prompt" "$status" | write_tasks "$tasks_file"
+  release_task_lock "$tasks_file"
+}
+
+cmd_tasks() {
+  local proj
+  proj=$(resolve_project)
+  local tasks_file
+  tasks_file=$(get_tasks_json_path "$proj")
+
+  ensure_tasks_json "$tasks_file"
+  read_tasks "$tasks_file" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+if not data['tasks']:
+    print('  (no tasks)')
+    sys.exit(0)
+colors = {
+    'pending': '\033[33m',
+    'in_progress': '\033[36m',
+    'completed': '\033[32m',
+    'blocked': '\033[31m',
+    'backlogged': '\033[90m',
+}
+reset = '\033[0m'
+print(f\"{'ID':<18} {'Status':<14} {'Claimed By':<12} {'Prompt'}\")
+print(f\"{'--':<18} {'------':<14} {'----------':<12} {'------'}\")
+for t in data['tasks']:
+    s = t['status']
+    color = colors.get(s, '')
+    claimed = t.get('claimed_by') or '-'
+    prompt = t['prompt'][:60] + ('...' if len(t['prompt']) > 60 else '')
+    print(f\"{t['id']:<18} {color}{s:<14}{reset} {claimed:<12} {prompt}\")
+"
+}
+
+cmd_unblock() {
+  local task_id="${1:-}"
+  if [[ -z "$task_id" ]]; then
+    echo "Usage: agent-pool unblock <task-id>"
+    exit 1
+  fi
+  local proj
+  proj=$(resolve_project)
+  local tasks_file
+  tasks_file=$(get_tasks_json_path "$proj")
+
+  ensure_tasks_json "$tasks_file"
+  acquire_task_lock "$tasks_file"
+  read_tasks "$tasks_file" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+tid = sys.argv[1]
+found = False
+for t in data['tasks']:
+    if t['id'] == tid:
+        if t['status'] != 'blocked':
+            print(f\"Task {tid} is {t['status']}, not blocked.\", file=sys.stderr)
+            sys.exit(1)
+        t['status'] = 'pending'
+        t['claimed_by'] = None
+        t['started_at'] = None
+        t['completed_at'] = None
+        found = True
+        print(f'Unblocked {tid} → pending', file=sys.stderr)
+        break
+if not found:
+    print(f'Task {tid} not found', file=sys.stderr)
+    sys.exit(1)
+json.dump(data, sys.stdout, indent=2)
+" "$task_id" | write_tasks "$tasks_file"
+  release_task_lock "$tasks_file"
+}
+
+cmd_backlog() {
+  local task_id="${1:-}"
+  if [[ -z "$task_id" ]]; then
+    echo "Usage: agent-pool backlog <task-id>"
+    exit 1
+  fi
+  local proj
+  proj=$(resolve_project)
+  local tasks_file
+  tasks_file=$(get_tasks_json_path "$proj")
+
+  ensure_tasks_json "$tasks_file"
+  acquire_task_lock "$tasks_file"
+  read_tasks "$tasks_file" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+tid = sys.argv[1]
+for t in data['tasks']:
+    if t['id'] == tid:
+        t['status'] = 'backlogged'
+        t['claimed_by'] = None
+        print(f'Backlogged {tid}', file=sys.stderr)
+        break
+else:
+    print(f'Task {tid} not found', file=sys.stderr)
+    sys.exit(1)
+json.dump(data, sys.stdout, indent=2)
+" "$task_id" | write_tasks "$tasks_file"
+  release_task_lock "$tasks_file"
+}
+
+cmd_activate() {
+  local task_id="${1:-}"
+  if [[ -z "$task_id" ]]; then
+    echo "Usage: agent-pool activate <task-id>"
+    exit 1
+  fi
+  local proj
+  proj=$(resolve_project)
+  local tasks_file
+  tasks_file=$(get_tasks_json_path "$proj")
+
+  ensure_tasks_json "$tasks_file"
+  acquire_task_lock "$tasks_file"
+  read_tasks "$tasks_file" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+tid = sys.argv[1]
+for t in data['tasks']:
+    if t['id'] == tid:
+        if t['status'] != 'backlogged':
+            print(f\"Task {tid} is {t['status']}, not backlogged.\", file=sys.stderr)
+            sys.exit(1)
+        t['status'] = 'pending'
+        print(f'Activated {tid} → pending', file=sys.stderr)
+        break
+else:
+    print(f'Task {tid} not found', file=sys.stderr)
+    sys.exit(1)
+json.dump(data, sys.stdout, indent=2)
+" "$task_id" | write_tasks "$tasks_file"
+  release_task_lock "$tasks_file"
+}
+
+cmd_help() {
+  cat <<'HELP'
+agent-pool — manage a warm pool of isolated repo clones for parallel Claude sessions
+
+Commands:
+  project add <name>    Register a new project
+                          --source PATH     Source git repository (required)
+                          --branch BRANCH   Default branch (default: main)
+                          --prefix PREFIX   Clone directory prefix (default: name)
+                          --setup "CMD"     Post-clone setup command
+  project list          List all registered projects
+  project remove <name> Remove a project
+  project default <name> Set the default project
+
+  init [n]              Create n warm clones (default: 4)
+                          --launch     Also launch all clones in 2x2 grid(s)
+                          --here       Launch as splits in current workspace
+                          --no-queue   Launch claude directly (skip task runner)
+                          --env NAME   Inject env vars via nenv
+                          --skip-permissions  Pass --dangerously-skip-permissions to claude
+  launch [opts]         Pick a free clone, launch agent runner in a panel
+                          --here       Launch in current terminal (replaces shell)
+                          --workspace  Open as new workspace tab instead
+                          --no-queue   Launch claude directly (skip task runner)
+                          --down       Split downward instead of right
+                          --right      Split rightward (default)
+                          --env NAME   Inject env vars via nenv
+                          --skip-permissions  Pass --dangerously-skip-permissions to claude
+  status                Show all clones and their state
+
+  Task Queue:
+  add "<prompt>"        Add a pending task to the queue
+                          --backlog    Add as backlogged instead
+  tasks                 List all tasks with status
+  unblock <id>          Move blocked → pending
+  backlog <id>          Move any → backlogged
+  activate <id>         Move backlogged → pending
+
+  Maintenance:
+  refresh <n|--all>     Reset clone(s) to project branch, clean branches, run setup
+  release <n>           Manually free a locked clone
+  restart [opts]        Kill and relaunch all agents in their current panels
+                          --skip-permissions  Pass --dangerously-skip-permissions to claude
+                          --env NAME          Inject env vars via nenv
+  destroy               Remove all clones for a project
+  help                  Show this help
+
+Global flags:
+  -p, --project NAME    Specify which project to operate on
+HELP
+}
+
+# --- main ---
+
+# Parse global flags before command
+PROJECT=""
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -p|--project) PROJECT="$2"; shift 2 ;;
+    *) break ;;
+  esac
+done
+
+cmd="${1:-help}"
+shift || true
+
+# Parse -p/--project after command too (for convenience)
+REMAINING_ARGS=()
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -p|--project) PROJECT="$2"; shift 2 ;;
+    *) REMAINING_ARGS+=("$1"); shift ;;
+  esac
+done
+set -- "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
+
+# Auto-migrate before any command
+auto_migrate
+
+case "$cmd" in
+  project)  cmd_project "$@" ;;
+  init)     cmd_init "$@" ;;
+  launch)   cmd_launch "$@" ;;
+  status)   cmd_status "$@" ;;
+  add)      cmd_add "$@" ;;
+  tasks)    cmd_tasks "$@" ;;
+  unblock)  cmd_unblock "$@" ;;
+  backlog)  cmd_backlog "$@" ;;
+  activate) cmd_activate "$@" ;;
+  refresh)  cmd_refresh "$@" ;;
+  release)  cmd_release "$@" ;;
+  restart)  cmd_restart "$@" ;;
+  destroy)  cmd_destroy "$@" ;;
+  help|--help|-h) cmd_help ;;
+  *) echo "Unknown command: $cmd"; cmd_help; exit 1 ;;
+esac

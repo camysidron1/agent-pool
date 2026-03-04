@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Agent runner — polls tasks-<project>.json, claims pending tasks, runs claude -p
+# Usage: agent-runner.sh <clone-index> [--project <name>] [env-name] [--skip-permissions]
+#        agent-runner.sh --resolve-tasks-path --project <name>
+#        agent-runner.sh --resolve-clone-path --project <name> --index <n>
+
+POOL_DIR="${POOL_DIR:-$HOME/.agent-pool}"
+PROJECTS_JSON="$POOL_DIR/projects.json"
+
+# --- resolve helpers (can be called standalone for testing) ---
+
+resolve_runner_project() {
+  local proj="$1"
+  if [[ -z "$proj" ]]; then
+    # Fall back to default project
+    proj=$(/usr/bin/python3 -c "
+import json
+with open('$PROJECTS_JSON') as f:
+    data = json.load(f)
+print(data.get('default', ''))
+" 2>/dev/null || true)
+  fi
+  echo "$proj"
+}
+
+get_runner_project_field() {
+  local proj="$1" field="$2"
+  /usr/bin/python3 -c "
+import json, sys
+with open('$PROJECTS_JSON') as f:
+    data = json.load(f)
+p = data.get('projects', {}).get(sys.argv[1], {})
+val = p.get(sys.argv[2], '')
+print('' if val is None else val)
+" "$proj" "$field" 2>/dev/null || true
+}
+
+# --- parse args ---
+
+CLONE_INDEX=""
+PROJECT_NAME=""
+SKIP_PERMS=false
+ENV_NAME=""
+RESOLVE_MODE=""
+RESOLVE_INDEX=""
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --project) PROJECT_NAME="$2"; shift 2 ;;
+    --skip-permissions) SKIP_PERMS=true; shift ;;
+    --resolve-tasks-path) RESOLVE_MODE="tasks"; shift ;;
+    --resolve-clone-path) RESOLVE_MODE="clone"; shift ;;
+    --index) RESOLVE_INDEX="$2"; shift 2 ;;
+    [0-9]*) [[ -z "$CLONE_INDEX" ]] && CLONE_INDEX="$1"; shift ;;
+    *) [[ -z "$ENV_NAME" ]] && ENV_NAME="$1"; shift ;;
+  esac
+done
+
+PROJECT_NAME=$(resolve_runner_project "$PROJECT_NAME")
+
+# Handle resolve modes (for testing)
+if [[ "$RESOLVE_MODE" == "tasks" ]]; then
+  echo "$POOL_DIR/tasks-${PROJECT_NAME}.json"
+  exit 0
+fi
+if [[ "$RESOLVE_MODE" == "clone" ]]; then
+  prefix=$(get_runner_project_field "$PROJECT_NAME" "prefix")
+  printf '%s/%s-%02d\n' "$POOL_DIR" "$prefix" "$RESOLVE_INDEX"
+  exit 0
+fi
+
+# Normal runner mode requires clone index
+if [[ -z "$CLONE_INDEX" ]]; then
+  echo "Usage: agent-runner.sh <clone-index> [--project <name>] [env-name] [--skip-permissions]" >&2
+  exit 1
+fi
+
+# Derive paths from project config
+PREFIX=$(get_runner_project_field "$PROJECT_NAME" "prefix")
+BRANCH=$(get_runner_project_field "$PROJECT_NAME" "branch")
+TASKS_JSON="$POOL_DIR/tasks-${PROJECT_NAME}.json"
+LOCK_DIR="$TASKS_JSON.lock"
+AGENT_ID="agent-$(printf '%02d' "$CLONE_INDEX")"
+CLONE_PATH="$POOL_DIR/${PREFIX}-$(printf '%02d' "$CLONE_INDEX")"
+
+poll_interval=3
+
+acquire_lock() {
+  local max_wait=50  # 5 seconds at 0.1s intervals
+  local waited=0
+  while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+    sleep 0.1
+    waited=$((waited + 1))
+    if [[ $waited -ge $max_wait ]]; then
+      return 1
+    fi
+  done
+}
+
+release_lock() {
+  rm -rf "$LOCK_DIR"
+}
+
+claim_task() {
+  acquire_lock || return 1
+  local result
+  result=$(/usr/bin/python3 -c "
+import json, sys, time
+with open('$TASKS_JSON', 'r') as f:
+    data = json.load(f)
+for t in data['tasks']:
+    if t['status'] == 'pending':
+        t['status'] = 'in_progress'
+        t['claimed_by'] = '$AGENT_ID'
+        t['started_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+        with open('$TASKS_JSON', 'w') as f:
+            json.dump(data, f, indent=2)
+        print(t['id'] + '\n' + t['prompt'])
+        sys.exit(0)
+sys.exit(1)
+" 2>/dev/null) || { release_lock; return 1; }
+  release_lock
+  echo "$result"
+}
+
+mark_task() {
+  local task_id=$1 new_status=$2
+  acquire_lock || return 1
+  /usr/bin/python3 -c "
+import json, sys, time
+with open('$TASKS_JSON', 'r') as f:
+    data = json.load(f)
+for t in data['tasks']:
+    if t['id'] == sys.argv[1]:
+        t['status'] = sys.argv[2]
+        if sys.argv[2] in ('completed', 'blocked'):
+            t['completed_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+        break
+with open('$TASKS_JSON', 'w') as f:
+    json.dump(data, f, indent=2)
+" "$task_id" "$new_status"
+  release_lock
+}
+
+printf "\033[1;36m%s\033[0m ready — polling for tasks (project: %s)...\n" "$AGENT_ID" "$PROJECT_NAME"
+
+while true; do
+  result=$(claim_task 2>/dev/null) || {
+    sleep "$poll_interval"
+    continue
+  }
+
+  task_id=$(echo "$result" | head -1)
+  prompt=$(echo "$result" | tail -n +2)
+
+  printf "\033[1;33m%s\033[0m claimed task %s\n" "$AGENT_ID" "$task_id"
+
+  # Checkout fresh branch from project branch
+  cd "$CLONE_PATH"
+  git fetch origin -q 2>/dev/null || true
+  local_branch="${AGENT_ID}-${task_id}"
+  git checkout -B "$local_branch" "origin/$BRANCH" -q 2>/dev/null || git checkout -B "$local_branch" "$BRANCH" -q
+
+  # Run claude interactively with the task prompt
+  claude_args=("$prompt")
+  [[ "$SKIP_PERMS" == true ]] && claude_args+=(--dangerously-skip-permissions)
+
+  set +e
+  if [[ -n "$ENV_NAME" ]]; then
+    ENV="$ENV_NAME" nenv claude "${claude_args[@]}"
+  else
+    claude "${claude_args[@]}"
+  fi
+  exit_code=$?
+  set -e
+
+  if [[ $exit_code -eq 0 ]]; then
+    mark_task "$task_id" "completed"
+    printf "\033[1;32m%s\033[0m completed task %s\n" "$AGENT_ID" "$task_id"
+  else
+    mark_task "$task_id" "blocked"
+    printf "\033[1;31m%s\033[0m blocked on task %s (exit %d)\n" "$AGENT_ID" "$task_id" "$exit_code"
+  fi
+
+  printf "\033[1;36m%s\033[0m polling for next task...\n" "$AGENT_ID"
+done

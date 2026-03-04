@@ -1,0 +1,23 @@
+# Clone directories (managed by agent-pool)
+nebari-*/
+apool-*/
+
+# Per-project state files
+pool-*.json
+tasks-*.json
+
+# Legacy state files
+pool.json
+tasks.json
+
+# Lock files
+*.lock/
+
+# Temp files
+*.tmp
+
+# cmux layout
+layout.json
+
+# Claude credentials
+.claude/
