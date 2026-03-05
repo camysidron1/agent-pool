@@ -137,6 +137,10 @@ for t in data['tasks']:
         t['status'] = sys.argv[2]
         if sys.argv[2] in ('completed', 'blocked'):
             t['completed_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+        if sys.argv[2] in ('pending', 'backlogged'):
+            t['claimed_by'] = ''
+            t.pop('started_at', None)
+            t.pop('completed_at', None)
         break
 with open('$TASKS_JSON', 'w') as f:
     json.dump(data, f, indent=2)
@@ -236,8 +240,30 @@ while true; do
     mark_task "$task_id" "completed"
     printf "\033[1;32m%s\033[0m completed task %s\n" "$AGENT_ID" "$task_id"
   else
-    mark_task "$task_id" "blocked"
-    printf "\033[1;31m%s\033[0m blocked on task %s (exit %d)\n" "$AGENT_ID" "$task_id" "$exit_code"
+    printf "\n\033[1;33m%s\033[0m exited with code %d on task %s\n" "$AGENT_ID" "$exit_code" "$task_id"
+    printf "  Mark task as:\n"
+    printf "  \033[1mc\033[0m) completed   \033[1mb\033[0m) blocked   \033[1mp\033[0m) pending (retry)   \033[1mk\033[0m) backlogged\n"
+    printf "  > "
+    local choice=""
+    read -r choice </dev/tty 2>/dev/null || choice="b"
+    case "$choice" in
+      c|completed)
+        mark_task "$task_id" "completed"
+        printf "\033[1;32m%s\033[0m marked task %s as completed\n" "$AGENT_ID" "$task_id"
+        ;;
+      p|pending)
+        mark_task "$task_id" "pending"
+        printf "\033[1;36m%s\033[0m returned task %s to pending (will be retried)\n" "$AGENT_ID" "$task_id"
+        ;;
+      k|backlog|backlogged)
+        mark_task "$task_id" "backlogged"
+        printf "\033[1;35m%s\033[0m backlogged task %s\n" "$AGENT_ID" "$task_id"
+        ;;
+      *)
+        mark_task "$task_id" "blocked"
+        printf "\033[1;31m%s\033[0m blocked on task %s\n" "$AGENT_ID" "$task_id"
+        ;;
+    esac
   fi
 
   printf "\033[1;36m%s\033[0m polling for next task...\n" "$AGENT_ID"
