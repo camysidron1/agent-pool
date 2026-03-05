@@ -374,7 +374,7 @@ test_destroy_project() {
   "$AGENT_POOL" init 2 -p foo
   "$AGENT_POOL" init 2 -p bar
 
-  "$AGENT_POOL" destroy -p foo
+  echo y | "$AGENT_POOL" destroy -p foo
 
   # foo clones gone
   [[ ! -d "$TEST_DIR/foo-00" ]] || { echo "    FAIL: foo-00 should be removed"; return 1; }
@@ -886,6 +886,893 @@ test_refresh_preserves_docs() {
   assert_file_exists "$TEST_DIR/docs/shared/lessons.md" "shared docs should survive refresh"
 }
 
+# --- task state machine tests ---
+
+test_add_backlog_flag() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" add --backlog "backlogged task" -p foo
+  local status
+  status=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/tasks-foo.json') as f:
+    data = json.load(f)
+print(data['tasks'][0]['status'])
+")
+  assert_eq "backlogged" "$status" "task should be backlogged"
+}
+
+test_task_id_format() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" add "test task" -p foo
+  local task_id
+  task_id=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/tasks-foo.json') as f:
+    data = json.load(f)
+print(data['tasks'][0]['id'])
+")
+  [[ "$task_id" =~ ^t-[0-9]+$ ]] || { echo "    FAIL: task id '$task_id' doesn't match t-<timestamp>"; return 1; }
+}
+
+_add_task_with_status() {
+  # Helper: directly write a task with a given status to tasks file
+  local tasks_file="$1" task_id="$2" status="$3" claimed_by="${4:-}"
+  /usr/bin/python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+except:
+    data = {'tasks': []}
+data['tasks'].append({
+    'id': sys.argv[2],
+    'prompt': 'test prompt',
+    'status': sys.argv[3],
+    'claimed_by': sys.argv[4] if sys.argv[4] else None,
+    'created_at': '2026-01-01T00:00:00',
+    'started_at': '2026-01-01T00:01:00' if sys.argv[3] in ('in_progress','blocked','completed') else None,
+    'completed_at': '2026-01-01T00:02:00' if sys.argv[3] in ('blocked','completed') else None
+})
+with open(sys.argv[1], 'w') as f:
+    json.dump(data, f, indent=2)
+" "$tasks_file" "$task_id" "$status" "$claimed_by"
+}
+
+test_unblock_blocked_task() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  local tasks_file="$TEST_DIR/tasks-foo.json"
+  _add_task_with_status "$tasks_file" "t-100" "blocked" "agent-01"
+
+  "$AGENT_POOL" unblock t-100 -p foo 2>&1
+
+  local status claimed
+  status=$(/usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+print(data['tasks'][0]['status'])
+")
+  claimed=$(/usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+print(data['tasks'][0]['claimed_by'])
+")
+  assert_eq "pending" "$status" "task should be pending after unblock"
+  assert_eq "None" "$claimed" "claimed_by should be cleared"
+}
+
+test_unblock_not_blocked() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  local tasks_file="$TEST_DIR/tasks-foo.json"
+  _add_task_with_status "$tasks_file" "t-101" "pending"
+
+  if "$AGENT_POOL" unblock t-101 -p foo 2>&1; then
+    echo "    FAIL: expected non-zero exit for non-blocked task"
+    return 1
+  fi
+}
+
+test_unblock_not_found() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  echo '{"tasks":[]}' > "$TEST_DIR/tasks-foo.json"
+
+  if "$AGENT_POOL" unblock t-999 -p foo 2>&1; then
+    echo "    FAIL: expected non-zero exit for missing task"
+    return 1
+  fi
+}
+
+test_backlog_task() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  local tasks_file="$TEST_DIR/tasks-foo.json"
+  _add_task_with_status "$tasks_file" "t-200" "in_progress" "agent-02"
+
+  "$AGENT_POOL" backlog t-200 -p foo 2>&1
+
+  local status claimed
+  status=$(/usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+print(data['tasks'][0]['status'])
+")
+  claimed=$(/usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+print(data['tasks'][0]['claimed_by'])
+")
+  assert_eq "backlogged" "$status" "task should be backlogged"
+  assert_eq "None" "$claimed" "claimed_by should be cleared"
+}
+
+test_backlog_not_found() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  echo '{"tasks":[]}' > "$TEST_DIR/tasks-foo.json"
+
+  if "$AGENT_POOL" backlog t-999 -p foo 2>&1; then
+    echo "    FAIL: expected non-zero exit for missing task"
+    return 1
+  fi
+}
+
+test_activate_backlogged() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  local tasks_file="$TEST_DIR/tasks-foo.json"
+  _add_task_with_status "$tasks_file" "t-300" "backlogged"
+
+  "$AGENT_POOL" activate t-300 -p foo 2>&1
+
+  local status
+  status=$(/usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+print(data['tasks'][0]['status'])
+")
+  assert_eq "pending" "$status" "task should be pending after activate"
+}
+
+test_activate_not_backlogged() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  local tasks_file="$TEST_DIR/tasks-foo.json"
+  _add_task_with_status "$tasks_file" "t-301" "pending"
+
+  if "$AGENT_POOL" activate t-301 -p foo 2>&1; then
+    echo "    FAIL: expected non-zero exit for non-backlogged task"
+    return 1
+  fi
+}
+
+test_activate_not_found() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  echo '{"tasks":[]}' > "$TEST_DIR/tasks-foo.json"
+
+  if "$AGENT_POOL" activate t-999 -p foo 2>&1; then
+    echo "    FAIL: expected non-zero exit for missing task"
+    return 1
+  fi
+}
+
+# --- approval hook allowlist tests ---
+
+test_hook_allows_read_tools() {
+  mkdir -p "$TEST_DIR/approvals"
+  mkdir -p "$TEST_DIR/test-clone"
+  local hook_script="$SCRIPT_DIR/hooks/approval-hook.sh"
+
+  for tool in Read Glob Grep Agent ToolSearch WebFetch WebSearch; do
+    local exit_code=0
+    (
+      cd "$TEST_DIR/test-clone"
+      echo "{\"tool_name\":\"$tool\",\"tool_input\":{},\"session_id\":\"s1\",\"hook_event_name\":\"PreToolUse\"}" \
+        | "$hook_script"
+    ) 2>/dev/null || exit_code=$?
+    assert_eq "0" "$exit_code" "$tool should be allowed (exit 0)"
+  done
+
+  # No request files should have been created
+  local req_count
+  req_count=$(ls "$TEST_DIR/approvals"/req-*.json 2>/dev/null | wc -l | tr -d ' ')
+  assert_eq "0" "$req_count" "no request files should be created for allowed tools"
+}
+
+test_hook_allows_task_tools() {
+  mkdir -p "$TEST_DIR/approvals"
+  mkdir -p "$TEST_DIR/test-clone"
+  local hook_script="$SCRIPT_DIR/hooks/approval-hook.sh"
+
+  for tool in TaskCreate TaskGet TaskList TaskOutput TaskUpdate TaskStop Skill EnterPlanMode ExitPlanMode; do
+    local exit_code=0
+    (
+      cd "$TEST_DIR/test-clone"
+      echo "{\"tool_name\":\"$tool\",\"tool_input\":{},\"session_id\":\"s1\",\"hook_event_name\":\"PreToolUse\"}" \
+        | "$hook_script"
+    ) 2>/dev/null || exit_code=$?
+    assert_eq "0" "$exit_code" "$tool should be allowed (exit 0)"
+  done
+}
+
+test_hook_blocks_write_tool() {
+  mkdir -p "$TEST_DIR/approvals"
+  mkdir -p "$TEST_DIR/ap-10"
+  local hook_script="$SCRIPT_DIR/hooks/approval-hook.sh"
+
+  # Run hook in background — it will block waiting for approval
+  (
+    cd "$TEST_DIR/ap-10"
+    echo '{"tool_name":"Write","tool_input":{"file_path":"/tmp/x","content":"y"},"session_id":"s1","hook_event_name":"PreToolUse"}' \
+      | "$hook_script" &
+    HOOK_PID=$!
+    sleep 2
+    kill $HOOK_PID 2>/dev/null || true
+  ) &>/dev/null &
+  local outer_pid=$!
+  sleep 3
+  kill "$outer_pid" 2>/dev/null || true
+  wait "$outer_pid" 2>/dev/null || true
+
+  local req_files=("$TEST_DIR/approvals"/req-*-ap-10.json)
+  [[ -f "${req_files[0]}" ]] || { echo "    FAIL: Write tool should create request file"; return 1; }
+
+  local tool
+  tool=$(jq -r '.tool' "${req_files[0]}")
+  assert_eq "Write" "$tool"
+  rm -f "${req_files[0]}"
+}
+
+test_hook_blocks_edit_tool() {
+  mkdir -p "$TEST_DIR/approvals"
+  mkdir -p "$TEST_DIR/ap-11"
+  local hook_script="$SCRIPT_DIR/hooks/approval-hook.sh"
+
+  (
+    cd "$TEST_DIR/ap-11"
+    echo '{"tool_name":"Edit","tool_input":{"file_path":"/tmp/x"},"session_id":"s1","hook_event_name":"PreToolUse"}' \
+      | "$hook_script" &
+    HOOK_PID=$!
+    sleep 2
+    kill $HOOK_PID 2>/dev/null || true
+  ) &>/dev/null &
+  local outer_pid=$!
+  sleep 3
+  kill "$outer_pid" 2>/dev/null || true
+  wait "$outer_pid" 2>/dev/null || true
+
+  local req_files=("$TEST_DIR/approvals"/req-*-ap-11.json)
+  [[ -f "${req_files[0]}" ]] || { echo "    FAIL: Edit tool should create request file"; return 1; }
+
+  local tool
+  tool=$(jq -r '.tool' "${req_files[0]}")
+  assert_eq "Edit" "$tool"
+  rm -f "${req_files[0]}"
+}
+
+test_hook_allows_bash_finish() {
+  mkdir -p "$TEST_DIR/approvals"
+  mkdir -p "$TEST_DIR/test-clone"
+  local hook_script="$SCRIPT_DIR/hooks/approval-hook.sh"
+
+  local exit_code=0
+  (
+    cd "$TEST_DIR/test-clone"
+    echo '{"tool_name":"Bash","tool_input":{"command":"/path/to/finish-task.sh completed"},"session_id":"s1","hook_event_name":"PreToolUse"}' \
+      | "$hook_script"
+  ) 2>/dev/null || exit_code=$?
+  assert_eq "0" "$exit_code" "Bash with finish-task.sh should be auto-approved"
+
+  # No request file should exist
+  local req_count
+  req_count=$(ls "$TEST_DIR/approvals"/req-*.json 2>/dev/null | wc -l | tr -d ' ')
+  assert_eq "0" "$req_count" "no request file for auto-approved bash command"
+}
+
+test_hook_input_truncation() {
+  mkdir -p "$TEST_DIR/approvals"
+  mkdir -p "$TEST_DIR/ap-12"
+  local hook_script="$SCRIPT_DIR/hooks/approval-hook.sh"
+
+  # Create a very long input (300+ chars)
+  local long_input
+  long_input=$(printf 'x%.0s' {1..300})
+
+  (
+    cd "$TEST_DIR/ap-12"
+    echo "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"$long_input\"},\"session_id\":\"s1\",\"hook_event_name\":\"PreToolUse\"}" \
+      | "$hook_script" &
+    HOOK_PID=$!
+    sleep 2
+    kill $HOOK_PID 2>/dev/null || true
+  ) &>/dev/null &
+  local outer_pid=$!
+  sleep 3
+  kill "$outer_pid" 2>/dev/null || true
+  wait "$outer_pid" 2>/dev/null || true
+
+  local req_files=("$TEST_DIR/approvals"/req-*-ap-12.json)
+  [[ -f "${req_files[0]}" ]] || { echo "    FAIL: no request file created"; return 1; }
+
+  local input_len
+  input_len=$(jq -r '.input | length' "${req_files[0]}")
+  [[ "$input_len" -le 200 ]] || { echo "    FAIL: input length $input_len exceeds 200"; return 1; }
+  rm -f "${req_files[0]}"
+}
+
+# --- runner claim_task / mark_task tests ---
+
+test_runner_claim_task() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" add "first task" -p foo
+  "$AGENT_POOL" add "second task" -p foo
+
+  local tasks_file="$TEST_DIR/tasks-foo.json"
+  local lock_dir="$tasks_file.lock"
+
+  # Simulate claim_task logic from agent-runner.sh
+  local result
+  result=$(/usr/bin/python3 -c "
+import json, sys, time
+with open('$tasks_file', 'r') as f:
+    data = json.load(f)
+for t in data['tasks']:
+    if t['status'] == 'pending':
+        t['status'] = 'in_progress'
+        t['claimed_by'] = 'agent-00'
+        t['started_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+        with open('$tasks_file', 'w') as f:
+            json.dump(data, f, indent=2)
+        print(t['id'] + '\n' + t['prompt'])
+        sys.exit(0)
+sys.exit(1)
+")
+
+  local task_id
+  task_id=$(echo "$result" | head -1)
+  [[ "$task_id" =~ ^t- ]] || { echo "    FAIL: expected task id, got '$task_id'"; return 1; }
+
+  local prompt
+  prompt=$(echo "$result" | tail -n +2)
+  assert_eq "first task" "$prompt" "should claim first pending task"
+
+  # Verify the task is now in_progress
+  local status
+  status=$(/usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+for t in data['tasks']:
+    if t['id'] == '$task_id':
+        print(t['status'])
+")
+  assert_eq "in_progress" "$status" "claimed task should be in_progress"
+
+  # Second task should still be pending
+  local second_status
+  second_status=$(/usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+print(data['tasks'][1]['status'])
+")
+  assert_eq "pending" "$second_status" "second task should still be pending"
+}
+
+test_runner_claim_no_tasks() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  echo '{"tasks":[]}' > "$TEST_DIR/tasks-foo.json"
+
+  local tasks_file="$TEST_DIR/tasks-foo.json"
+  if /usr/bin/python3 -c "
+import json, sys
+with open('$tasks_file', 'r') as f:
+    data = json.load(f)
+for t in data['tasks']:
+    if t['status'] == 'pending':
+        sys.exit(0)
+sys.exit(1)
+" 2>/dev/null; then
+    echo "    FAIL: should fail when no pending tasks"
+    return 1
+  fi
+}
+
+test_runner_claim_skips_non_pending() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  local tasks_file="$TEST_DIR/tasks-foo.json"
+
+  # Add tasks with non-pending statuses, then one pending
+  _add_task_with_status "$tasks_file" "t-ip" "in_progress" "agent-01"
+  _add_task_with_status "$tasks_file" "t-done" "completed" "agent-02"
+  _add_task_with_status "$tasks_file" "t-pend" "pending"
+
+  local result
+  result=$(/usr/bin/python3 -c "
+import json, sys, time
+with open('$tasks_file', 'r') as f:
+    data = json.load(f)
+for t in data['tasks']:
+    if t['status'] == 'pending':
+        t['status'] = 'in_progress'
+        t['claimed_by'] = 'agent-00'
+        t['started_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+        with open('$tasks_file', 'w') as f:
+            json.dump(data, f, indent=2)
+        print(t['id'] + '\n' + t['prompt'])
+        sys.exit(0)
+sys.exit(1)
+")
+
+  local task_id
+  task_id=$(echo "$result" | head -1)
+  assert_eq "t-pend" "$task_id" "should skip non-pending and claim t-pend"
+}
+
+test_runner_mark_completed() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  local tasks_file="$TEST_DIR/tasks-foo.json"
+  _add_task_with_status "$tasks_file" "t-mc" "in_progress" "agent-00"
+
+  /usr/bin/python3 -c "
+import json, sys, time
+with open('$tasks_file', 'r') as f:
+    data = json.load(f)
+for t in data['tasks']:
+    if t['id'] == 't-mc':
+        t['status'] = 'completed'
+        t['completed_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+        break
+with open('$tasks_file', 'w') as f:
+    json.dump(data, f, indent=2)
+"
+
+  local status completed_at
+  status=$(/usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+print(data['tasks'][0]['status'])
+")
+  completed_at=$(/usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+print(data['tasks'][0]['completed_at'])
+")
+  assert_eq "completed" "$status"
+  [[ "$completed_at" != "None" && -n "$completed_at" ]] || { echo "    FAIL: completed_at should be set"; return 1; }
+}
+
+test_runner_mark_blocked() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  local tasks_file="$TEST_DIR/tasks-foo.json"
+  _add_task_with_status "$tasks_file" "t-mb" "in_progress" "agent-00"
+
+  /usr/bin/python3 -c "
+import json, sys, time
+with open('$tasks_file', 'r') as f:
+    data = json.load(f)
+for t in data['tasks']:
+    if t['id'] == 't-mb':
+        t['status'] = 'blocked'
+        t['completed_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+        break
+with open('$tasks_file', 'w') as f:
+    json.dump(data, f, indent=2)
+"
+
+  local status
+  status=$(/usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+print(data['tasks'][0]['status'])
+")
+  assert_eq "blocked" "$status"
+}
+
+test_runner_mark_pending_clears() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  local tasks_file="$TEST_DIR/tasks-foo.json"
+  _add_task_with_status "$tasks_file" "t-mp" "in_progress" "agent-00"
+
+  # Simulate mark_task(task_id, "pending") — should clear claimed_by and timestamps
+  /usr/bin/python3 -c "
+import json, sys, time
+with open('$tasks_file', 'r') as f:
+    data = json.load(f)
+for t in data['tasks']:
+    if t['id'] == 't-mp':
+        t['status'] = 'pending'
+        t['claimed_by'] = ''
+        t.pop('started_at', None)
+        t.pop('completed_at', None)
+        break
+with open('$tasks_file', 'w') as f:
+    json.dump(data, f, indent=2)
+"
+
+  local status claimed
+  status=$(/usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+print(data['tasks'][0]['status'])
+")
+  claimed=$(/usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+print(data['tasks'][0].get('claimed_by', ''))
+")
+  assert_eq "pending" "$status"
+  assert_eq "" "$claimed" "claimed_by should be cleared"
+}
+
+# --- cmd_release tests ---
+
+test_release_unlocks_clone() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 1 -p foo
+
+  # Lock the clone manually
+  local pool_file="$TEST_DIR/pool-foo.json"
+  /usr/bin/python3 -c "
+import json, time
+with open('$pool_file') as f: data = json.load(f)
+for c in data['clones']:
+    if c['index'] == 0:
+        c['locked'] = True
+        c['workspace_id'] = 'test-ws'
+        c['locked_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+with open('$pool_file', 'w') as f: json.dump(data, f, indent=2)
+"
+
+  "$AGENT_POOL" release 0 -p foo
+
+  local locked ws
+  locked=$(/usr/bin/python3 -c "
+import json
+with open('$pool_file') as f: data = json.load(f)
+print(data['clones'][0]['locked'])
+")
+  ws=$(/usr/bin/python3 -c "
+import json
+with open('$pool_file') as f: data = json.load(f)
+print(data['clones'][0]['workspace_id'])
+")
+  assert_eq "False" "$locked" "clone should be unlocked"
+  assert_eq "" "$ws" "workspace_id should be cleared"
+}
+
+test_release_no_index() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  if "$AGENT_POOL" release -p foo 2>&1; then
+    echo "    FAIL: expected non-zero exit when no index"
+    return 1
+  fi
+}
+
+# --- cmd_status detail tests ---
+
+test_status_shows_locked_and_free() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 2 -p foo
+
+  # Lock one clone
+  local pool_file="$TEST_DIR/pool-foo.json"
+  /usr/bin/python3 -c "
+import json, time
+with open('$pool_file') as f: data = json.load(f)
+for c in data['clones']:
+    if c['index'] == 0:
+        c['locked'] = True
+        c['workspace_id'] = 'here-0-test'
+        c['locked_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+with open('$pool_file', 'w') as f: json.dump(data, f, indent=2)
+"
+
+  local output
+  output=$("$AGENT_POOL" status -p foo)
+  assert_contains "$output" "LOCKED" "should show LOCKED for locked clone"
+  assert_contains "$output" "free" "should show free for unlocked clone"
+}
+
+test_status_no_clones() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  echo '{"clones":[]}' > "$TEST_DIR/pool-foo.json"
+
+  local output
+  output=$("$AGENT_POOL" status -p foo)
+  assert_contains "$output" "no clones" "should indicate no clones"
+}
+
+# --- cmd_destroy detail tests ---
+
+test_destroy_force_flag() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 2 -p foo
+
+  # --force should not prompt
+  "$AGENT_POOL" destroy --force -p foo
+
+  [[ ! -d "$TEST_DIR/foo-00" ]] || { echo "    FAIL: foo-00 should be removed"; return 1; }
+  [[ ! -d "$TEST_DIR/foo-01" ]] || { echo "    FAIL: foo-01 should be removed"; return 1; }
+
+  # Pool should be reset
+  local count
+  count=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/pool-foo.json') as f: data = json.load(f)
+print(len(data['clones']))
+")
+  assert_eq "0" "$count" "pool should be empty after destroy"
+}
+
+test_destroy_nonexistent_project() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  if "$AGENT_POOL" destroy -p nonexistent 2>&1; then
+    echo "    FAIL: expected non-zero exit for nonexistent project"
+    return 1
+  fi
+}
+
+# --- resolve_project edge case tests ---
+
+test_resolve_multiple_no_default() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" project add bar --source "$REPO_B" --branch main --prefix bar
+  # Remove default (set it to empty)
+  /usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/projects.json') as f: data = json.load(f)
+data['default'] = ''
+with open('$TEST_DIR/projects.json', 'w') as f: json.dump(data, f, indent=2)
+"
+
+  local output
+  if output=$("$AGENT_POOL" status 2>&1); then
+    echo "    FAIL: expected non-zero exit when multiple projects and no default"
+    return 1
+  fi
+  assert_contains "$output" "project" "error should mention project"
+}
+
+test_resolve_invalid_project_flag() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+
+  local output
+  if output=$("$AGENT_POOL" status -p nonexistent 2>&1); then
+    echo "    FAIL: expected non-zero exit for invalid -p value"
+    return 1
+  fi
+  assert_contains "$output" "not found" "error should say project not found"
+}
+
+# --- pool helper tests ---
+
+test_lock_clone() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 1 -p foo
+
+  local pool_file="$TEST_DIR/pool-foo.json"
+  /usr/bin/python3 -c "
+import json, time
+with open('$pool_file') as f: data = json.load(f)
+for c in data['clones']:
+    if c['index'] == 0:
+        c['locked'] = True
+        c['workspace_id'] = 'workspace:5'
+        c['locked_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+with open('$pool_file', 'w') as f: json.dump(data, f, indent=2)
+"
+
+  local locked ws locked_at
+  locked=$(/usr/bin/python3 -c "
+import json
+with open('$pool_file') as f: data = json.load(f)
+print(data['clones'][0]['locked'])
+")
+  ws=$(/usr/bin/python3 -c "
+import json
+with open('$pool_file') as f: data = json.load(f)
+print(data['clones'][0]['workspace_id'])
+")
+  locked_at=$(/usr/bin/python3 -c "
+import json
+with open('$pool_file') as f: data = json.load(f)
+print(data['clones'][0]['locked_at'])
+")
+  assert_eq "True" "$locked"
+  assert_eq "workspace:5" "$ws"
+  [[ -n "$locked_at" && "$locked_at" != "" ]] || { echo "    FAIL: locked_at should be set"; return 1; }
+}
+
+test_find_free_clone() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 3 -p foo
+
+  # Lock first two clones
+  local pool_file="$TEST_DIR/pool-foo.json"
+  /usr/bin/python3 -c "
+import json, time
+with open('$pool_file') as f: data = json.load(f)
+for c in data['clones']:
+    if c['index'] in (0, 1):
+        c['locked'] = True
+        c['workspace_id'] = 'test'
+        c['locked_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+with open('$pool_file', 'w') as f: json.dump(data, f, indent=2)
+"
+
+  local free_idx
+  free_idx=$(/usr/bin/python3 -c "
+import json, sys
+with open('$pool_file') as f: data = json.load(f)
+for c in data['clones']:
+    if not c.get('locked', False):
+        print(c['index'])
+        sys.exit(0)
+sys.exit(1)
+")
+  assert_eq "2" "$free_idx" "should find clone 2 as first free"
+}
+
+test_find_free_clone_all_locked() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 2 -p foo
+
+  local pool_file="$TEST_DIR/pool-foo.json"
+  /usr/bin/python3 -c "
+import json, time
+with open('$pool_file') as f: data = json.load(f)
+for c in data['clones']:
+    c['locked'] = True
+    c['workspace_id'] = 'test'
+    c['locked_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+with open('$pool_file', 'w') as f: json.dump(data, f, indent=2)
+"
+
+  if /usr/bin/python3 -c "
+import json, sys
+with open('$pool_file') as f: data = json.load(f)
+for c in data['clones']:
+    if not c.get('locked', False):
+        print(c['index'])
+        sys.exit(0)
+sys.exit(1)
+" 2>/dev/null; then
+    echo "    FAIL: should fail when all clones locked"
+    return 1
+  fi
+}
+
+# --- cmd_refresh detail tests ---
+
+test_refresh_all() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 2 -p foo
+
+  # Create dirty files in both
+  echo "dirty" > "$TEST_DIR/foo-00/dirty.txt"
+  echo "dirty" > "$TEST_DIR/foo-01/dirty.txt"
+
+  "$AGENT_POOL" refresh --all -p foo
+
+  assert_file_not_exists "$TEST_DIR/foo-00/dirty.txt" "foo-00 dirty file should be cleaned"
+  assert_file_not_exists "$TEST_DIR/foo-01/dirty.txt" "foo-01 dirty file should be cleaned"
+}
+
+test_refresh_unlocks_clone() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 1 -p foo
+
+  # Lock the clone
+  local pool_file="$TEST_DIR/pool-foo.json"
+  /usr/bin/python3 -c "
+import json, time
+with open('$pool_file') as f: data = json.load(f)
+for c in data['clones']:
+    if c['index'] == 0:
+        c['locked'] = True
+        c['workspace_id'] = 'test-ws'
+        c['locked_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+with open('$pool_file', 'w') as f: json.dump(data, f, indent=2)
+"
+
+  "$AGENT_POOL" refresh 0 -p foo
+
+  local locked
+  locked=$(/usr/bin/python3 -c "
+import json
+with open('$pool_file') as f: data = json.load(f)
+print(data['clones'][0]['locked'])
+")
+  assert_eq "False" "$locked" "refresh should unlock the clone"
+}
+
+test_refresh_nonexistent_clone() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 1 -p foo
+
+  # Remove a clone directory to simulate missing clone
+  rm -rf "$TEST_DIR/foo-00"
+
+  local output
+  output=$("$AGENT_POOL" refresh 00 -p foo 2>&1)
+  assert_contains "$output" "missing, recreating" "should recreate missing clone"
+  assert_dir_exists "$TEST_DIR/foo-00"
+}
+
+# --- init edge case tests ---
+
+test_init_additive() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 2 -p foo
+
+  assert_dir_exists "$TEST_DIR/foo-00"
+  assert_dir_exists "$TEST_DIR/foo-01"
+
+  # init 2 again should add 2 more (indexes 2,3), not recreate existing
+  "$AGENT_POOL" init 2 -p foo
+
+  assert_dir_exists "$TEST_DIR/foo-00"
+  assert_dir_exists "$TEST_DIR/foo-01"
+  assert_dir_exists "$TEST_DIR/foo-02"
+  assert_dir_exists "$TEST_DIR/foo-03"
+
+  local count
+  count=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/pool-foo.json') as f: data = json.load(f)
+print(len(data['clones']))
+")
+  assert_eq "4" "$count" "should have exactly 4 clones after two init 2 calls"
+}
+
+# --- global flag / dispatch tests ---
+
+test_project_flag_before_command() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" add "test task" -p foo
+
+  # -p before the command name
+  local output
+  output=$("$AGENT_POOL" -p foo tasks)
+  assert_contains "$output" "test task"
+}
+
+test_unknown_command_shows_help() {
+  local output
+  if output=$("$AGENT_POOL" nonexistent 2>&1); then
+    echo "    FAIL: expected non-zero exit for unknown command"
+    return 1
+  fi
+  assert_contains "$output" "agent-pool" "error should reference agent-pool"
+}
+
+test_add_no_prompt_shows_usage() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  local output
+  if output=$("$AGENT_POOL" add -p foo 2>&1); then
+    echo "    FAIL: expected non-zero exit when no prompt"
+    return 1
+  fi
+  assert_contains "$output" "Usage" "should show usage"
+}
+
+# --- task queue locking tests ---
+
+test_task_lock_stale_detection() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  local tasks_file="$TEST_DIR/tasks-foo.json"
+  echo '{"tasks":[]}' > "$tasks_file"
+
+  # Create a stale lock with a dead PID
+  local lock_dir="${tasks_file}.lock"
+  mkdir -p "$lock_dir"
+  echo "99999" > "$lock_dir/pid"
+
+  # Adding a task should succeed (stale lock detected and removed)
+  "$AGENT_POOL" add "test after stale" -p foo
+
+  local prompt
+  prompt=$(/usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+print(data['tasks'][0]['prompt'])
+")
+  assert_eq "test after stale" "$prompt" "should add task after clearing stale lock"
+}
+
 # --- main ---
 
 printf "\n\033[1;34m=== agent-pool multi-project test suite ===\033[0m\n\n"
@@ -939,6 +1826,71 @@ run_test test_runner_creates_docs_dirs
 run_test test_runner_claudemd_idempotent
 run_test test_runner_gitignore_entries
 run_test test_refresh_preserves_docs
+
+# Task state machine tests
+run_test test_add_backlog_flag
+run_test test_task_id_format
+run_test test_unblock_blocked_task
+run_test test_unblock_not_blocked
+run_test test_unblock_not_found
+run_test test_backlog_task
+run_test test_backlog_not_found
+run_test test_activate_backlogged
+run_test test_activate_not_backlogged
+run_test test_activate_not_found
+
+# Approval hook allowlist tests
+run_test test_hook_allows_read_tools
+run_test test_hook_allows_task_tools
+run_test test_hook_blocks_write_tool
+run_test test_hook_blocks_edit_tool
+run_test test_hook_allows_bash_finish
+run_test test_hook_input_truncation
+
+# Runner claim_task / mark_task tests
+run_test test_runner_claim_task
+run_test test_runner_claim_no_tasks
+run_test test_runner_claim_skips_non_pending
+run_test test_runner_mark_completed
+run_test test_runner_mark_blocked
+run_test test_runner_mark_pending_clears
+
+# cmd_release tests
+run_test test_release_unlocks_clone
+run_test test_release_no_index
+
+# cmd_status detail tests
+run_test test_status_shows_locked_and_free
+run_test test_status_no_clones
+
+# cmd_destroy detail tests
+run_test test_destroy_force_flag
+run_test test_destroy_nonexistent_project
+
+# resolve_project edge cases
+run_test test_resolve_multiple_no_default
+run_test test_resolve_invalid_project_flag
+
+# Pool helper tests
+run_test test_lock_clone
+run_test test_find_free_clone
+run_test test_find_free_clone_all_locked
+
+# cmd_refresh detail tests
+run_test test_refresh_all
+run_test test_refresh_unlocks_clone
+run_test test_refresh_nonexistent_clone
+
+# Init edge cases
+run_test test_init_additive
+
+# Global flag / dispatch tests
+run_test test_project_flag_before_command
+run_test test_unknown_command_shows_help
+run_test test_add_no_prompt_shows_usage
+
+# Task lock tests
+run_test test_task_lock_stale_detection
 
 printf "\n\033[1;34m=== Results ===\033[0m\n"
 printf "  Total: %d  Passed: \033[32m%d\033[0m  Failed: \033[31m%d\033[0m\n" "$TESTS_RUN" "$TESTS_PASSED" "$TESTS_FAILED"
