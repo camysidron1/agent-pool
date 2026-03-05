@@ -24,8 +24,8 @@ for allowed in "${ALLOWED_TOOLS[@]}"; do
   fi
 done
 
-POOL_DIR="${POOL_DIR:-$HOME/.agent-pool}"
-APPROVALS_DIR="$POOL_DIR/approvals"
+DATA_DIR="${DATA_DIR:-${POOL_DIR:-$HOME/.agent-pool}}"
+APPROVALS_DIR="$DATA_DIR/approvals"
 mkdir -p "$APPROVALS_DIR"
 
 TOOL_INPUT=$(echo "$INPUT" | jq -r '.tool_input // {} | tostring' | head -c 200)

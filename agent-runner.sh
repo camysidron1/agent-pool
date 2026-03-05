@@ -6,8 +6,10 @@ set -euo pipefail
 #        agent-runner.sh --resolve-tasks-path --project <name>
 #        agent-runner.sh --resolve-clone-path --project <name> --index <n>
 
-POOL_DIR="${POOL_DIR:-$HOME/.agent-pool}"
-PROJECTS_JSON="$POOL_DIR/projects.json"
+TOOL_DIR="$(cd "$(dirname "$0")" && pwd)"
+DATA_DIR="${DATA_DIR:-${POOL_DIR:-$HOME/.agent-pool}}"
+
+PROJECTS_JSON="$DATA_DIR/projects.json"
 
 # --- resolve helpers (can be called standalone for testing) ---
 
@@ -62,12 +64,12 @@ PROJECT_NAME=$(resolve_runner_project "$PROJECT_NAME")
 
 # Handle resolve modes (for testing)
 if [[ "$RESOLVE_MODE" == "tasks" ]]; then
-  echo "$POOL_DIR/tasks-${PROJECT_NAME}.json"
+  echo "$DATA_DIR/tasks-${PROJECT_NAME}.json"
   exit 0
 fi
 if [[ "$RESOLVE_MODE" == "clone" ]]; then
   prefix=$(get_runner_project_field "$PROJECT_NAME" "prefix")
-  printf '%s/%s-%02d\n' "$POOL_DIR" "$prefix" "$RESOLVE_INDEX"
+  printf '%s/%s-%02d\n' "$DATA_DIR" "$prefix" "$RESOLVE_INDEX"
   exit 0
 fi
 
@@ -80,10 +82,10 @@ fi
 # Derive paths from project config
 PREFIX=$(get_runner_project_field "$PROJECT_NAME" "prefix")
 BRANCH=$(get_runner_project_field "$PROJECT_NAME" "branch")
-TASKS_JSON="$POOL_DIR/tasks-${PROJECT_NAME}.json"
+TASKS_JSON="$DATA_DIR/tasks-${PROJECT_NAME}.json"
 LOCK_DIR="$TASKS_JSON.lock"
 AGENT_ID="agent-$(printf '%02d' "$CLONE_INDEX")"
-CLONE_PATH="$POOL_DIR/${PREFIX}-$(printf '%02d' "$CLONE_INDEX")"
+CLONE_PATH="$DATA_DIR/${PREFIX}-$(printf '%02d' "$CLONE_INDEX")"
 
 poll_interval=3
 
@@ -153,7 +155,7 @@ CLONE_RELEASED=false
 release_clone_lock() {
   [[ "$CLONE_RELEASED" == true ]] && return
   CLONE_RELEASED=true
-  local pool_json="$POOL_DIR/pool-${PROJECT_NAME}.json"
+  local pool_json="$DATA_DIR/pool-${PROJECT_NAME}.json"
   if [[ -f "$pool_json" ]]; then
     /usr/bin/python3 -c "
 import json, sys
@@ -205,7 +207,7 @@ while true; do
   if [[ "$SKIP_PERMS" != true ]]; then
     settings_file="$CLONE_PATH/.claude/settings.json"
     mkdir -p "$(dirname "$settings_file")"
-    hook_entry='{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"~/.agent-pool/hooks/approval-hook.sh","timeout":310000}]}]}}'
+    hook_entry="{\"hooks\":{\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"${TOOL_DIR}/hooks/approval-hook.sh\",\"timeout\":310000}]}]}}"
     if [[ -f "$settings_file" ]]; then
       # Merge: add our hook entry to existing PreToolUse array (or create it)
       merged=$(jq --argjson entry "$hook_entry" '
@@ -223,12 +225,12 @@ while true; do
   fi
 
   # Set up centralized docs directories
-  mkdir -p "$POOL_DIR/docs/agents/$AGENT_ID"
-  mkdir -p "$POOL_DIR/docs/shared"
+  mkdir -p "$DATA_DIR/docs/agents/$AGENT_ID"
+  mkdir -p "$DATA_DIR/docs/shared"
 
   # Symlink into clone for convenience (absolute paths)
-  ln -sfn "$POOL_DIR/docs/agents/$AGENT_ID" "$CLONE_PATH/agent-docs"
-  ln -sfn "$POOL_DIR/docs/shared" "$CLONE_PATH/shared-docs"
+  ln -sfn "$DATA_DIR/docs/agents/$AGENT_ID" "$CLONE_PATH/agent-docs"
+  ln -sfn "$DATA_DIR/docs/shared" "$CLONE_PATH/shared-docs"
 
   # Ensure symlinks are in .gitignore
   for entry in agent-docs shared-docs CLAUDE.md; do
