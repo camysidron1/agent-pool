@@ -213,22 +213,22 @@ test_project_required() {
 test_init_creates_project_clones() {
   "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
   "$AGENT_POOL" init 2 -p foo
+  assert_dir_exists "$TEST_DIR/foo-00"
   assert_dir_exists "$TEST_DIR/foo-01"
-  assert_dir_exists "$TEST_DIR/foo-02"
 }
 
 test_init_uses_project_branch() {
   "$AGENT_POOL" project add foo --source "$REPO_A" --branch stg --prefix foo
   "$AGENT_POOL" init 1 -p foo
   local branch
-  branch=$(git -C "$TEST_DIR/foo-01" rev-parse --abbrev-ref HEAD)
+  branch=$(git -C "$TEST_DIR/foo-00" rev-parse --abbrev-ref HEAD)
   assert_eq "stg" "$branch" "clone should be on project branch"
 }
 
 test_init_runs_setup() {
   "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo --setup "touch setup-ran.marker"
   "$AGENT_POOL" init 1 -p foo
-  assert_file_exists "$TEST_DIR/foo-01/setup-ran.marker" "setup command should have run"
+  assert_file_exists "$TEST_DIR/foo-00/setup-ran.marker" "setup command should have run"
 }
 
 test_pool_json_per_project() {
@@ -293,10 +293,10 @@ test_two_projects_isolated() {
   "$AGENT_POOL" add "bar-task-1" -p bar
 
   # Verify clone isolation
+  assert_dir_exists "$TEST_DIR/foo-00"
   assert_dir_exists "$TEST_DIR/foo-01"
-  assert_dir_exists "$TEST_DIR/foo-02"
+  assert_dir_exists "$TEST_DIR/bar-00"
   assert_dir_exists "$TEST_DIR/bar-01"
-  assert_dir_exists "$TEST_DIR/bar-02"
 
   # Verify task isolation
   local foo_tasks bar_tasks
@@ -354,16 +354,16 @@ test_refresh_project_clone() {
   "$AGENT_POOL" init 1 -p foo
 
   # Create a dirty file
-  echo "dirty" > "$TEST_DIR/foo-01/dirty.txt"
+  echo "dirty" > "$TEST_DIR/foo-00/dirty.txt"
 
-  "$AGENT_POOL" refresh 1 -p foo
+  "$AGENT_POOL" refresh 0 -p foo
 
   # Dirty file should be gone
-  assert_file_not_exists "$TEST_DIR/foo-01/dirty.txt" "dirty file should be cleaned"
+  assert_file_not_exists "$TEST_DIR/foo-00/dirty.txt" "dirty file should be cleaned"
 
   # Should be on the project branch
   local branch
-  branch=$(git -C "$TEST_DIR/foo-01" rev-parse --abbrev-ref HEAD)
+  branch=$(git -C "$TEST_DIR/foo-00" rev-parse --abbrev-ref HEAD)
   assert_eq "stg" "$branch" "should be on project branch after refresh"
 }
 
@@ -376,12 +376,12 @@ test_destroy_project() {
   "$AGENT_POOL" destroy -p foo
 
   # foo clones gone
+  [[ ! -d "$TEST_DIR/foo-00" ]] || { echo "    FAIL: foo-00 should be removed"; return 1; }
   [[ ! -d "$TEST_DIR/foo-01" ]] || { echo "    FAIL: foo-01 should be removed"; return 1; }
-  [[ ! -d "$TEST_DIR/foo-02" ]] || { echo "    FAIL: foo-02 should be removed"; return 1; }
 
   # bar clones still there
+  assert_dir_exists "$TEST_DIR/bar-00"
   assert_dir_exists "$TEST_DIR/bar-01"
-  assert_dir_exists "$TEST_DIR/bar-02"
 }
 
 test_runner_uses_project_tasks() {
@@ -418,17 +418,17 @@ test_runner_uses_project_branch() {
 
   # Verify clone is on the project branch
   local branch
-  branch=$(git -C "$TEST_DIR/foo-01" rev-parse --abbrev-ref HEAD)
+  branch=$(git -C "$TEST_DIR/foo-00" rev-parse --abbrev-ref HEAD)
   assert_eq "stg" "$branch" "runner clone should be on project branch"
 
   # Verify runner can resolve clone path for project
   local clone_path
-  clone_path=$("$AGENT_RUNNER" --resolve-clone-path --project foo --index 1 2>/dev/null || true)
+  clone_path=$("$AGENT_RUNNER" --resolve-clone-path --project foo --index 0 2>/dev/null || true)
   if [[ -n "$clone_path" ]]; then
-    assert_eq "$TEST_DIR/foo-01" "$clone_path"
+    assert_eq "$TEST_DIR/foo-00" "$clone_path"
   fi
   # At minimum, verify clone exists at project-prefixed path
-  assert_dir_exists "$TEST_DIR/foo-01"
+  assert_dir_exists "$TEST_DIR/foo-00"
 }
 
 test_runner_releases_lock_on_exit() {
@@ -684,12 +684,12 @@ test_runner_installs_approval_hook() {
   "$AGENT_POOL" init 1 -p foo
 
   # Create a settings.json with existing hooks
-  mkdir -p "$TEST_DIR/foo-01/.claude"
+  mkdir -p "$TEST_DIR/foo-00/.claude"
   echo '{"enabledPlugins":{},"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"test.sh"}]}]}}' \
-    > "$TEST_DIR/foo-01/.claude/settings.json"
+    > "$TEST_DIR/foo-00/.claude/settings.json"
 
   # Simulate what agent-runner does (extract the merge logic)
-  local settings_file="$TEST_DIR/foo-01/.claude/settings.json"
+  local settings_file="$TEST_DIR/foo-00/.claude/settings.json"
   local hook_entry='{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"~/.agent-pool/hooks/approval-hook.sh","timeout":310000}]}]}}'
   local merged
   merged=$(jq --argjson entry "$hook_entry" '
@@ -797,8 +797,8 @@ test_runner_creates_docs_dirs() {
   "$AGENT_POOL" init 1 -p foo
   "$AGENT_POOL" add "test task" -p foo
 
-  local clone_path="$TEST_DIR/foo-01"
-  local agent_id="agent-01"
+  local clone_path="$TEST_DIR/foo-00"
+  local agent_id="agent-00"
 
   # Simulate what agent-runner does (the docs setup portion)
   mkdir -p "$TEST_DIR/docs/agents/$agent_id"
@@ -824,7 +824,7 @@ test_runner_claudemd_idempotent() {
   "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
   "$AGENT_POOL" init 1 -p foo
 
-  local clone_path="$TEST_DIR/foo-01"
+  local clone_path="$TEST_DIR/foo-00"
 
   # Simulate CLAUDE.md append (twice — should be idempotent)
   for _ in 1 2; do
@@ -848,7 +848,7 @@ test_runner_gitignore_entries() {
   "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
   "$AGENT_POOL" init 1 -p foo
 
-  local clone_path="$TEST_DIR/foo-01"
+  local clone_path="$TEST_DIR/foo-00"
 
   # Simulate .gitignore updates (twice — should be idempotent)
   for _ in 1 2; do
