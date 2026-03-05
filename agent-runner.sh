@@ -89,6 +89,15 @@ CLONE_PATH="$DATA_DIR/${PREFIX}-$(printf '%02d' "$CLONE_INDEX")"
 
 poll_interval=3
 
+# Reset clone to project's default branch (best-effort, never fails the loop)
+reset_to_project_branch() {
+  printf "\033[1;36m%s\033[0m resetting to %s...\n" "$AGENT_ID" "$BRANCH"
+  cd "$CLONE_PATH"
+  git fetch origin -q 2>/dev/null || true
+  git checkout -B "$BRANCH" "origin/$BRANCH" -q 2>/dev/null || true
+  git reset --hard "origin/$BRANCH" 2>/dev/null || true
+}
+
 acquire_lock() {
   local max_wait=50  # 5 seconds at 0.1s intervals
   local waited=0
@@ -372,6 +381,8 @@ Commit your changes with a descriptive message when your task is complete. Do no
         ;;
     esac
   fi
+
+  reset_to_project_branch
 
   printf "\033[1;36m%s\033[0m polling for next task...\n" "$AGENT_ID"
 done
