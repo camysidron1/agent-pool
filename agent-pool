@@ -1517,31 +1517,33 @@ cmd_docs() {
     printf "%-20s %-8s %s\n" "Directory" "Files" "Last Modified"
     printf "%-20s %-8s %s\n" "---------" "-----" "-------------"
 
-    if [[ -d "$docs_dir/shared" ]]; then
+    _docs_dir_info() {
+      local dir="$1" label="$2"
       local count last_mod
-      count=$(find "$docs_dir/shared" -maxdepth 1 -type f | wc -l | tr -d ' ')
-      last_mod=$(find "$docs_dir/shared" -maxdepth 1 -type f -exec stat -f '%m %N' {} + 2>/dev/null | sort -rn | head -1 | cut -d' ' -f1)
+      count=$(find "$dir" -maxdepth 1 -type f | wc -l | tr -d ' ')
+      # Portable last-modified: try GNU stat, then macOS stat
+      last_mod=$(find "$dir" -maxdepth 1 -type f -exec stat -c '%Y' {} + 2>/dev/null \
+              || find "$dir" -maxdepth 1 -type f -exec stat -f '%m' {} + 2>/dev/null \
+              || true)
+      last_mod=$(echo "$last_mod" | sort -rn | head -1)
       if [[ -n "$last_mod" ]]; then
-        last_mod=$(date -r "$last_mod" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "-")
+        last_mod=$(date -d "@$last_mod" '+%Y-%m-%d %H:%M' 2>/dev/null \
+                || date -r "$last_mod" '+%Y-%m-%d %H:%M' 2>/dev/null \
+                || echo "-")
       else
         last_mod="-"
       fi
-      printf "%-20s %-8s %s\n" "shared" "$count" "$last_mod"
+      printf "%-20s %-8s %s\n" "$label" "$count" "$last_mod"
+    }
+
+    if [[ -d "$docs_dir/shared" ]]; then
+      _docs_dir_info "$docs_dir/shared" "shared"
     fi
 
     if [[ -d "$docs_dir/agents" ]]; then
       for agent_dir in "$docs_dir/agents"/*/; do
         [[ -d "$agent_dir" ]] || continue
-        local agent_name count last_mod
-        agent_name=$(basename "$agent_dir")
-        count=$(find "$agent_dir" -maxdepth 1 -type f | wc -l | tr -d ' ')
-        last_mod=$(find "$agent_dir" -maxdepth 1 -type f -exec stat -f '%m %N' {} + 2>/dev/null | sort -rn | head -1 | cut -d' ' -f1)
-        if [[ -n "$last_mod" ]]; then
-          last_mod=$(date -r "$last_mod" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "-")
-        else
-          last_mod="-"
-        fi
-        printf "%-20s %-8s %s\n" "$agent_name" "$count" "$last_mod"
+        _docs_dir_info "$agent_dir" "$(basename "$agent_dir")"
       done
     fi
   elif [[ "$target" == "shared" ]]; then
