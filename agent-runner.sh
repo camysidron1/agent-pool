@@ -203,12 +203,11 @@ while true; do
 
   # Install approval hook (unless --skip-permissions)
   if [[ "$SKIP_PERMS" != true ]]; then
-    local settings_file="$CLONE_PATH/.claude/settings.json"
+    settings_file="$CLONE_PATH/.claude/settings.json"
     mkdir -p "$(dirname "$settings_file")"
-    local hook_entry='{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"~/.agent-pool/hooks/approval-hook.sh","timeout":310000}]}]}}'
+    hook_entry='{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"~/.agent-pool/hooks/approval-hook.sh","timeout":310000}]}]}}'
     if [[ -f "$settings_file" ]]; then
       # Merge: add our hook entry to existing PreToolUse array (or create it)
-      local merged
       merged=$(jq --argjson entry "$hook_entry" '
         .hooks //= {} |
         .hooks.PreToolUse //= [] |
@@ -280,7 +279,7 @@ DOCEOF
     printf "  Mark task as:\n"
     printf "  \033[1mc\033[0m) completed   \033[1mb\033[0m) blocked   \033[1mp\033[0m) pending (retry)   \033[1mk\033[0m) backlogged\n"
     printf "  > "
-    local choice=""
+    choice=""
     read -r choice </dev/tty 2>/dev/null || choice="b"
     case "$choice" in
       c|completed)
