@@ -439,8 +439,8 @@ projects = data.get('projects', {})
 if not projects:
     print('  (no projects)')
     sys.exit(0)
-print(f\"{'Name':<16} {'Prefix':<12} {'Branch':<12} {'Tracking':<16} {'Source'}\")
-print(f\"{'----':<16} {'------':<12} {'------':<12} {'--------':<16} {'------'}\")
+print(f\"{'Name':<16} {'Prefix':<12} {'Branch':<12} {'Tracking':<16} {'Workflow':<16} {'Source'}\")
+print(f\"{'----':<16} {'------':<12} {'------':<12} {'--------':<16} {'--------':<16} {'------'}\")
 for name, p in projects.items():
     marker = ' *' if name == default else ''
     tracking = p.get('tracking')
@@ -450,7 +450,9 @@ for name, p in projects.items():
         track_str = f'{t} ({key})' if key else t
     else:
         track_str = '-'
-    print(f\"{name + marker:<16} {p.get('prefix',''):<12} {p.get('branch',''):<12} {track_str:<16} {p.get('source','')}\")
+    gw = p.get('git_workflow')
+    workflow_str = gw['type'] if gw and gw.get('type') else '-'
+    print(f\"{name + marker:<16} {p.get('prefix',''):<12} {p.get('branch',''):<12} {track_str:<16} {workflow_str:<16} {p.get('source','')}\")
 "
       ;;
 
@@ -549,8 +551,58 @@ json.dump(data, sys.stdout, indent=2)
       printf "Cleared tracking for '%s'\n" "$name"
       ;;
 
+    set-workflow)
+      local name="" workflow_type="" workflow_instructions=""
+      while [[ $# -gt 0 ]]; do
+        case $1 in
+          --type) workflow_type="$2"; shift 2 ;;
+          --instructions) workflow_instructions="$2"; shift 2 ;;
+          *) name="$1"; shift ;;
+        esac
+      done
+      if [[ -z "$name" ]] || [[ -z "$workflow_type" ]] || [[ -z "$workflow_instructions" ]]; then
+        echo "Usage: agent-pool project set-workflow <name> --type <type> --instructions \"...\""
+        exit 1
+      fi
+      ensure_projects_json
+      read_projects | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+name = sys.argv[1]
+if name not in data.get('projects', {}):
+    print(f\"Project '{name}' not found\", file=sys.stderr)
+    sys.exit(1)
+data['projects'][name]['git_workflow'] = {
+    'type': sys.argv[2],
+    'instructions': sys.argv[3]
+}
+json.dump(data, sys.stdout, indent=2)
+" "$name" "$workflow_type" "$workflow_instructions" | write_projects
+      printf "Set git workflow for '%s': %s\n" "$name" "$workflow_type"
+      ;;
+
+    clear-workflow)
+      local name="${1:-}"
+      if [[ -z "$name" ]]; then
+        echo "Usage: agent-pool project clear-workflow <name>"
+        exit 1
+      fi
+      ensure_projects_json
+      read_projects | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+name = sys.argv[1]
+if name not in data.get('projects', {}):
+    print(f\"Project '{name}' not found\", file=sys.stderr)
+    sys.exit(1)
+data['projects'][name]['git_workflow'] = None
+json.dump(data, sys.stdout, indent=2)
+" "$name" | write_projects
+      printf "Cleared git workflow for '%s'\n" "$name"
+      ;;
+
     *)
-      echo "Usage: agent-pool project <add|list|remove|default|set-tracking|clear-tracking> [args...]"
+      echo "Usage: agent-pool project <add|list|remove|default|set-tracking|clear-tracking|set-workflow|clear-workflow> [args...]"
       exit 1
       ;;
   esac
