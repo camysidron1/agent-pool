@@ -439,11 +439,18 @@ projects = data.get('projects', {})
 if not projects:
     print('  (no projects)')
     sys.exit(0)
-print(f\"{'Name':<16} {'Prefix':<12} {'Branch':<12} {'Source'}\")
-print(f\"{'----':<16} {'------':<12} {'------':<12} {'------'}\")
+print(f\"{'Name':<16} {'Prefix':<12} {'Branch':<12} {'Tracking':<16} {'Source'}\")
+print(f\"{'----':<16} {'------':<12} {'------':<12} {'--------':<16} {'------'}\")
 for name, p in projects.items():
     marker = ' *' if name == default else ''
-    print(f\"{name + marker:<16} {p.get('prefix',''):<12} {p.get('branch',''):<12} {p.get('source','')}\")
+    tracking = p.get('tracking')
+    if tracking and tracking.get('type'):
+        t = tracking['type'].capitalize()
+        key = tracking.get('project_key', '')
+        track_str = f'{t} ({key})' if key else t
+    else:
+        track_str = '-'
+    print(f\"{name + marker:<16} {p.get('prefix',''):<12} {p.get('branch',''):<12} {track_str:<16} {p.get('source','')}\")
 "
       ;;
 
@@ -488,8 +495,62 @@ json.dump(data, sys.stdout, indent=2)
       printf "Default project set to '%s'\n" "$name"
       ;;
 
+    set-tracking)
+      local name="" tracking_type="" tracking_key="" tracking_label="" tracking_instructions=""
+      while [[ $# -gt 0 ]]; do
+        case $1 in
+          --type) tracking_type="$2"; shift 2 ;;
+          --key) tracking_key="$2"; shift 2 ;;
+          --label) tracking_label="$2"; shift 2 ;;
+          --instructions) tracking_instructions="$2"; shift 2 ;;
+          *) name="$1"; shift ;;
+        esac
+      done
+      if [[ -z "$name" ]] || [[ -z "$tracking_type" ]] || [[ -z "$tracking_key" ]]; then
+        echo "Usage: agent-pool project set-tracking <name> --type <type> --key <project-key> [--label <label>] [--instructions \"...\"]"
+        exit 1
+      fi
+      ensure_projects_json
+      read_projects | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+name = sys.argv[1]
+if name not in data.get('projects', {}):
+    print(f\"Project '{name}' not found\", file=sys.stderr)
+    sys.exit(1)
+data['projects'][name]['tracking'] = {
+    'type': sys.argv[2],
+    'project_key': sys.argv[3],
+    'label': sys.argv[4] if sys.argv[4] else None,
+    'instructions': sys.argv[5] if sys.argv[5] else None
+}
+json.dump(data, sys.stdout, indent=2)
+" "$name" "$tracking_type" "$tracking_key" "$tracking_label" "$tracking_instructions" | write_projects
+      printf "Set tracking for '%s': %s (key: %s)\n" "$name" "$tracking_type" "$tracking_key"
+      ;;
+
+    clear-tracking)
+      local name="${1:-}"
+      if [[ -z "$name" ]]; then
+        echo "Usage: agent-pool project clear-tracking <name>"
+        exit 1
+      fi
+      ensure_projects_json
+      read_projects | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+name = sys.argv[1]
+if name not in data.get('projects', {}):
+    print(f\"Project '{name}' not found\", file=sys.stderr)
+    sys.exit(1)
+data['projects'][name]['tracking'] = None
+json.dump(data, sys.stdout, indent=2)
+" "$name" | write_projects
+      printf "Cleared tracking for '%s'\n" "$name"
+      ;;
+
     *)
-      echo "Usage: agent-pool project <add|list|remove|default> [args...]"
+      echo "Usage: agent-pool project <add|list|remove|default|set-tracking|clear-tracking> [args...]"
       exit 1
       ;;
   esac

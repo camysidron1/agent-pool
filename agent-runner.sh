@@ -260,6 +260,43 @@ Code comments and inline docs in source files are fine — this rule is about st
 DOCEOF
   fi
 
+  # Build tracking context prefix for the prompt
+  tracking_prefix=""
+  tracking_json=$(get_runner_project_field "$PROJECT_NAME" "tracking")
+
+  if [[ -n "$tracking_json" && "$tracking_json" != "None" && "$tracking_json" != "null" && "$tracking_json" != "" ]]; then
+    tracking_prefix=$(/usr/bin/python3 -c "
+import json, sys
+with open('$PROJECTS_JSON') as f:
+    data = json.load(f)
+tracking = data.get('projects', {}).get(sys.argv[1], {}).get('tracking')
+if tracking and tracking.get('type'):
+    t = tracking['type'].upper()
+    key = tracking.get('project_key', '')
+    label = tracking.get('label', '')
+    instructions = tracking.get('instructions', '')
+    lines = [f'[PROJECT TRACKING — {t}]']
+    lines.append(f'This project uses {t} for issue tracking (project: {key}' + (f', label: {label}' if label else '') + ').')
+    lines.append('- Search for existing tickets before creating new ones')
+    lines.append('- Use appropriate CLI commands for ticket operations')
+    lines.append(f'- Prefix commit messages with the ticket key (e.g. {key}-123: ...)')
+    if instructions:
+        lines.append(instructions)
+    lines.append('---')
+    print(chr(10).join(lines))
+" "$PROJECT_NAME" 2>/dev/null || true)
+  else
+    tracking_prefix="[PROJECT TRACKING — NONE]
+This project does NOT use issue tracking. Do NOT create, search, or reference Jira tickets or any other tracking system.
+---"
+  fi
+
+  # Prepend tracking context to prompt
+  if [[ -n "$tracking_prefix" ]]; then
+    prompt="${tracking_prefix}
+${prompt}"
+  fi
+
   # Run claude interactively with the task prompt
   claude_args=("$prompt")
   [[ "$SKIP_PERMS" == true ]] && claude_args+=(--dangerously-skip-permissions)
