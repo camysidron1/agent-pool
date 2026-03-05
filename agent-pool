@@ -480,13 +480,14 @@ json.dump(data, sys.stdout, indent=2)
 # --- commands ---
 
 cmd_init() {
-  local count=4 launch=false env_name="" no_queue=false launch_here=false skip_perms=false
+  local count=4 launch=false env_name="" no_queue=false launch_here=false skip_perms=false no_driver=false
   while [[ $# -gt 0 ]]; do
     case $1 in
       --launch) launch=true; shift ;;
       --env) env_name="$2"; shift 2 ;;
       --no-queue) no_queue=true; shift ;;
       --here) launch_here=true; launch=true; shift ;;
+      --no-driver) no_driver=true; shift ;;
       --skip-permissions) skip_perms=true; shift ;;
       [0-9]*) count="$1"; shift ;;
       *) shift ;;
@@ -528,19 +529,22 @@ print('yes' if any(c['index'] == int(sys.argv[1]) for c in data['clones']) else 
     if [[ "$launch_here" == true ]]; then
       launch_here_all "$proj" "$env_name" "$no_queue" "$skip_perms" "${created_indexes[@]}"
     else
-      launch_grid "$proj" "${env_name}" "$no_queue" "$skip_perms" "${created_indexes[@]}"
+      local driver_flag="true"
+      [[ "$no_driver" == true ]] && driver_flag="false"
+      launch_grid "$proj" "${env_name}" "$no_queue" "$skip_perms" "$driver_flag" "${created_indexes[@]}"
     fi
   else
     printf "Done. Run 'agent-pool status -p %s' to see pool.\n" "$proj"
   fi
 }
 
-# Launch agents in a 2x2 grid layout (up to 4 per workspace)
+# Launch agents in a 2x2 grid layout (up to 4 per workspace) + optional driver pane
 launch_grid() {
   local proj="$1"; shift
   local env_name="$1"; shift
   local no_queue="$1"; shift
   local skip_perms="$1"; shift
+  local driver="$1"; shift
   local indexes=("$@")
   local total=${#indexes[@]}
 
@@ -658,6 +662,26 @@ print(data['surfaces'][0]['ref'])
       lock_clone "$pool_file" "$fourth_idx" "$ws_ref"
       label=$(printf "Agent %02d" "$fourth_idx")
       printf "  %s (bottom-right)\n" "$label"
+    fi
+
+    # Add driver pane as a 3rd column (full height) if enabled
+    if [[ "$driver" == "true" ]]; then
+      local source_path
+      source_path=$(get_source_repo "$proj")
+      local driver_split_out
+      driver_split_out=$(cmux --json new-split right --workspace "$ws_ref" --surface "$first_surface" 2>&1)
+      local driver_surface
+      driver_surface=$(echo "$driver_split_out" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for key in ('surface_ref', 'ref', 'surface'):
+    if key in data:
+        print(data[key]); sys.exit(0)
+" 2>/dev/null || true)
+      if [[ -n "$driver_surface" ]]; then
+        cmux send --workspace "$ws_ref" --surface "$driver_surface" "cd $source_path && claude\\n" 2>/dev/null || true
+      fi
+      printf "  Driver (right column)\n"
     fi
 
     if [[ $batch_size -eq 1 ]]; then
@@ -803,15 +827,17 @@ for key in ('surface_ref', 'ref', 'surface'):
 }
 
 cmd_launch() {
-  local env_name="" mode="panel" direction="right" no_queue=false skip_perms=false
+  local env_name="" mode="grid" direction="right" no_queue=false skip_perms=false no_driver=false
   while [[ $# -gt 0 ]]; do
     case $1 in
       --env) env_name="$2"; shift 2 ;;
+      --panel) mode="panel"; shift ;;
       --workspace) mode="workspace"; shift ;;
       --here) mode="here"; shift ;;
       --down) direction="down"; shift ;;
       --right) direction="right"; shift ;;
       --no-queue) no_queue=true; shift ;;
+      --no-driver) no_driver=true; shift ;;
       --skip-permissions) skip_perms=true; shift ;;
       *) echo "Unknown option: $1"; exit 1 ;;
     esac
@@ -826,6 +852,33 @@ cmd_launch() {
 
   ensure_pool_json "$pool_file"
   cleanup_stale_locks "$pool_file"
+
+  # Grid mode: collect up to 4 free clones and launch grid + driver
+  if [[ "$mode" == "grid" ]]; then
+    local grid_indexes=()
+    for ((i = 0; i < 4; i++)); do
+      local gidx
+      if gidx=$(find_free_clone "$pool_file"); then
+        grid_indexes+=("$gidx")
+        # Temporarily lock so next find_free_clone skips it
+        lock_clone "$pool_file" "$gidx" "grid-pending"
+      else
+        printf "Not enough free clones. Creating a new one...\n"
+        gidx=$(( $(next_index "$pool_file") + 1))
+        create_clone "$proj" "$gidx"
+        grid_indexes+=("$gidx")
+        lock_clone "$pool_file" "$gidx" "grid-pending"
+      fi
+    done
+    # Unlock the temporary locks (launch_grid will re-lock with workspace ref)
+    for gidx in "${grid_indexes[@]}"; do
+      unlock_clone "$pool_file" "$gidx"
+    done
+    local driver_flag="true"
+    [[ "$no_driver" == true ]] && driver_flag="false"
+    launch_grid "$proj" "${env_name}" "$no_queue" "$skip_perms" "$driver_flag" "${grid_indexes[@]}"
+    return
+  fi
 
   local idx
   if ! idx=$(find_free_clone "$pool_file"); then
@@ -1596,6 +1649,100 @@ for s in data.get('surfaces', []):
   cmd_init "${init_args[@]}"
 }
 
+cmd_docs() {
+  local target="${1:-}"
+  local docs_dir="$POOL_DIR/docs"
+
+  if [[ ! -d "$docs_dir" ]]; then
+    echo "No docs directory yet. Docs are created when agents run."
+    return
+  fi
+
+  if [[ -z "$target" ]]; then
+    # List all agent doc directories and shared
+    printf "%-20s %-8s %s\n" "Directory" "Files" "Last Modified"
+    printf "%-20s %-8s %s\n" "---------" "-----" "-------------"
+
+    _docs_dir_info() {
+      local dir="$1" label="$2"
+      local count last_mod
+      count=$(find "$dir" -maxdepth 1 -type f | wc -l | tr -d ' ')
+      # Portable last-modified: try GNU stat, then macOS stat
+      last_mod=$(find "$dir" -maxdepth 1 -type f -exec stat -c '%Y' {} + 2>/dev/null \
+              || find "$dir" -maxdepth 1 -type f -exec stat -f '%m' {} + 2>/dev/null \
+              || true)
+      last_mod=$(echo "$last_mod" | sort -rn | head -1)
+      if [[ -n "$last_mod" ]]; then
+        last_mod=$(date -d "@$last_mod" '+%Y-%m-%d %H:%M' 2>/dev/null \
+                || date -r "$last_mod" '+%Y-%m-%d %H:%M' 2>/dev/null \
+                || echo "-")
+      else
+        last_mod="-"
+      fi
+      printf "%-20s %-8s %s\n" "$label" "$count" "$last_mod"
+    }
+
+    if [[ -d "$docs_dir/shared" ]]; then
+      _docs_dir_info "$docs_dir/shared" "shared"
+    fi
+
+    if [[ -d "$docs_dir/agents" ]]; then
+      for agent_dir in "$docs_dir/agents"/*/; do
+        [[ -d "$agent_dir" ]] || continue
+        _docs_dir_info "$agent_dir" "$(basename "$agent_dir")"
+      done
+    fi
+  elif [[ "$target" == "shared" ]]; then
+    local target_dir="$docs_dir/shared"
+    if [[ ! -d "$target_dir" ]]; then
+      echo "No shared docs yet."
+      return
+    fi
+    printf "Shared docs (%s):\n\n" "$target_dir"
+    local found=false
+    for f in "$target_dir"/*; do
+      [[ -f "$f" ]] || continue
+      found=true
+      local fname
+      fname=$(basename "$f")
+      if [[ "$fname" == *.md ]]; then
+        printf "=== %s ===\n" "$fname"
+        cat "$f"
+        printf "\n"
+      else
+        printf "  %s\n" "$fname"
+      fi
+    done
+    if [[ "$found" == false ]]; then
+      echo "  (empty)"
+    fi
+  else
+    local target_dir="$docs_dir/agents/$target"
+    if [[ ! -d "$target_dir" ]]; then
+      echo "No docs for agent '$target'."
+      return
+    fi
+    printf "Docs for %s (%s):\n\n" "$target" "$target_dir"
+    local found=false
+    for f in "$target_dir"/*; do
+      [[ -f "$f" ]] || continue
+      found=true
+      local fname
+      fname=$(basename "$f")
+      if [[ "$fname" == *.md ]]; then
+        printf "=== %s ===\n" "$fname"
+        cat "$f"
+        printf "\n"
+      else
+        printf "  %s\n" "$fname"
+      fi
+    done
+    if [[ "$found" == false ]]; then
+      echo "  (empty)"
+    fi
+  fi
+}
+
 cmd_help() {
   cat <<'HELP'
 agent-pool — manage a warm pool of isolated repo clones for parallel Claude sessions
@@ -1613,17 +1760,20 @@ Commands:
   start                 Interactive guided setup: pick project, count, permissions,
                           tear down stale sessions, and launch agents
   init [n]              Create n warm clones (default: 4)
-                          --launch     Also launch all clones in 2x2 grid(s)
+                          --launch     Also launch all clones in 2x2 grid(s) + driver
                           --here       Launch as splits in current workspace
                           --no-queue   Launch claude directly (skip task runner)
+                          --no-driver  Skip the driver pane when launching grid
                           --env NAME   Inject env vars via nenv
                           --skip-permissions  Pass --dangerously-skip-permissions to claude
-  launch [opts]         Pick a free clone, launch agent runner in a panel
+  launch [opts]         Launch agents (default: 4-agent grid + driver pane)
+                          --panel      Single-agent panel mode (old default)
                           --here       Launch in current terminal (replaces shell)
                           --workspace  Open as new workspace tab instead
                           --no-queue   Launch claude directly (skip task runner)
-                          --down       Split downward instead of right
-                          --right      Split rightward (default)
+                          --no-driver  Skip the driver pane in grid mode
+                          --down       Split downward instead of right (panel mode)
+                          --right      Split rightward (panel mode, default)
                           --env NAME   Inject env vars via nenv
                           --skip-permissions  Pass --dangerously-skip-permissions to claude
   status                Show all clones and their state
@@ -1640,6 +1790,11 @@ Commands:
   approvals             List pending approval requests
   approve <id|--all>    Approve a pending request (or all)
   deny <id>             Deny a pending request
+
+  Documentation:
+  docs                  List all agent doc directories with file counts
+  docs <agent-id>       Show files and .md contents for an agent
+  docs shared           Show shared documentation files
 
   Maintenance:
   refresh <n|--all>     Reset clone(s) to project branch, clean branches, run setup
@@ -1695,6 +1850,7 @@ case "$cmd" in
   approvals) cmd_approvals "$@" ;;
   approve)   cmd_approve "$@" ;;
   deny)      cmd_deny "$@" ;;
+  docs)      cmd_docs "$@" ;;
   refresh)   cmd_refresh "$@" ;;
   release)  cmd_release "$@" ;;
   restart)  cmd_restart "$@" ;;
