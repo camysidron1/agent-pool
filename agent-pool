@@ -168,7 +168,7 @@ next_index() {
 import json, sys
 data = json.load(sys.stdin)
 indexes = [c['index'] for c in data['clones']]
-print(max(indexes) if indexes else -1)
+print(max(indexes) if indexes else 0)
 ")
   echo "$max"
 }
