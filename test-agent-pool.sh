@@ -17,6 +17,7 @@ FAILED_NAMES=()
 
 setup() {
   TEST_DIR=$(mktemp -d)
+  export DATA_DIR="$TEST_DIR"
   export POOL_DIR="$TEST_DIR"
 
   # Create two bare git repos as test sources
@@ -59,7 +60,7 @@ teardown() {
   if [[ -n "${TEST_DIR:-}" ]] && [[ -d "$TEST_DIR" ]]; then
     rm -rf "$TEST_DIR"
   fi
-  unset POOL_DIR TEST_DIR REPO_A REPO_B
+  unset DATA_DIR POOL_DIR TEST_DIR REPO_A REPO_B
 }
 
 # --- assertion helpers ---
@@ -690,7 +691,7 @@ test_runner_installs_approval_hook() {
 
   # Simulate what agent-runner does (extract the merge logic)
   local settings_file="$TEST_DIR/foo-00/.claude/settings.json"
-  local hook_entry='{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"~/.agent-pool/hooks/approval-hook.sh","timeout":310000}]}]}}'
+  local hook_entry="{\"hooks\":{\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"${SCRIPT_DIR}/hooks/approval-hook.sh\",\"timeout\":310000}]}]}}"
   local merged
   merged=$(jq --argjson entry "$hook_entry" '
     .hooks //= {} |
@@ -723,7 +724,7 @@ test_runner_merge_is_idempotent() {
   local settings_file="$TEST_DIR/settings-test.json"
   echo '{"hooks":{}}' > "$settings_file"
 
-  local hook_entry='{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"~/.agent-pool/hooks/approval-hook.sh","timeout":310000}]}]}}'
+  local hook_entry="{\"hooks\":{\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"${SCRIPT_DIR}/hooks/approval-hook.sh\",\"timeout\":310000}]}]}}"
 
   # Apply twice
   for _ in 1 2; do

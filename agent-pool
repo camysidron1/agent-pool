@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-POOL_DIR="${POOL_DIR:-$HOME/.agent-pool}"
-PROJECTS_JSON="$POOL_DIR/projects.json"
-RUNNER_SCRIPT="$POOL_DIR/agent-runner.sh"
+TOOL_DIR="$(cd "$(dirname "$0")" && pwd)"
+DATA_DIR="${DATA_DIR:-${POOL_DIR:-$HOME/.agent-pool}}"
+export POOL_DIR="$DATA_DIR"  # backward compat for child processes
+
+PROJECTS_JSON="$DATA_DIR/projects.json"
+RUNNER_SCRIPT="$TOOL_DIR/agent-runner.sh"
 
 # --- project config layer ---
 
@@ -15,7 +18,7 @@ ensure_projects_json() {
 
 auto_migrate() {
   # Backward compat: if pool.json exists but projects.json doesn't, migrate
-  if [[ -f "$POOL_DIR/pool.json" ]] && [[ ! -f "$PROJECTS_JSON" ]]; then
+  if [[ -f "$DATA_DIR/pool.json" ]] && [[ ! -f "$PROJECTS_JSON" ]]; then
     local source_repo="$HOME/Documents/GitHub/nebari-mvp"
     /usr/bin/python3 -c "
 import json, os
@@ -34,8 +37,8 @@ with open('$PROJECTS_JSON', 'w') as f:
     json.dump(projects, f, indent=2)
 "
     # Rename state files
-    [[ -f "$POOL_DIR/pool.json" ]] && mv "$POOL_DIR/pool.json" "$POOL_DIR/pool-nebari.json"
-    [[ -f "$POOL_DIR/tasks.json" ]] && mv "$POOL_DIR/tasks.json" "$POOL_DIR/tasks-nebari.json"
+    [[ -f "$DATA_DIR/pool.json" ]] && mv "$DATA_DIR/pool.json" "$DATA_DIR/pool-nebari.json"
+    [[ -f "$DATA_DIR/tasks.json" ]] && mv "$DATA_DIR/tasks.json" "$DATA_DIR/tasks-nebari.json"
   fi
 }
 
@@ -79,24 +82,27 @@ print('yes' if sys.argv[1] in data.get('projects', {}) else 'no')
     return
   fi
 
-  # Count registered projects — if more than one, require explicit -p flag
-  local proj_count
-  proj_count=$(read_projects | /usr/bin/python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-print(len(data.get('projects', {})))
-")
-  if [[ "$proj_count" -gt 1 ]]; then
-    echo "Error: multiple projects registered — you must specify -p <project>. Run 'agent-pool project list' to see available projects." >&2
-    exit 1
-  fi
-
+  # Check for a default project first
   local default_proj
   default_proj=$(read_projects | /usr/bin/python3 -c "
 import json, sys
 data = json.load(sys.stdin)
 print(data.get('default', ''))
 ")
+
+  # If no default and multiple projects, require explicit -p flag
+  if [[ -z "$default_proj" ]]; then
+    local proj_count
+    proj_count=$(read_projects | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print(len(data.get('projects', {})))
+")
+    if [[ "$proj_count" -gt 1 ]]; then
+      echo "Error: multiple projects registered and no default set — you must specify -p <project>. Run 'agent-pool project list' to see available projects." >&2
+      exit 1
+    fi
+  fi
   if [[ -z "$default_proj" ]]; then
     echo "Error: no project specified and no default set. Use -p <project> or run 'agent-pool project default <name>'." >&2
     exit 1
@@ -108,12 +114,12 @@ print(data.get('default', ''))
 
 get_pool_json_path() {
   local proj="$1"
-  echo "$POOL_DIR/pool-${proj}.json"
+  echo "$DATA_DIR/pool-${proj}.json"
 }
 
 get_tasks_json_path() {
   local proj="$1"
-  echo "$POOL_DIR/tasks-${proj}.json"
+  echo "$DATA_DIR/tasks-${proj}.json"
 }
 
 get_clone_prefix() {
@@ -188,7 +194,7 @@ sys.exit(1)
 
 get_clone_path() {
   local prefix="$1" idx="$2"
-  printf '%s/%s-%02d' "$POOL_DIR" "$prefix" "$idx"
+  printf '%s/%s-%02d' "$DATA_DIR" "$prefix" "$idx"
 }
 
 lock_clone() {
@@ -1037,7 +1043,7 @@ for c in data['clones']:
         branch = c.get('branch', '?')
     ws = c.get('workspace_id', '') or '-'
     print(f'{idx:<8} {status:<12} {branch:<20} {ws}')
-" "$POOL_DIR" "$prefix"
+" "$DATA_DIR" "$prefix"
 }
 
 cmd_refresh() {
@@ -1413,7 +1419,7 @@ json.dump(data, sys.stdout, indent=2)
 }
 
 cmd_approvals() {
-  local approvals_dir="$POOL_DIR/approvals"
+  local approvals_dir="$DATA_DIR/approvals"
   mkdir -p "$approvals_dir"
 
   local found=false
@@ -1464,7 +1470,7 @@ cmd_approve() {
     exit 1
   fi
 
-  local approvals_dir="$POOL_DIR/approvals"
+  local approvals_dir="$DATA_DIR/approvals"
   mkdir -p "$approvals_dir"
   local decided_at
   decided_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -1498,7 +1504,7 @@ cmd_deny() {
     exit 1
   fi
 
-  local approvals_dir="$POOL_DIR/approvals"
+  local approvals_dir="$DATA_DIR/approvals"
   mkdir -p "$approvals_dir"
   local decided_at
   decided_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -1652,7 +1658,7 @@ for s in data.get('surfaces', []):
 
   # --- 5a. Clean up stale task lock files ---
   local lock_file
-  for lock_file in "${POOL_DIR}"/tasks-*.json.lock "${POOL_DIR}"/tasks.json.lock; do
+  for lock_file in "${DATA_DIR}"/tasks-*.json.lock "${DATA_DIR}"/tasks.json.lock; do
     [[ -d "$lock_file" ]] || continue
     local pidfile="${lock_file}/pid"
     local holder_pid=""
@@ -1747,7 +1753,7 @@ print(sum(1 for t in data.get('tasks', []) if t.get('status') == 'pending'))
 
 cmd_docs() {
   local target="${1:-}"
-  local docs_dir="$POOL_DIR/docs"
+  local docs_dir="$DATA_DIR/docs"
 
   if [[ ! -d "$docs_dir" ]]; then
     echo "No docs directory yet. Docs are created when agents run."
