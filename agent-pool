@@ -168,7 +168,7 @@ next_index() {
 import json, sys
 data = json.load(sys.stdin)
 indexes = [c['index'] for c in data['clones']]
-print(max(indexes) if indexes else 0)
+print(max(indexes) if indexes else -1)
 ")
   echo "$max"
 }
@@ -351,15 +351,27 @@ write_tasks() {
 acquire_task_lock() {
   local tasks_file="$1"
   local lock_dir="${tasks_file}.lock"
+  local pidfile="${lock_dir}/pid"
   local max_wait=5 waited=0
   while ! mkdir "$lock_dir" 2>/dev/null; do
+    # Check for stale lock — if the holding PID is dead, remove it
+    if [[ -f "$pidfile" ]]; then
+      local holder_pid
+      holder_pid=$(cat "$pidfile" 2>/dev/null || echo "")
+      if [[ -n "$holder_pid" ]] && ! kill -0 "$holder_pid" 2>/dev/null; then
+        rm -rf "$lock_dir"
+        continue
+      fi
+    fi
     sleep 0.1
     waited=$((waited + 1))
     if [[ $waited -ge $((max_wait * 10)) ]]; then
       echo "Failed to acquire task lock" >&2
+      echo "" >&2
       return 1
     fi
   done
+  echo $$ > "$pidfile"
   trap "rm -rf '$lock_dir'" EXIT
 }
 
@@ -1638,7 +1650,66 @@ for s in data.get('surfaces', []):
     printf "Teardown complete.\n"
   fi
 
-  # --- 5. Init clones if needed and launch ---
+  # --- 5a. Clean up stale task lock files ---
+  local lock_file
+  for lock_file in "${POOL_DIR}"/tasks-*.json.lock "${POOL_DIR}"/tasks.json.lock; do
+    [[ -d "$lock_file" ]] || continue
+    local pidfile="${lock_file}/pid"
+    local holder_pid=""
+    [[ -f "$pidfile" ]] && holder_pid=$(cat "$pidfile" 2>/dev/null || echo "")
+    if [[ -z "$holder_pid" ]] || ! kill -0 "$holder_pid" 2>/dev/null; then
+      rm -rf "$lock_file"
+      printf "  Cleaned stale lock: %s\n" "$(basename "$lock_file")"
+    fi
+  done
+
+  # --- 5. Reset pool and clean old clone directories ---
+  # Remove all existing clone directories for this project
+  local old_indexes
+  old_indexes=$(read_pool "$pool_file" | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for c in data['clones']:
+    print(c['index'])
+" 2>/dev/null || true)
+  if [[ -n "$old_indexes" ]]; then
+    while IFS= read -r old_idx; do
+      local old_path
+      old_path=$(get_clone_path "$prefix" "$old_idx")
+      [[ -d "$old_path" ]] && rm -rf "$old_path"
+    done <<< "$old_indexes"
+  fi
+  # Reset pool JSON so numbering starts from 0
+  echo '{"clones":[]}' > "$pool_file"
+
+  # --- 6. Close all other panes in this workspace ---
+  local caller_surface
+  caller_surface=$(cmux --json identify 2>/dev/null | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+c = data.get('caller') or data.get('focused', {})
+print(c.get('surface_ref', ''))
+" 2>/dev/null || true)
+
+  if [[ -n "$caller_surface" ]]; then
+    local all_surfaces
+    all_surfaces=$(cmux --json list-panes 2>/dev/null | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for pane in data.get('panes', []):
+    for s in pane.get('surface_refs', []):
+        print(s)
+" 2>/dev/null || true)
+
+    if [[ -n "$all_surfaces" ]]; then
+      while IFS= read -r surf; do
+        [[ "$surf" == "$caller_surface" ]] && continue
+        cmux close-surface --surface "$surf" 2>/dev/null || true
+      done <<< "$all_surfaces"
+    fi
+  fi
+
+  # --- 7. Init clones and launch ---
   printf "\nLaunching %d agents for '%s'...\n" "$count" "$proj"
 
   # Set PROJECT so resolve_project picks it up
@@ -1647,6 +1718,31 @@ for s in data.get('surfaces', []):
   local init_args=("$count" "--here" "--launch")
   [[ "$skip_perms" == true ]] && init_args+=("--skip-permissions")
   cmd_init "${init_args[@]}"
+
+  # Turn this pane into the driver: cd to source repo and exec claude
+  local source_path
+  source_path=$(get_source_repo "$proj")
+  cd "$source_path"
+
+  # Check pending tasks to give the orchestrator context
+  local tasks_file pending_count
+  tasks_file=$(get_tasks_json_path "$proj")
+  pending_count=0
+  if [[ -f "$tasks_file" ]]; then
+    pending_count=$(/usr/bin/python3 -c "
+import json, sys
+data = json.load(open('$tasks_file'))
+print(sum(1 for t in data.get('tasks', []) if t.get('status') == 'pending'))
+" 2>/dev/null || echo 0)
+  fi
+
+  local startup_msg="agent-pool: ${count} agents active for project '${proj}'. ${pending_count} pending tasks in queue. Ready to receive tasks."
+
+  if [[ "$skip_perms" == true ]]; then
+    exec claude --dangerously-skip-permissions "$startup_msg"
+  else
+    exec claude "$startup_msg"
+  fi
 }
 
 cmd_docs() {
