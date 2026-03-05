@@ -291,10 +291,43 @@ This project does NOT use issue tracking. Do NOT create, search, or reference Ji
 ---"
   fi
 
-  # Prepend tracking context to prompt
+  # Build git workflow context for the prompt
+  workflow_prefix=""
+  workflow_json=$(get_runner_project_field "$PROJECT_NAME" "git_workflow")
+
+  if [[ -n "$workflow_json" && "$workflow_json" != "None" && "$workflow_json" != "null" && "$workflow_json" != "" ]]; then
+    workflow_prefix=$(/usr/bin/python3 -c "
+import json, sys
+with open('$PROJECTS_JSON') as f:
+    data = json.load(f)
+gw = data.get('projects', {}).get(sys.argv[1], {}).get('git_workflow')
+if gw and gw.get('type'):
+    t = gw['type'].upper()
+    instructions = gw.get('instructions', '')
+    lines = [f'[GIT WORKFLOW — {t}]']
+    if instructions:
+        lines.append(instructions)
+    lines.append('---')
+    print(chr(10).join(lines))
+" "$PROJECT_NAME" 2>/dev/null || true)
+  else
+    workflow_prefix="[GIT WORKFLOW]
+Commit your changes with a descriptive message when your task is complete. Do not create PRs or merge unless specifically asked in the task prompt.
+---"
+  fi
+
+  # Prepend tracking and workflow context to prompt
+  local context_prefix=""
   if [[ -n "$tracking_prefix" ]]; then
-    prompt="${tracking_prefix}
-${prompt}"
+    context_prefix="${tracking_prefix}
+"
+  fi
+  if [[ -n "$workflow_prefix" ]]; then
+    context_prefix="${context_prefix}${workflow_prefix}
+"
+  fi
+  if [[ -n "$context_prefix" ]]; then
+    prompt="${context_prefix}${prompt}"
   fi
 
   # Run claude interactively with the task prompt
