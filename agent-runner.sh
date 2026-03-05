@@ -189,10 +189,9 @@ trap 'release_clone_lock; exit 143' TERM
 
 printf "\033[1;36m%s\033[0m ready — polling for tasks (project: %s)...\n" "$AGENT_ID" "$PROJECT_NAME"
 
-# Interruptible sleep using read with timeout (signals delivered between iterations)
+# Portable interruptible sleep
 isleep() {
-  # bash 3.2 read -t works and is interruptible by signals
-  read -t "$1" -r _ < /dev/null 2>/dev/null || true
+  sleep "$1"
 }
 
 while true; do
