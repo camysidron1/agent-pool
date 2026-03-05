@@ -743,6 +743,148 @@ test_runner_merge_is_idempotent() {
   assert_eq "1" "$count" "should have exactly 1 PreToolUse hook entry after two merges"
 }
 
+# --- docs tests ---
+
+test_docs_empty() {
+  # No docs dir yet — should handle gracefully
+  local output
+  output=$("$AGENT_POOL" docs)
+  assert_contains "$output" "No docs directory"
+}
+
+test_docs_list() {
+  mkdir -p "$TEST_DIR/docs/agents/agent-01"
+  mkdir -p "$TEST_DIR/docs/shared"
+  echo '# Plan' > "$TEST_DIR/docs/agents/agent-01/todo.md"
+  echo '# Lessons' > "$TEST_DIR/docs/shared/lessons.md"
+
+  local output
+  output=$("$AGENT_POOL" docs)
+  assert_contains "$output" "shared"
+  assert_contains "$output" "agent-01"
+}
+
+test_docs_agent() {
+  mkdir -p "$TEST_DIR/docs/agents/agent-01"
+  echo '# My Plan' > "$TEST_DIR/docs/agents/agent-01/todo.md"
+
+  local output
+  output=$("$AGENT_POOL" docs agent-01)
+  assert_contains "$output" "todo.md"
+  assert_contains "$output" "# My Plan"
+}
+
+test_docs_shared() {
+  mkdir -p "$TEST_DIR/docs/shared"
+  echo '# Architecture' > "$TEST_DIR/docs/shared/arch.md"
+
+  local output
+  output=$("$AGENT_POOL" docs shared)
+  assert_contains "$output" "arch.md"
+  assert_contains "$output" "# Architecture"
+}
+
+test_docs_agent_not_found() {
+  mkdir -p "$TEST_DIR/docs/agents"
+  local output
+  output=$("$AGENT_POOL" docs agent-99)
+  assert_contains "$output" "No docs for agent"
+}
+
+test_runner_creates_docs_dirs() {
+  # Verify agent-runner sets up docs dirs and symlinks
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 1 -p foo
+  "$AGENT_POOL" add "test task" -p foo
+
+  local clone_path="$TEST_DIR/foo-01"
+  local agent_id="agent-01"
+
+  # Simulate what agent-runner does (the docs setup portion)
+  mkdir -p "$TEST_DIR/docs/agents/$agent_id"
+  mkdir -p "$TEST_DIR/docs/shared"
+  ln -sfn "$TEST_DIR/docs/agents/$agent_id" "$clone_path/agent-docs"
+  ln -sfn "$TEST_DIR/docs/shared" "$clone_path/shared-docs"
+
+  # Verify symlinks
+  [[ -L "$clone_path/agent-docs" ]] || { echo "    FAIL: agent-docs symlink missing"; return 1; }
+  [[ -L "$clone_path/shared-docs" ]] || { echo "    FAIL: shared-docs symlink missing"; return 1; }
+
+  # Verify symlink targets
+  local target
+  target=$(readlink "$clone_path/agent-docs")
+  assert_eq "$TEST_DIR/docs/agents/$agent_id" "$target" "agent-docs symlink target"
+
+  # Write through symlink and verify
+  echo "# Test" > "$clone_path/agent-docs/plan.md"
+  assert_file_exists "$TEST_DIR/docs/agents/$agent_id/plan.md"
+}
+
+test_runner_claudemd_idempotent() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 1 -p foo
+
+  local clone_path="$TEST_DIR/foo-01"
+
+  # Simulate CLAUDE.md append (twice — should be idempotent)
+  for _ in 1 2; do
+    if ! grep -qF '## Documentation Rules' "$clone_path/CLAUDE.md" 2>/dev/null; then
+      cat >> "$clone_path/CLAUDE.md" <<'DOCEOF'
+
+## Documentation Rules — IMPORTANT
+
+NEVER create documentation files inside the repository tree.
+DOCEOF
+    fi
+  done
+
+  # Count occurrences of the header
+  local count
+  count=$(grep -c '## Documentation Rules' "$clone_path/CLAUDE.md")
+  assert_eq "1" "$count" "CLAUDE.md section should appear exactly once"
+}
+
+test_runner_gitignore_entries() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 1 -p foo
+
+  local clone_path="$TEST_DIR/foo-01"
+
+  # Simulate .gitignore updates (twice — should be idempotent)
+  for _ in 1 2; do
+    for entry in agent-docs shared-docs CLAUDE.md; do
+      if ! grep -qxF "$entry" "$clone_path/.gitignore" 2>/dev/null; then
+        echo "$entry" >> "$clone_path/.gitignore"
+      fi
+    done
+  done
+
+  # Each entry should appear exactly once
+  for entry in agent-docs shared-docs CLAUDE.md; do
+    local count
+    count=$(grep -cxF "$entry" "$clone_path/.gitignore")
+    assert_eq "1" "$count" "$entry should appear once in .gitignore"
+  done
+}
+
+test_refresh_preserves_docs() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 1 -p foo
+
+  # Create docs outside the clone
+  mkdir -p "$TEST_DIR/docs/agents/agent-01"
+  mkdir -p "$TEST_DIR/docs/shared"
+  echo '# Important' > "$TEST_DIR/docs/agents/agent-01/plan.md"
+  echo '# Shared' > "$TEST_DIR/docs/shared/lessons.md"
+
+  # Refresh the clone
+  "$AGENT_POOL" refresh 1 -p foo
+
+  # Docs should still exist (they're outside the clone)
+  assert_file_exists "$TEST_DIR/docs/agents/agent-01/plan.md" "agent docs should survive refresh"
+  assert_file_exists "$TEST_DIR/docs/shared/lessons.md" "shared docs should survive refresh"
+}
+
 # --- main ---
 
 printf "\n\033[1;34m=== agent-pool multi-project test suite ===\033[0m\n\n"
@@ -785,6 +927,17 @@ run_test test_hook_exits_on_approve
 run_test test_hook_exits_on_deny
 run_test test_runner_installs_approval_hook
 run_test test_runner_merge_is_idempotent
+
+# Docs tests
+run_test test_docs_empty
+run_test test_docs_list
+run_test test_docs_agent
+run_test test_docs_shared
+run_test test_docs_agent_not_found
+run_test test_runner_creates_docs_dirs
+run_test test_runner_claudemd_idempotent
+run_test test_runner_gitignore_entries
+run_test test_refresh_preserves_docs
 
 printf "\n\033[1;34m=== Results ===\033[0m\n"
 printf "  Total: %d  Passed: \033[32m%d\033[0m  Failed: \033[31m%d\033[0m\n" "$TESTS_RUN" "$TESTS_PASSED" "$TESTS_FAILED"

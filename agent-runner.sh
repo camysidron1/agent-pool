@@ -219,6 +219,42 @@ while true; do
     fi
   fi
 
+  # Set up centralized docs directories
+  mkdir -p "$POOL_DIR/docs/agents/$AGENT_ID"
+  mkdir -p "$POOL_DIR/docs/shared"
+
+  # Symlink into clone for convenience (absolute paths)
+  ln -sfn "$POOL_DIR/docs/agents/$AGENT_ID" "$CLONE_PATH/agent-docs"
+  ln -sfn "$POOL_DIR/docs/shared" "$CLONE_PATH/shared-docs"
+
+  # Ensure symlinks are in .gitignore
+  for entry in agent-docs shared-docs CLAUDE.md; do
+    if ! grep -qxF "$entry" "$CLONE_PATH/.gitignore" 2>/dev/null; then
+      echo "$entry" >> "$CLONE_PATH/.gitignore"
+    fi
+  done
+
+  # Append documentation rules to CLAUDE.md (idempotent)
+  if ! grep -qF '## Documentation Rules' "$CLONE_PATH/CLAUDE.md" 2>/dev/null; then
+    cat >> "$CLONE_PATH/CLAUDE.md" <<'DOCEOF'
+
+## Documentation Rules — IMPORTANT
+
+NEVER create documentation, design docs, plans, reviews, or markdown files inside the repository tree.
+ALL non-code documentation must go in one of these locations:
+
+- `agent-docs/` — YOUR private workspace for this task (plans, todos, notes, reviews)
+  Example: agent-docs/todo.md, agent-docs/implementation-plan.md
+- `shared-docs/` — shared across all agents (lessons learned, architecture decisions)
+  Example: shared-docs/lessons.md
+
+These are symlinked to a persistent store outside the repo. They survive clone refreshes and are visible to the orchestrator.
+
+Do NOT write .md files to paths like documentation/, docs/, design/, state/, etc. within the repo.
+Code comments and inline docs in source files are fine — this rule is about standalone documentation files.
+DOCEOF
+  fi
+
   # Run claude interactively with the task prompt
   claude_args=("$prompt")
   [[ "$SKIP_PERMS" == true ]] && claude_args+=(--dangerously-skip-permissions)
