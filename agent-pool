@@ -1145,8 +1145,9 @@ refresh_one() {
   clone_path=$(get_clone_path "$prefix" "$idx")
 
   if [[ ! -d "$clone_path" ]]; then
-    printf "  Clone %02d does not exist.\n" "$idx"
-    return 1
+    printf "  Clone %02d missing, recreating...\n" "$idx"
+    create_clone "$proj" "$idx"
+    return $?
   fi
 
   printf "Refreshing clone %02d...\n" "$idx"
