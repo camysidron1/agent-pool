@@ -3,14 +3,31 @@
 # The driver can approve/deny via: agent-pool approvals | approve | deny
 set -euo pipefail
 
-POOL_DIR="${POOL_DIR:-$HOME/.agent-pool}"
-APPROVALS_DIR="$POOL_DIR/approvals"
-mkdir -p "$APPROVALS_DIR"
-
 # Read hook payload from stdin
 INPUT=$(cat)
 
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty')
+
+# Allowlist of safe/read-only tools that don't need approval
+ALLOWED_TOOLS=(
+  ToolSearch Read Glob Grep Agent
+  WebFetch WebSearch AskUserQuestion
+  EnterPlanMode ExitPlanMode
+  TaskCreate TaskGet TaskList TaskOutput TaskUpdate TaskStop
+  Skill ListMcpResourcesTool ReadMcpResourceTool NotebookEdit
+  EnterWorktree
+)
+
+for allowed in "${ALLOWED_TOOLS[@]}"; do
+  if [[ "$TOOL_NAME" == "$allowed" ]]; then
+    exit 0
+  fi
+done
+
+POOL_DIR="${POOL_DIR:-$HOME/.agent-pool}"
+APPROVALS_DIR="$POOL_DIR/approvals"
+mkdir -p "$APPROVALS_DIR"
+
 TOOL_INPUT=$(echo "$INPUT" | jq -r '.tool_input // {} | tostring' | head -c 200)
 
 # Derive agent ID from CWD (e.g. /Users/x/.agent-pool/ap-05 → ap-05)
