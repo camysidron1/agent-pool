@@ -48,6 +48,14 @@ jq -n \
   '{id: $id, agent: $agent, tool: $tool, input: $input, timestamp: $ts, status: "pending", decided_at: null}' \
   > "$REQ_FILE"
 
+# Notify: macOS desktop notification + terminal bell
+NOTIFY_TITLE="Agent Approval: ${AGENT_ID}"
+NOTIFY_MSG="${TOOL_NAME}: ${TOOL_INPUT:0:100}"
+osascript -e "display notification \"$NOTIFY_MSG\" with title \"$NOTIFY_TITLE\" sound name \"Ping\"" 2>/dev/null &
+
+# Write to notification log so watchers can detect new requests
+echo "${REQ_ID}|${AGENT_ID}|${TOOL_NAME}|${TOOL_INPUT:0:100}" >> "$APPROVALS_DIR/.notify.log" 2>/dev/null || true
+
 # Poll for decision (max 300s)
 WAITED=0
 MAX_WAIT=300
