@@ -213,6 +213,19 @@ while true; do
 
   # Checkout fresh branch from project branch
   cd "$CLONE_PATH"
+
+  # Ensure origin points to a real remote, not a local filesystem path
+  origin_url=$(git remote get-url origin 2>/dev/null || true)
+  if [[ "$origin_url" == /* ]]; then
+    # Local path — fix it using the source repo's origin
+    source_repo=$(get_runner_project_field "$PROJECT_NAME" "source")
+    github_url=$(git -C "$source_repo" remote get-url origin 2>/dev/null || true)
+    if [[ -n "$github_url" ]]; then
+      git remote set-url origin "$github_url"
+      printf "\033[1;33m%s\033[0m fixed origin remote: %s\n" "$AGENT_ID" "$github_url"
+    fi
+  fi
+
   git fetch origin -q 2>/dev/null || true
   local_branch="${AGENT_ID}-${task_id}"
   git checkout -B "$local_branch" "origin/$BRANCH" -q 2>/dev/null || git checkout -B "$local_branch" "$BRANCH" -q
@@ -331,7 +344,7 @@ Commit your changes with a descriptive message when your task is complete. Do no
   fi
 
   # Prepend tracking and workflow context to prompt
-  local context_prefix=""
+  context_prefix=""
   if [[ -n "$tracking_prefix" ]]; then
     context_prefix="${tracking_prefix}
 "
