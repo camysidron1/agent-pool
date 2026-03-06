@@ -216,17 +216,111 @@ for ws, idxs in groups.items():
 
   while IFS='|' read -r ws idx_list; do
     [[ -z "$ws" ]] && continue
-    # Clones without a workspace can't be restarted via cmux
+    # Clones without a workspace — match via runner TTY
     if [[ "$ws" == "__none__" ]]; then
       IFS=',' read -ra idxs <<< "$idx_list"
+
+      # Collect all terminal surfaces across all workspaces
+      local all_ws_refs=""
+      all_ws_refs=$(cmux --json list-workspaces 2>/dev/null | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for w in data.get('workspaces', []):
+    print(w['ref'])
+" 2>/dev/null || true)
+      local surface_list=""
+      for check_ws in $all_ws_refs; do
+        local ws_surfs
+        ws_surfs=$(cmux --json list-pane-surfaces --workspace "$check_ws" 2>/dev/null | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for s in data.get('surfaces', []):
+    if s.get('type') == 'terminal':
+        print(s['ref'])
+" 2>/dev/null || true)
+        if [[ -n "$ws_surfs" ]]; then
+          surface_list="${surface_list}${surface_list:+$'\n'}${ws_surfs}"
+        fi
+      done
+
+      # Phase 1: Capture runner TTYs BEFORE killing (processes still alive)
+      # Format: "clone_idx=/dev/ttysNNN" per line
+      local clone_ttys=""
+      for cidx in "${idxs[@]}"; do
+        local rtty=""
+        rtty=$(ps -eo tty,args 2>/dev/null | grep "agent-runner.*[[:space:]]${cidx}[[:space:]].*--project.*${proj}" | grep -v grep | head -1 | awk '{print "/dev/" $1}' || true)
+        if [[ -n "$rtty" && "$rtty" != "/dev/?" && "$rtty" != "/dev/" ]]; then
+          clone_ttys="${clone_ttys}${cidx}=${rtty}"$'\n'
+        fi
+      done
+
+      # Phase 2: Kill all claude processes and refresh all clones
       for cidx in "${idxs[@]}"; do
         local clone_path
         clone_path=$(get_clone_path "$prefix" "$cidx")
         _kill_claude_in_clone "$clone_path"
         refresh_one "$proj" "$cidx"
-        local runner_cmd="cd $clone_path && $RUNNER_SCRIPT $cidx --project $proj${runner_env_flag}${runner_perms_flag}"
-        printf "  Agent-%02d has no workspace. Run manually:\n    %s\n" "$cidx" "$runner_cmd"
       done
+
+      # Phase 3: Probe all surfaces for their TTYs (shells now idle)
+      local marker_dir="$DATA_DIR/.tty-probe-$$"
+      rm -rf "$marker_dir"
+      mkdir -p "$marker_dir"
+      local surf_num=0
+      while IFS= read -r surf; do
+        [[ -z "$surf" ]] && continue
+        cmux send --surface "$surf" "tty > '$marker_dir/$surf_num' 2>/dev/null\\n" 2>/dev/null || true
+        surf_num=$((surf_num + 1))
+      done <<< "$surface_list"
+      # Single wait for all tty commands to complete
+      [[ $surf_num -gt 0 ]] && sleep 1
+
+      # Phase 4: Match surfaces to clones by TTY and send restart commands
+      surf_num=0
+      while IFS= read -r surf; do
+        [[ -z "$surf" ]] && continue
+        local stty=""
+        if [[ -f "$marker_dir/$surf_num" ]]; then
+          stty=$(tr -d '[:space:]' < "$marker_dir/$surf_num")
+        fi
+        surf_num=$((surf_num + 1))
+        [[ -z "$stty" ]] && continue
+
+        # Find which clone had this TTY
+        local matched_cidx=""
+        while IFS= read -r mapping; do
+          [[ -z "$mapping" ]] && continue
+          local mcidx="${mapping%%=*}"
+          local mtty="${mapping#*=}"
+          if [[ "$stty" == "$mtty" ]]; then
+            matched_cidx="$mcidx"
+            break
+          fi
+        done <<< "$clone_ttys"
+        [[ -z "$matched_cidx" ]] && continue
+
+        local clone_path
+        clone_path=$(get_clone_path "$prefix" "$matched_cidx")
+        local runner_cmd="cd $clone_path && $RUNNER_SCRIPT $matched_cidx --project $proj${runner_env_flag}${runner_perms_flag}"
+        cmux send --surface "$surf" "$runner_cmd\\n" 2>/dev/null || true
+        printf "  Restarted agent-%02d on %s\n" "$matched_cidx" "$surf"
+        restarted=$((restarted + 1))
+        # Remove matched clone so it can't double-match
+        clone_ttys=$(printf '%s' "$clone_ttys" | grep -v "^${matched_cidx}=")
+      done <<< "$surface_list"
+
+      # Report unmatched clones
+      while IFS= read -r mapping; do
+        [[ -z "$mapping" ]] && continue
+        local mcidx="${mapping%%=*}"
+        local clone_path
+        clone_path=$(get_clone_path "$prefix" "$mcidx")
+        local runner_cmd="cd $clone_path && $RUNNER_SCRIPT $mcidx --project $proj${runner_env_flag}${runner_perms_flag}"
+        printf "  Agent-%02d: could not find pane. Run manually:\n    %s\n" "$mcidx" "$runner_cmd"
+      done <<< "$clone_ttys"
+
+      # Cleanup probe directory
+      rm -rf "$marker_dir"
       continue
     fi
     local surfaces
