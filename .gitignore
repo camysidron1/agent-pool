@@ -1,8 +1,6 @@
 # Clone directories (managed by agent-pool)
-# Each project creates <prefix>-NN/ dirs
-nebari-*/
-apool-*/
-ap-*/
+# Catch-all for any prefix pattern: <prefix>-NN/
+*-[0-9][0-9]/
 
 # Per-project state files
 pool-*.json
@@ -14,6 +12,10 @@ tasks.json
 
 # Lock files
 *.lock/
+
+# Runtime data directories
+approvals/
+docs/
 
 # Temp files
 *.tmp
@@ -27,6 +29,6 @@ projects.json
 # Claude credentials
 .claude/
 
-# Agent-runner injected files (symlinks + commands)
+# Agent-runner injected files (symlinks in clones)
 agent-docs
 shared-docs
