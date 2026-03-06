@@ -26,3 +26,7 @@ projects.json
 
 # Claude credentials
 .claude/
+
+# Agent-runner injected files (symlinks + commands)
+agent-docs
+shared-docs
