@@ -186,12 +186,12 @@ _restart_all() {
 import json, sys
 data = json.load(sys.stdin)
 for c in data['clones']:
-    if c.get('locked'):
-        print(f\"{c['index']}\t{c.get('workspace_id', '')}\")
+    # Include locked clones OR any clone with a running runner process
+    print(f\"{c['index']}\t{c.get('workspace_id', '')}\")
 ")
 
   if [[ -z "$clone_data" ]]; then
-    printf "No locked clones to restart.\n"
+    printf "No clones to restart.\n"
     return
   fi
 
