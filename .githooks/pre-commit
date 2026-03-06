@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Check for merge conflict markers in staged files
+echo "Checking for merge conflict markers..."
+conflict_files=$(git diff --cached --name-only -z | xargs -0 grep -lE '^(<{7}|={7}|>{7})' 2>/dev/null || true)
+if [[ -n "$conflict_files" ]]; then
+  echo "ERROR: Merge conflict markers found in staged files:" >&2
+  echo "$conflict_files" >&2
+  exit 1
+fi
+
 echo "Running tests..."
 "$(git rev-parse --show-toplevel)/tests/run-all.sh"

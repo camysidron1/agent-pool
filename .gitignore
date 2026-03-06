@@ -20,6 +20,9 @@ docs/
 # Temp files
 *.tmp
 
+# Agent mailbox files
+.mailbox
+
 # cmux layout
 layout.json
 

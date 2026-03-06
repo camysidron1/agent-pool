@@ -256,25 +256,28 @@ while true; do
   local_branch="${AGENT_ID}-${task_id}"
   git checkout -B "$local_branch" "origin/$BRANCH" -q 2>/dev/null || git checkout -B "$local_branch" "$BRANCH" -q
 
-  # Install approval hook (unless --skip-permissions)
+  # Install hooks into clone settings
+  settings_file="$CLONE_PATH/.claude/settings.json"
+  mkdir -p "$(dirname "$settings_file")"
   if [[ "$SKIP_PERMS" != true ]]; then
-    settings_file="$CLONE_PATH/.claude/settings.json"
-    mkdir -p "$(dirname "$settings_file")"
-    hook_entry="{\"hooks\":{\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"${TOOL_DIR}/hooks/approval-hook.sh\",\"timeout\":310000}]}]}}"
-    if [[ -f "$settings_file" ]]; then
-      # Merge: add our hook entry to existing PreToolUse array (or create it)
-      merged=$(jq --argjson entry "$hook_entry" '
-        .hooks //= {} |
-        .hooks.PreToolUse //= [] |
-        # Remove any existing approval-hook entries to avoid duplicates
-        .hooks.PreToolUse = [.hooks.PreToolUse[] | select(
-          (.hooks // []) | all(.command | test("approval-hook\\.sh") | not)
-        )] |
-        .hooks.PreToolUse += $entry.hooks.PreToolUse
-      ' "$settings_file") && echo "$merged" > "$settings_file"
-    else
-      echo "$hook_entry" | jq '.' > "$settings_file"
-    fi
+    # Mailbox + approval hooks
+    hook_entry="{\"hooks\":{\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"${TOOL_DIR}/hooks/mailbox-hook.sh\",\"timeout\":5000},{\"type\":\"command\",\"command\":\"${TOOL_DIR}/hooks/approval-hook.sh\",\"timeout\":310000}]}]}}"
+  else
+    # Mailbox hook only (skip-permissions mode)
+    hook_entry="{\"hooks\":{\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"${TOOL_DIR}/hooks/mailbox-hook.sh\",\"timeout\":5000}]}]}}"
+  fi
+  if [[ -f "$settings_file" ]]; then
+    merged=$(jq --argjson entry "$hook_entry" '
+      .hooks //= {} |
+      .hooks.PreToolUse //= [] |
+      # Remove any existing agent-pool hook entries to avoid duplicates
+      .hooks.PreToolUse = [.hooks.PreToolUse[] | select(
+        (.hooks // []) | all(.command | (test("approval-hook\\.sh") or test("mailbox-hook\\.sh")) | not)
+      )] |
+      .hooks.PreToolUse += $entry.hooks.PreToolUse
+    ' "$settings_file") && echo "$merged" > "$settings_file"
+  else
+    echo "$hook_entry" | jq '.' > "$settings_file"
   fi
 
   # Set up centralized docs directories
