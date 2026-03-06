@@ -625,6 +625,108 @@ else:
   assert_eq "DEFAULT" "$workflow_json" "project with no workflow should use default"
 }
 
+test_runner_workflow_auto_merge_default() {
+  # feature-branch workflow defaults to auto_merge=true
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" project set-workflow foo --type feature-branch --instructions "Create PRs for all changes"
+
+  # Verify git_workflow stored correctly
+  local wf_type
+  wf_type=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/projects.json') as f:
+    data = json.load(f)
+gw = data['projects']['foo'].get('git_workflow', {})
+print(gw.get('type', ''))
+")
+  assert_eq "feature-branch" "$wf_type" "workflow type should be feature-branch"
+
+  # Simulate the workflow prefix generation (same Python as agent-runner.sh)
+  local prefix
+  prefix=$(/usr/bin/python3 -c "
+import json, sys
+with open('$TEST_DIR/projects.json') as f:
+    data = json.load(f)
+gw = data.get('projects', {}).get('foo', {}).get('git_workflow')
+if gw and gw.get('type'):
+    t = gw['type'].upper()
+    instructions = gw.get('instructions', '')
+    lines = [f'[GIT WORKFLOW — {t}]']
+    if instructions:
+        lines.append(instructions)
+    auto_merge = gw.get('auto_merge')
+    if auto_merge is None and gw['type'] == 'feature-branch':
+        auto_merge = True
+    if auto_merge:
+        merge_method = gw.get('merge_method', 'squash')
+        lines.append(f'After creating a PR with \`gh pr create\`, enable auto-merge by running: \`gh pr merge --auto --{merge_method}\`')
+        lines.append('If auto-merge fails (e.g. not enabled on the repo), log a warning and continue — do not block task completion.')
+    lines.append('---')
+    print(chr(10).join(lines))
+")
+  assert_contains "$prefix" "gh pr merge --auto --squash" "default feature-branch should include auto-merge with squash"
+  assert_contains "$prefix" "auto-merge fails" "should include fallback instructions"
+}
+
+test_runner_workflow_auto_merge_explicit() {
+  # Explicit auto_merge=true with merge method
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" project set-workflow foo --type feature-branch --instructions "Create PRs" --auto-merge true --merge-method merge
+
+  local merge_method
+  merge_method=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/projects.json') as f:
+    data = json.load(f)
+gw = data['projects']['foo'].get('git_workflow', {})
+print(gw.get('merge_method', ''))
+")
+  assert_eq "merge" "$merge_method" "merge_method should be stored"
+
+  local auto_merge
+  auto_merge=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/projects.json') as f:
+    data = json.load(f)
+gw = data['projects']['foo'].get('git_workflow', {})
+print(gw.get('auto_merge', ''))
+")
+  assert_eq "True" "$auto_merge" "auto_merge should be True"
+}
+
+test_runner_workflow_auto_merge_disabled() {
+  # Explicitly disable auto-merge
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" project set-workflow foo --type feature-branch --instructions "Create PRs" --auto-merge false
+
+  # Generate prefix — should NOT contain auto-merge
+  local prefix
+  prefix=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/projects.json') as f:
+    data = json.load(f)
+gw = data.get('projects', {}).get('foo', {}).get('git_workflow')
+if gw and gw.get('type'):
+    t = gw['type'].upper()
+    instructions = gw.get('instructions', '')
+    lines = [f'[GIT WORKFLOW — {t}]']
+    if instructions:
+        lines.append(instructions)
+    auto_merge = gw.get('auto_merge')
+    if auto_merge is None and gw['type'] == 'feature-branch':
+        auto_merge = True
+    if auto_merge:
+        merge_method = gw.get('merge_method', 'squash')
+        lines.append(f'After creating a PR, enable auto-merge: gh pr merge --auto --{merge_method}')
+    lines.append('---')
+    print(chr(10).join(lines))
+")
+  assert_not_contains "$prefix" "auto-merge" "disabled auto-merge should not include merge instructions"
+}
+
+run_test test_runner_workflow_auto_merge_default
+run_test test_runner_workflow_auto_merge_explicit
+run_test test_runner_workflow_auto_merge_disabled
 run_test test_runner_uses_project_tasks
 run_test test_runner_uses_project_branch
 run_test test_runner_releases_lock_on_exit

@@ -163,16 +163,18 @@ json.dump(data, sys.stdout, indent=2)
       ;;
 
     set-workflow)
-      local name="" workflow_type="" workflow_instructions=""
+      local name="" workflow_type="" workflow_instructions="" auto_merge="" merge_method=""
       while [[ $# -gt 0 ]]; do
         case $1 in
           --type) workflow_type="$2"; shift 2 ;;
           --instructions) workflow_instructions="$2"; shift 2 ;;
+          --auto-merge) auto_merge="$2"; shift 2 ;;
+          --merge-method) merge_method="$2"; shift 2 ;;
           *) name="$1"; shift ;;
         esac
       done
-      if [[ -z "$name" ]] || [[ -z "$workflow_type" ]] || [[ -z "$workflow_instructions" ]]; then
-        echo "Usage: agent-pool project set-workflow <name> --type <type> --instructions \"...\""
+      if [[ -z "$name" ]] || [[ -z "$workflow_type" ]]; then
+        echo "Usage: agent-pool project set-workflow <name> --type <type> [--instructions \"...\"] [--auto-merge true|false] [--merge-method squash|merge|rebase]"
         exit 1
       fi
       ensure_projects_json
@@ -183,12 +185,24 @@ name = sys.argv[1]
 if name not in data.get('projects', {}):
     print(f\"Project '{name}' not found\", file=sys.stderr)
     sys.exit(1)
-data['projects'][name]['git_workflow'] = {
+existing = data['projects'][name].get('git_workflow') or {}
+wf = {
     'type': sys.argv[2],
-    'instructions': sys.argv[3]
+    'instructions': sys.argv[3] if sys.argv[3] else existing.get('instructions', '')
 }
+auto_merge = sys.argv[4]
+merge_method = sys.argv[5]
+if auto_merge:
+    wf['auto_merge'] = auto_merge.lower() == 'true'
+elif 'auto_merge' in existing:
+    wf['auto_merge'] = existing['auto_merge']
+if merge_method:
+    wf['merge_method'] = merge_method
+elif 'merge_method' in existing:
+    wf['merge_method'] = existing['merge_method']
+data['projects'][name]['git_workflow'] = wf
 json.dump(data, sys.stdout, indent=2)
-" "$name" "$workflow_type" "$workflow_instructions" | write_projects
+" "$name" "$workflow_type" "$workflow_instructions" "$auto_merge" "$merge_method" | write_projects
       printf "Set git workflow for '%s': %s\n" "$name" "$workflow_type"
       ;;
 

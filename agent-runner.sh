@@ -374,6 +374,14 @@ if gw and gw.get('type'):
     lines = [f'[GIT WORKFLOW — {t}]']
     if instructions:
         lines.append(instructions)
+    # Auto-merge instructions (default true for feature-branch)
+    auto_merge = gw.get('auto_merge')
+    if auto_merge is None and gw['type'] == 'feature-branch':
+        auto_merge = True
+    if auto_merge:
+        merge_method = gw.get('merge_method', 'squash')
+        lines.append(f'After creating a PR with \`gh pr create\`, enable auto-merge by running: \`gh pr merge --auto --{merge_method}\`')
+        lines.append('If auto-merge fails (e.g. not enabled on the repo), log a warning and continue — do not block task completion.')
     lines.append('---')
     print(chr(10).join(lines))
 " "$PROJECT_NAME" 2>/dev/null || true)

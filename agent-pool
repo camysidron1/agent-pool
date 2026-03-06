@@ -65,6 +65,7 @@ case "$cmd" in
   release)  cmd_release "$@" ;;
   restart)  cmd_restart "$@" ;;
   destroy)  cmd_destroy "$@" ;;
+  review)   cmd_review "$@" ;;
   start)    cmd_start "$@" ;;
   help|--help|-h) cmd_help ;;
   *) echo "Unknown command: $cmd"; cmd_help; exit 1 ;;
