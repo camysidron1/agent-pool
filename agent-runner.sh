@@ -87,11 +87,17 @@ LOCK_DIR="$TASKS_JSON.lock"
 AGENT_ID="agent-$(printf '%02d' "$CLONE_INDEX")"
 CLONE_PATH="$DATA_DIR/${PREFIX}-$(printf '%02d' "$CLONE_INDEX")"
 
+# Resolve cmux tab ref once at startup (refs like "tab:102" work; UUIDs don't)
+CMUX_TAB_REF=""
+if [[ -n "${CMUX_SURFACE_ID:-}" ]]; then
+  CMUX_TAB_REF=$(cmux identify 2>/dev/null | /usr/bin/python3 -c "import sys,json; print(json.load(sys.stdin).get('caller',{}).get('tab_ref',''))" 2>/dev/null || true)
+fi
+
 # Rename the cmux tab title (no-op outside cmux)
 rename_pane() {
   local title="$1"
-  if [[ -n "${CMUX_SURFACE_ID:-}" ]]; then
-    cmux rename-tab "$title" 2>/dev/null || true
+  if [[ -n "$CMUX_TAB_REF" ]]; then
+    cmux rename-tab --tab "$CMUX_TAB_REF" "$title" 2>/dev/null || true
   fi
 }
 
