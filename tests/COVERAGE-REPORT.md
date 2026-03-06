@@ -1,346 +1,80 @@
 # Test Coverage Report — agent-pool
 
-**Generated**: 2026-03-05 (updated after implementation)
-**Scope**: All source files vs all test files in the agent-pool repository
+**Generated**: 2026-03-05 (final)
+**Total tests**: 191 passing across 14 test files
 
 ---
 
 ## Executive Summary
 
-The test suite now provides **138 passing tests** across 12 test files, up from ~80 tests across 11 files. All P0 critical gaps have been addressed, and most P1 gaps have been closed.
+The test suite provides **191 passing tests** across 14 test files, up from ~80 tests across 11 files at the start. All P0 critical gaps have been closed and nearly all P1 gaps addressed.
 
 ### What was done
 
-- **4 new test files created**: `test_finish.sh` (10 tests), `test_launch.sh` (8 tests), `test_restart.sh` (7 tests), `test_status.sh` (7 tests)
-- **3 existing files expanded**: `test_runner.sh` (+6 tests), `test_project.sh` (+10 tests), `test_pool.sh` (+6 tests)
-- **Static test added**: help/dispatch consistency check in `test_static.sh`
+- **5 new test files created**: `test_finish.sh` (10), `test_launch.sh` (12), `test_restart.sh` (12), `test_status.sh` (7), `test_start.sh` (6)
+- **8 existing files expanded**: `test_runner.sh` (+6), `test_project.sh` (+15), `test_pool.sh` (+9), `test_tasks.sh` (+10), `test_approvals.sh` (+8), `test_clone.sh` (+4), `test_docs.sh` (+5), `test_integration.sh` (+2), `test_static.sh` (+1)
 - **Infrastructure**: `assert_json_array_length()` helper added to `helpers.sh`
 
-### Coverage Heatmap (updated)
+### Coverage Heatmap
 
 | Module | Coverage | Notes |
 |--------|----------|-------|
 | `lib/tasks.sh` | **High** | Core operations well-tested |
-| `lib/pool.sh` | **High** | Lock/unlock, next_index, add/remove entry, cleanup_stale_locks |
-| `lib/project.sh` | **High** | CRUD + tracking + workflow tested |
-| `lib/cmd/tasks.sh` | **High** | add, list, unblock, backlog, activate, deps tested |
-| `lib/cmd/approvals.sh` | **High** | approve, deny, list tested; `watch` untested |
-| `lib/cmd/clone.sh` | **High** | init, refresh, release, destroy tested |
-| `lib/cmd/docs.sh` | **High** | All modes tested |
-| `lib/cmd/project.sh` | **High** | CRUD + tracking/workflow CRUD + edge cases |
+| `lib/pool.sh` | **High** | Lock/unlock, next_index, add/remove entry, cleanup, ensure, get_clone_path |
+| `lib/project.sh` | **High** | CRUD + tracking + workflow + edge cases |
+| `lib/cmd/tasks.sh` | **High** | add, list, unblock, backlog, activate, deps, set-status, empty list |
+| `lib/cmd/approvals.sh` | **High** | approve, deny, list, notify.log, age format, agent detection |
+| `lib/cmd/clone.sh` | **High** | refresh (cleans branches, runs setup, preserves pool), release, destroy |
+| `lib/cmd/docs.sh` | **High** | All modes: empty, non-md, multiple agents, shared empty/missing |
+| `lib/cmd/project.sh` | **High** | CRUD + tracking/workflow CRUD + edge cases + nonexistent + no-subcommand |
 | `lib/cmd/launch.sh` | **Medium** | Init paths tested; cmux grid/panel paths need mocking |
-| `lib/cmd/restart.sh` | **Medium** | Error paths + regex detection tested; cmux paths need mocking |
-| `lib/cmd/start.sh` | **None** | Interactive — hard to test without TTY |
+| `lib/cmd/restart.sh` | **Medium** | Error paths + regex detection + refresh + grouping; cmux paths need mocking |
+| `lib/cmd/start.sh` | **Medium** | Teardown, stale cleanup, pool reset, task count, live lock preservation |
 | `lib/cmd/status.sh` | **High** | Headers, branch, workspace, multi-clone, empty pool |
 | `lib/cmd/help.sh` | **Medium** | Dispatch consistency verified in static tests |
 | `agent-runner.sh` | **High** | Task claiming (with deps), context building, signal files, hook install |
 | `finish-task.sh` | **High** | All statuses, validation, signal files, edge cases |
-| `hooks/approval-hook.sh` | **High** | Allowlist, blocking, truncation tested |
-| `agent-pool` (entrypoint) | **Medium** | Flag parsing + dispatch consistency tested |
+| `hooks/approval-hook.sh` | **High** | Allowlist, blocking, truncation, notify, age format |
+| `agent-pool` (entrypoint) | **Medium** | Flag parsing, dispatch consistency, tilde expansion, auto_migrate |
 
 ---
 
-## Detailed Gap Analysis by Module
+## Remaining Gaps
 
-### 1. `lib/cmd/launch.sh` — P0: CRITICAL
+### cmux-dependent paths (P2 — requires mocking infrastructure)
 
-**No test file exists.** This is the most complex command module (4 functions, ~250 lines) handling clone initialization, grid layout, cmux workspace management, and process launching.
+These are the primary remaining untested paths. They require a cmux mock to test:
 
-| Function | Untested Behavior | Recommended Test |
-|----------|-------------------|-----------------|
-| `cmd_init()` | `--launch` flag triggers launch after init | Test that `--launch` calls launch functions |
-| `cmd_init()` | `--no-queue` mode (direct claude, no runner) | Test branch creation and command building |
-| `cmd_init()` | `--env NAME` passthrough | Test env variable appears in launched command |
-| `cmd_init()` | Additive init (existing clones not recreated) | Partially covered in test_clone.sh — verify pool JSON correctness |
-| `launch_grid()` | Grid layout: 4 panes in 2x2 + optional driver | Test cmux command sequence (can mock cmux) |
-| `launch_grid()` | Clone locking with workspace UUID | Test pool JSON updated with workspace_id |
-| `launch_grid()` | `--no-driver` omits driver pane | Test surface count without driver |
-| `launch_here_all()` | Split pattern for 1-4+ agents | Test surface splitting sequence |
-| `launch_here_all()` | Fallback surface ID when extraction fails | Test with missing surface_ref |
-| `cmd_launch()` | `--grid` vs `--panel` vs `--workspace` vs `--here` modes | Test each mode selects correct path |
-| `cmd_launch()` | Free clone collection + temp locking | Test concurrent clone allocation |
+- `launch_grid()` / `launch_here_all()` — grid layout, surface splitting, workspace creation
+- `_restart_single()` / `_restart_all()` — Ctrl+C sending, TTY-based surface detection
+- `cmd_start()` — interactive guided setup (TTY reads)
+- `_kill_claude_in_clone()` — process detection by clone path
 
-**Recommendation**: Create `tests/test_launch.sh`. Mock `cmux` commands (replace with stub that records calls) to test command building, clone selection, and pool state changes without requiring a real terminal multiplexer.
+### Minor gaps (P2)
+
+- `acquire_task_lock()` timeout when lock held by live process
+- `create_clone()` origin remote URL fix (local → github)
+- Source ordering static verification in entrypoint
+- Polling loop in approval hook (300s timeout)
 
 ---
 
-### 2. `lib/cmd/restart.sh` — P0: CRITICAL
-
-**No test file exists.** Contains 5 functions handling process killing, clone refresh, cmux pane detection, and TTY matching — all with complex fallback paths.
-
-| Function | Untested Behavior | Recommended Test |
-|----------|-------------------|-----------------|
-| `_kill_claude_in_clone()` | Process detection by clone path | Test with mock `ps` output |
-| `_restart_here()` | Clone index detection from `$PWD` regex | Test regex extraction from various path formats |
-| `_restart_here()` | Error when PWD doesn't match pattern | Test exits with error |
-| `_restart_single()` | Pane index calculation from sorted clone list | Test index mapping with multiple clones |
-| `_restart_single()` | Ctrl+C sending + command injection to surface | Test cmux command sequence |
-| `_restart_single()` | Fallback when pane not found | Test manual command output |
-| `_restart_all()` | TTY-based surface detection for clones without workspace | Test TTY matching logic |
-| `_restart_all()` | Grouping by workspace_id | Test grouping with mixed workspace types |
-| `_restart_all()` | Marker file cleanup | Test cleanup on success and failure |
-
-**Recommendation**: Create `tests/test_restart.sh`. The TTY-matching logic in `_restart_all()` is particularly fragile and deserves thorough testing. Mock `cmux` and `ps` to test detection logic.
-
----
-
-### 3. `finish-task.sh` — P0: CRITICAL
-
-**No test file exists.** This script runs inside Claude sessions to mark tasks complete. Bugs here cause agents to silently fail to update task status.
-
-| Behavior | Recommended Test |
-|----------|-----------------|
-| Environment validation (missing AGENT_POOL_TASK_ID) | Test exits with error when env vars missing |
-| Status validation (invalid status string) | Test rejects "foo", accepts "completed", "blocked", "pending", "backlogged" |
-| Lock acquisition timeout | Test exits when lock can't be acquired |
-| Task status update (completed) | Test sets status + completed_at timestamp |
-| Task status update (pending) | Test clears claimed_by, started_at, completed_at |
-| Signal file creation | Test `.task-finished-${TASK_ID}` file written with correct content |
-| Task not found in JSON | Test handles missing task gracefully |
-
-**Recommendation**: Create `tests/test_finish.sh`. These are straightforward unit tests — set up task JSON, run finish-task.sh with environment variables, verify JSON mutation.
-
----
-
-### 4. `lib/cmd/start.sh` — P1: IMPORTANT
-
-**No test file exists.** Interactive guided setup with 7+ steps. Hard to test end-to-end due to `/dev/tty` reads, but individual steps can be validated.
-
-| Behavior | Untested | Recommended Test |
-|----------|----------|-----------------|
-| Session teardown | Ctrl+C sending, surface closing, unlock sequence | Test pool state after teardown (mocked cmux) |
-| Stale lock cleanup | Dead PID detection and lock removal | Test with fake lock dir + dead PID |
-| Pool reset | Clone directory deletion + JSON reset | Test filesystem + JSON state |
-| Pane closing | Current surface preservation | Test cmux command sequence |
-| Task count display | Pending task counting for startup message | Test count with various task states |
-
-**Recommendation**: Create `tests/test_start.sh`. Focus on the non-interactive parts (teardown, cleanup, pool reset) that can be tested without TTY input.
-
----
-
-### 5. `agent-runner.sh` — P1: IMPORTANT (expand existing tests)
-
-`test_runner.sh` covers task claiming/marking and hook installation, but the main execution loop and several functions are untested.
-
-| Function/Behavior | Untested | Priority | Recommended Test |
-|-------------------|----------|----------|-----------------|
-| `resolve_runner_project()` | Fallback to default project | P1 | Test with no arg + default set |
-| `get_runner_project_field()` | Field extraction, null handling | P1 | Test with various field types |
-| `reset_to_project_branch()` | Git fetch + checkout + reset sequence | P2 | Test git state after reset |
-| `acquire_lock()` / `release_lock()` | Timeout behavior, concurrent access | P1 | Test timeout returns error |
-| `claim_task()` | Dependency checking (skip tasks with unmet deps) | P0 | Test with dependent tasks |
-| `claim_task()` | WAITING:N stderr output | P1 | Test stderr message format |
-| Post-claude exit handling | Exit 0 → auto-complete, non-zero → interactive prompt | P1 | Test status transitions on various exit codes |
-| Tracking context building | LINEAR/JIRA context injection | P1 | Test prompt contains tracking instructions |
-| Workflow context building | Git workflow instructions in prompt | P1 | Test prompt contains workflow instructions |
-| Clone setup | Branch creation, origin fix, symlinks, .gitignore | P2 | Test filesystem state after setup |
-| Signal file detection | `.task-finished-*` skips post-exit handling | P1 | Test with signal file present |
-
-**Recommendation**: Add tests to existing `tests/test_runner.sh`. Priority is dependency-aware task claiming (P0) and context building (P1).
-
----
-
-### 6. `lib/cmd/project.sh` — P1: IMPORTANT (expand existing tests)
-
-`test_project.sh` covers basic CRUD but misses tracking and workflow configuration.
-
-| Function | Untested | Priority | Recommended Test |
-|----------|----------|----------|-----------------|
-| `set-tracking` | Setting LINEAR/JIRA tracking config | P1 | Test tracking fields in projects.json |
-| `clear-tracking` | Removing tracking config | P1 | Test tracking becomes null |
-| `set-workflow` | Setting git workflow config | P1 | Test workflow fields in projects.json |
-| `clear-workflow` | Removing workflow config | P1 | Test workflow becomes null |
-| `set-tracking` | Missing `--type` or `--key` validation | P1 | Test exits with usage error |
-| `set-workflow` | Missing `--type` or `--instructions` validation | P1 | Test exits with usage error |
-| `add` | Duplicate project name | P2 | Test behavior with existing name |
-| `remove` | Removing default project clears default | P1 | Test default field after removal |
-| `add` | First project auto-becomes default | P1 | Test default set on first add |
-
-**Recommendation**: Add tests to existing `tests/test_project.sh`.
-
----
-
-### 7. `lib/cmd/status.sh` — P1: IMPORTANT (expand coverage)
-
-Only tested indirectly via `test_integration.sh` (locked/free display). No dedicated test file.
-
-| Behavior | Untested | Recommended Test |
-|----------|----------|-----------------|
-| Branch detection from git | Shows current branch per clone | Test with clones on different branches |
-| Branch fallback to pool JSON | When git fails, shows pool branch | Test with missing clone dir |
-| Stale lock cleanup trigger | `cleanup_stale_locks` called on status | Test stale lock cleaned |
-| Empty pool display | "(no clones)" message | Covered in integration test |
-| Workspace ID display | Shows workspace_id or "-" | Test with mixed workspace states |
-| Table formatting | Column alignment | Test output format |
-
-**Recommendation**: Add status-specific tests to `tests/test_integration.sh` or create `tests/test_status.sh`.
-
----
-
-### 8. `lib/pool.sh` — P1: IMPORTANT (expand existing tests)
-
-`test_pool.sh` only tests lock_clone, find_free_clone. Many functions untested.
-
-| Function | Untested | Priority | Recommended Test |
-|----------|----------|----------|-----------------|
-| `ensure_pool_json()` | Creates file when missing | P2 | Test file creation |
-| `next_index()` | Returns max index or -1 | P1 | Test with empty pool, 0-indexed, gaps |
-| `add_clone_entry()` | Adds entry, sorts by index | P1 | Test ordering after add |
-| `remove_clone_entry()` | Filters out entry by index | P1 | Test remaining entries correct |
-| `create_clone()` | Full clone creation (git clone, symlinks, setup) | P1 | Test filesystem state after creation |
-| `create_clone()` | Origin remote fix (local path → github) | P2 | Test remote URL after creation |
-| `create_clone()` | Setup command execution | P2 | Test marker file from setup |
-| `cleanup_stale_locks()` | Unlocks clones with dead workspaces | P1 | Test with mock cmux output |
-| `unlock_clone()` | Clears lock fields | P2 | Test JSON state after unlock |
-
-**Recommendation**: Expand `tests/test_pool.sh` with unit tests for `next_index`, `add_clone_entry`, `remove_clone_entry`, and `cleanup_stale_locks`.
-
----
-
-### 9. `lib/tasks.sh` — P2: NICE-TO-HAVE (expand)
-
-Core read/write/ensure tested indirectly. Locking tested in `test_tasks.sh`.
-
-| Function | Untested | Priority | Recommended Test |
-|----------|----------|----------|-----------------|
-| `acquire_task_lock()` | Stale lock detection by dead PID | P1 | Already tested in test_tasks.sh (test_task_lock_stale_detection) |
-| `acquire_task_lock()` | Timeout when lock held by live process | P2 | Test returns non-zero after timeout |
-| `release_task_lock()` | Cleanup after release | P2 | Test lock dir removed |
-
----
-
-### 10. `lib/cmd/help.sh` — P2: NICE-TO-HAVE
-
-| Behavior | Recommended Test |
-|----------|-----------------|
-| All commands listed in help output | Grep help output for each command name |
-| Help output matches actual dispatch table | Cross-reference help text with agent-pool case statement |
-
-**Recommendation**: Add a static test in `tests/test_static.sh` that verifies every command in the dispatch table appears in help output.
-
----
-
-### 11. `agent-pool` (entrypoint) — P2: NICE-TO-HAVE
-
-| Behavior | Untested | Recommended Test |
-|----------|----------|-----------------|
-| `-p` flag before command | Covered in test_integration.sh |
-| `-p` flag after command | Covered in test_integration.sh |
-| Unknown command exits 1 + shows help | Covered in test_integration.sh |
-| `auto_migrate()` called on every invocation | Covered in test_integration.sh |
-| Source ordering (project → pool → tasks → cmd) | P2 | Static test verifying source order |
-
----
-
-### 12. `hooks/approval-hook.sh` — P2: EXPAND
-
-Well-tested. Minor gaps:
-
-| Behavior | Untested | Recommended Test |
-|----------|----------|-----------------|
-| Polling loop (300s timeout) | Approval after delay | P2 — hard to test without long waits |
-| Denial during polling | Status=denied mid-poll | P2 — test with background approval |
-| Request file cleanup after decision | File removed | P1 | Test file doesn't exist after approve/deny |
-| Notification (osascript) | Desktop notification fires | P2 — platform-specific, skip |
-| `.notify.log` append | Log entry written | P1 | Test log contains request entry |
-
----
-
-## Recommendations for New Test Files
-
-### Priority Order
-
-1. **`tests/test_finish.sh`** — P0. Simple to write, high impact. `finish-task.sh` is used by every agent session.
-2. **`tests/test_launch.sh`** — P0. Most complex untested module. Requires cmux mocking.
-3. **`tests/test_restart.sh`** — P0. Complex detection logic with many failure modes.
-4. **`tests/test_start.sh`** — P1. Test non-interactive portions (teardown, cleanup).
-5. **`tests/test_status.sh`** — P1. Straightforward to test (no cmux dependency for display).
-
-### Additions to Existing Test Files
-
-1. **`tests/test_runner.sh`** — Add dependency-aware claiming (P0), context building (P1), signal file detection (P1)
-2. **`tests/test_project.sh`** — Add tracking/workflow CRUD (P1), first-project-default (P1), remove-default (P1)
-3. **`tests/test_pool.sh`** — Add next_index, add/remove_clone_entry, cleanup_stale_locks (P1)
-4. **`tests/test_approvals.sh`** — Add `.notify.log` check, request file cleanup (P1)
-5. **`tests/test_static.sh`** — Add help/dispatch consistency check (P2)
-
----
-
-## Test Infrastructure Recommendations
-
-### 1. cmux Mocking (P0 for launch/restart tests)
-
-The biggest testing barrier is `cmux` dependency. Create a mock:
-
-```bash
-# tests/mocks/cmux — stub that records calls
-#!/bin/bash
-echo "$@" >> "$TEST_DIR/cmux_calls.log"
-case "$1 $2" in
-  "new-workspace"*) echo '{"surface_ref":"mock-surface-1"}' ;;
-  "new-split"*)     echo '{"surface_ref":"mock-surface-2"}' ;;
-  "list-surfaces"*) echo '[{"ref":"mock-surface-1"},{"ref":"mock-surface-2"}]' ;;
-  "list-workspaces"*) echo '[]' ;;
-  "identify"*)      echo '{"surface_ref":"mock-surface-0"}' ;;
-  *)                echo '{}' ;;
-esac
-```
-
-Add to test setup: `export PATH="$TEST_DIR/mocks:$PATH"`
-
-### 2. Process Mocking (P1 for restart tests)
-
-For `_kill_claude_in_clone()`, mock `ps` output:
-
-```bash
-# tests/mocks/ps
-echo "  PID TTY TIME CMD"
-echo "12345 ?? 0:01 claude --some-flag /path/to/clone"
-```
-
-### 3. Helper: `assert_json_array_length()` (P2)
-
-Several tests would benefit from asserting array lengths in JSON:
-
-```bash
-assert_json_array_length() {
-  local file="$1" key="$2" expected="$3" msg="$4"
-  local actual
-  actual=$(/usr/bin/python3 -c "
-import json, sys
-data = json.load(open('$file'))
-print(len(data.get('$key', [])))
-")
-  assert_eq "$actual" "$expected" "$msg"
-}
-```
-
-### 4. Helper: `create_mock_pool()` (P2)
-
-Many tests manually construct pool JSON. A helper would reduce boilerplate:
-
-```bash
-create_mock_pool() {
-  local pool_file="$1" count="$2" prefix="$3"
-  # Creates pool with N clones, all unlocked
-}
-```
-
-### 5. Parallel Test Execution (P2)
-
-`run-all.sh` sources test files sequentially. For faster CI, consider running test files in parallel subshells since each uses isolated `$TEST_DIR`.
-
----
-
-## Summary Statistics
-
-| Category | Count |
-|----------|-------|
-| Source functions total | ~55 |
-| Functions with test coverage | ~30 |
-| Functions without any test coverage | ~25 |
-| P0 gaps (critical) | 3 modules (launch, restart, finish-task) |
-| P1 gaps (important) | 5 modules (start, status, runner expansion, project expansion, pool expansion) |
-| P2 gaps (nice-to-have) | 3 modules (help, entrypoint, tasks lib) |
-| New test files recommended | 5 |
-| Existing test file expansions | 5 |
+## Test File Summary
+
+| File | Tests | Coverage |
+|------|-------|----------|
+| `test_approvals.sh` | 22 | approve, deny, list, allowlist, blocking, truncation, notify, age |
+| `test_clone.sh` | 18 | refresh, release, destroy, agent branch cleanup, setup, pool preservation |
+| `test_docs.sh` | 10 | all agent/shared doc modes |
+| `test_finish.sh` | 10 | all statuses, validation, signal files, missing env/task |
+| `test_integration.sh` | 13 | multi-project isolation, flag parsing, tilde expansion, auto_migrate |
+| `test_launch.sh` | 12 | init count/branch/setup/additive/skip/unlock, launch options |
+| `test_pool.sh` | 12 | lock, find_free, next_index, add/remove entry, unlock, stale cleanup, ensure, get_path |
+| `test_project.sh` | 22 | CRUD, tracking, workflow, defaults, edge cases, nonexistent |
+| `test_restart.sh` | 12 | options, regex detection, refresh, fallback, grouping |
+| `test_runner.sh` | 20 | claiming, marking, deps, context, signal files, hooks, gitignore |
+| `test_start.sh` | 6 | teardown, stale cleanup, pool reset, task count, live locks |
+| `test_static.sh` | 2 | no top-level `local`, help/dispatch consistency |
+| `test_status.sh` | 7 | headers, branch, workspace, multi-clone, empty pool |
+| `test_tasks.sh` | 25 | add, list, unblock, backlog, activate, set-status, deps, empty |
+| **Total** | **191** | |

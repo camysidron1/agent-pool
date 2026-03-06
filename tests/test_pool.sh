@@ -183,6 +183,35 @@ test_cleanup_stale_locks_no_cmux() {
   assert_eq "False" "$locked" "stale workspace lock should be cleaned"
 }
 
+test_ensure_pool_json_creates_file() {
+  source "$SCRIPT_DIR/lib/project.sh"
+  source "$SCRIPT_DIR/lib/pool.sh"
+  local pool_file="$TEST_DIR/pool-new.json"
+  [[ ! -f "$pool_file" ]] || { echo "    FAIL: file should not exist yet"; return 1; }
+  ensure_pool_json "$pool_file"
+  assert_file_exists "$pool_file"
+  local content
+  content=$(cat "$pool_file")
+  assert_eq '{"clones":[]}' "$content" "should create empty pool"
+}
+
+test_next_index_with_gaps() {
+  source "$SCRIPT_DIR/lib/project.sh"
+  source "$SCRIPT_DIR/lib/pool.sh"
+  echo '{"clones":[{"index":0,"locked":false,"workspace_id":"","locked_at":"","branch":"main"},{"index":5,"locked":false,"workspace_id":"","locked_at":"","branch":"main"}]}' > "$TEST_DIR/pool-gap.json"
+  local idx
+  idx=$(next_index "$TEST_DIR/pool-gap.json")
+  assert_eq "5" "$idx" "max index should be 5"
+}
+
+test_get_clone_path_formatting() {
+  source "$SCRIPT_DIR/lib/project.sh"
+  source "$SCRIPT_DIR/lib/pool.sh"
+  local path
+  path=$(get_clone_path "nebari" "3")
+  assert_contains "$path" "nebari-03" "path should have zero-padded index"
+}
+
 run_test test_lock_clone
 run_test test_find_free_clone
 run_test test_find_free_clone_all_locked
@@ -192,3 +221,6 @@ run_test test_add_clone_entry
 run_test test_remove_clone_entry
 run_test test_unlock_clone
 run_test test_cleanup_stale_locks_no_cmux
+run_test test_ensure_pool_json_creates_file
+run_test test_next_index_with_gaps
+run_test test_get_clone_path_formatting

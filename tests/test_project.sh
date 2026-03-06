@@ -150,6 +150,44 @@ test_project_tracking_shows_in_list() {
   assert_contains "$output" "Linear"
 }
 
+test_project_set_tracking_on_nonexistent() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  if "$AGENT_POOL" project set-tracking nonexistent --type linear --key PROJ 2>&1; then
+    echo "    FAIL: expected non-zero exit for nonexistent project"
+    return 1
+  fi
+}
+
+test_project_clear_tracking_on_nonexistent() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  if "$AGENT_POOL" project clear-tracking nonexistent 2>&1; then
+    echo "    FAIL: expected non-zero exit for nonexistent project"
+    return 1
+  fi
+}
+
+test_project_set_workflow_on_nonexistent() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  if "$AGENT_POOL" project set-workflow nonexistent --type trunk --instructions "test" 2>&1; then
+    echo "    FAIL: expected non-zero exit for nonexistent project"
+    return 1
+  fi
+}
+
+test_project_no_subcommand() {
+  local output rc=0
+  output=$("$AGENT_POOL" project 2>&1) || rc=$?
+  [[ $rc -ne 0 ]] || { echo "    FAIL: expected non-zero exit with no subcommand"; return 1; }
+  assert_contains "$output" "Usage"
+}
+
+test_project_add_no_source() {
+  local output rc=0
+  output=$("$AGENT_POOL" project add foo 2>&1) || rc=$?
+  [[ $rc -ne 0 ]] || { echo "    FAIL: expected non-zero exit without --source"; return 1; }
+  assert_contains "$output" "Usage"
+}
+
 run_test test_project_add
 run_test test_project_add_with_prefix
 run_test test_project_add_default_prefix
@@ -167,3 +205,8 @@ run_test test_project_set_workflow_missing_args
 run_test test_project_first_becomes_default
 run_test test_project_remove_clears_default
 run_test test_project_tracking_shows_in_list
+run_test test_project_set_tracking_on_nonexistent
+run_test test_project_clear_tracking_on_nonexistent
+run_test test_project_set_workflow_on_nonexistent
+run_test test_project_no_subcommand
+run_test test_project_add_no_source

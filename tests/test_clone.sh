@@ -212,6 +212,72 @@ test_release_no_index() {
   fi
 }
 
+test_refresh_cleans_agent_branches() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 1 -p foo
+
+  # Create an agent branch
+  cd "$TEST_DIR/foo-00"
+  git checkout -b agent-00-test -q
+  echo "change" > agent_work.txt
+  git add agent_work.txt && git commit -m "agent work" -q
+  git checkout main -q
+  cd "$TEST_DIR"
+
+  "$AGENT_POOL" refresh 0 -p foo
+
+  # Agent branch should be gone
+  local branches
+  branches=$(git -C "$TEST_DIR/foo-00" branch 2>/dev/null)
+  assert_not_contains "$branches" "agent-00-test" "agent branches should be deleted after refresh"
+}
+
+test_refresh_runs_setup() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo --setup "touch setup-marker.txt"
+  "$AGENT_POOL" init 1 -p foo
+
+  # Verify marker exists from init
+  assert_file_exists "$TEST_DIR/foo-00/setup-marker.txt"
+
+  # Remove marker
+  rm "$TEST_DIR/foo-00/setup-marker.txt"
+
+  # Refresh should re-run setup
+  "$AGENT_POOL" refresh 0 -p foo
+
+  assert_file_exists "$TEST_DIR/foo-00/setup-marker.txt" "setup should run again on refresh"
+}
+
+test_destroy_resets_pool_json() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 3 -p foo
+
+  echo y | "$AGENT_POOL" destroy -p foo
+
+  local count
+  count=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/pool-foo.json') as f:
+    print(len(json.load(f)['clones']))
+")
+  assert_eq "0" "$count" "pool should be empty after destroy"
+}
+
+test_refresh_preserves_clone_in_pool() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 2 -p foo
+
+  "$AGENT_POOL" refresh 0 -p foo
+
+  local count
+  count=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/pool-foo.json') as f:
+    print(len(json.load(f)['clones']))
+")
+  assert_eq "2" "$count" "pool should still have 2 entries after refresh"
+}
+
 run_test test_init_creates_project_clones
 run_test test_init_uses_project_branch
 run_test test_init_runs_setup
@@ -226,3 +292,7 @@ run_test test_destroy_force_flag
 run_test test_destroy_nonexistent_project
 run_test test_release_unlocks_clone
 run_test test_release_no_index
+run_test test_refresh_cleans_agent_branches
+run_test test_refresh_runs_setup
+run_test test_destroy_resets_pool_json
+run_test test_refresh_preserves_clone_in_pool
