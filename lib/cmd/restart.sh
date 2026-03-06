@@ -219,13 +219,74 @@ for ws, idxs in groups.items():
     # Clones without a workspace can't be restarted via cmux
     if [[ "$ws" == "__none__" ]]; then
       IFS=',' read -ra idxs <<< "$idx_list"
+
+      # Find surfaces by locating the runner processes' TTYs
+      # Map: clone index -> TTY -> cmux surface
+      local all_surfaces=""
+      all_surfaces=$(cmux --json list-workspaces 2>/dev/null | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for w in data.get('workspaces', []):
+    print(w['ref'])
+" 2>/dev/null || true)
+      # Build a list of all terminal surfaces across all workspaces
+      local surface_list=""
+      for check_ws in $all_surfaces; do
+        local ws_surfs
+        ws_surfs=$(cmux --json list-pane-surfaces --workspace "$check_ws" 2>/dev/null | /usr/bin/python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for s in data.get('surfaces', []):
+    if s.get('type') == 'terminal':
+        print(s['ref'])
+" 2>/dev/null || true)
+        if [[ -n "$ws_surfs" ]]; then
+          surface_list="${surface_list}${surface_list:+$'\n'}${ws_surfs}"
+        fi
+      done
+
       for cidx in "${idxs[@]}"; do
         local clone_path
         clone_path=$(get_clone_path "$prefix" "$cidx")
+        local runner_cmd="cd $clone_path && $RUNNER_SCRIPT $cidx --project $proj${runner_env_flag}${runner_perms_flag}"
+
+        # Find runner PID and its TTY
+        local runner_tty=""
+        runner_tty=$(ps -eo tty,args 2>/dev/null | grep "agent-runner.*[[:space:]]${cidx}[[:space:]].*--project.*${proj}" | grep -v grep | head -1 | awk '{print "/dev/" $1}' || true)
+
         _kill_claude_in_clone "$clone_path"
         refresh_one "$proj" "$cidx"
-        local runner_cmd="cd $clone_path && $RUNNER_SCRIPT $cidx --project $proj${runner_env_flag}${runner_perms_flag}"
-        printf "  Agent-%02d has no workspace. Run manually:\n    %s\n" "$cidx" "$runner_cmd"
+
+        # Try to find the surface by sending a tty check command
+        local sent=false
+        if [[ -n "$runner_tty" && -n "$surface_list" ]]; then
+          while IFS= read -r surf; do
+            [[ -z "$surf" ]] && continue
+            # Write a marker file from the surface, check if it matches the TTY
+            local marker="$DATA_DIR/.tty-check-$$"
+            cmux send --surface "$surf" "tty > $marker 2>/dev/null\\n" 2>/dev/null || continue
+            sleep 0.3
+            if [[ -f "$marker" ]]; then
+              local check_tty
+              check_tty=$(cat "$marker" 2>/dev/null | tr -d '[:space:]')
+              rm -f "$marker"
+              if [[ "$check_tty" == "$runner_tty" ]]; then
+                sleep 0.3
+                cmux send --surface "$surf" "$runner_cmd\\n" 2>/dev/null || true
+                printf "  Restarted agent-%02d on %s\n" "$cidx" "$surf"
+                sent=true
+                restarted=$((restarted + 1))
+                break
+              fi
+            else
+              rm -f "$marker"
+            fi
+          done <<< "$surface_list"
+        fi
+
+        if [[ "$sent" != true ]]; then
+          printf "  Agent-%02d: could not find pane. Run manually:\n    %s\n" "$cidx" "$runner_cmd"
+        fi
       done
       continue
     fi
