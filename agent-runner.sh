@@ -118,7 +118,7 @@ claim_task() {
   acquire_lock || return 1
   local result
   result=$(/usr/bin/python3 -c "
-import json, sys, time
+import json, sys, time, os
 with open('$TASKS_JSON', 'r') as f:
     data = json.load(f)
 for t in data['tasks']:
@@ -126,8 +126,10 @@ for t in data['tasks']:
         t['status'] = 'in_progress'
         t['claimed_by'] = '$AGENT_ID'
         t['started_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
-        with open('$TASKS_JSON', 'w') as f:
+        tmp = '$TASKS_JSON' + '.tmp'
+        with open(tmp, 'w') as f:
             json.dump(data, f, indent=2)
+        os.rename(tmp, '$TASKS_JSON')
         print(t['id'] + '\n' + t['prompt'])
         sys.exit(0)
 sys.exit(1)
@@ -140,7 +142,7 @@ mark_task() {
   local task_id=$1 new_status=$2
   acquire_lock || return 1
   /usr/bin/python3 -c "
-import json, sys, time
+import json, sys, time, os
 with open('$TASKS_JSON', 'r') as f:
     data = json.load(f)
 for t in data['tasks']:
@@ -153,8 +155,10 @@ for t in data['tasks']:
             t.pop('started_at', None)
             t.pop('completed_at', None)
         break
-with open('$TASKS_JSON', 'w') as f:
+tmp = '$TASKS_JSON' + '.tmp'
+with open(tmp, 'w') as f:
     json.dump(data, f, indent=2)
+os.rename(tmp, '$TASKS_JSON')
 " "$task_id" "$new_status"
   release_lock
 }
@@ -167,7 +171,7 @@ release_clone_lock() {
   local pool_json="$DATA_DIR/pool-${PROJECT_NAME}.json"
   if [[ -f "$pool_json" ]]; then
     /usr/bin/python3 -c "
-import json, sys
+import json, sys, os
 with open(sys.argv[1], 'r') as f:
     data = json.load(f)
 idx = int(sys.argv[2])
@@ -177,8 +181,10 @@ for c in data['clones']:
         c['workspace_id'] = ''
         c['locked_at'] = ''
         break
-with open(sys.argv[1], 'w') as f:
+tmp = sys.argv[1] + '.tmp'
+with open(tmp, 'w') as f:
     json.dump(data, f, indent=2)
+os.rename(tmp, sys.argv[1])
 " "$pool_json" "$CLONE_INDEX" 2>/dev/null || true
     printf "\033[1;36m%s\033[0m released clone %02d\n" "$AGENT_ID" "$CLONE_INDEX" 2>/dev/null || true
   fi
