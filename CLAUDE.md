@@ -43,6 +43,22 @@ tests/
   run-all.sh            # Test runner: ./tests/run-all.sh [test_foo.sh]
 ```
 
+## Task Dependencies
+
+Tasks can declare dependencies on other tasks via `--depends-on`:
+
+```bash
+agent-pool add "Phase 1: extract interfaces"                     # → t-001
+agent-pool add "Phase 1: write tests"                            # → t-002
+agent-pool add --depends-on t-001,t-002 "Phase 2: implement"     # → t-003
+agent-pool add --depends-on t-003 "Phase 3: migration guide"     # → t-004
+```
+
+- Agents skip pending tasks whose dependencies haven't completed
+- `agent-pool tasks` shows `waiting (N)` for tasks with unmet deps
+- Task JSON stores `depends_on: ["t-001", "t-002"]` (omitted when empty)
+- Dependency IDs are validated at add time — unknown IDs are rejected
+
 ## Key Conventions
 
 - **No shebang in lib/ files** — they are sourced, not executed directly
