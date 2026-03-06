@@ -37,7 +37,8 @@ Commands:
 
   Task Queue:
   add "<prompt>"        Add a pending task to the queue
-                          --backlog    Add as backlogged instead
+                          --backlog              Add as backlogged instead
+                          --depends-on id1,id2   Only run after listed tasks complete
   tasks                 List all tasks with status
   unblock <id>          Move blocked → pending
   backlog <id>          Move any → backlogged

@@ -1,15 +1,16 @@
 # lib/cmd/tasks.sh — Task queue commands
 
 cmd_add() {
-  local status="pending" prompt=""
+  local status="pending" prompt="" depends_on=""
   while [[ $# -gt 0 ]]; do
     case $1 in
       --backlog) status="backlogged"; shift ;;
+      --depends-on) depends_on="$2"; shift 2 ;;
       *) prompt="$1"; shift ;;
     esac
   done
   if [[ -z "$prompt" ]]; then
-    echo "Usage: agent-pool add [--backlog] \"<prompt>\""
+    echo "Usage: agent-pool add [--backlog] [--depends-on id1,id2,...] \"<prompt>\""
     exit 1
   fi
 
@@ -23,6 +24,14 @@ cmd_add() {
   read_tasks "$tasks_file" | /usr/bin/python3 -c "
 import json, sys, time
 data = json.load(sys.stdin)
+deps_str = sys.argv[3]
+deps = [d.strip() for d in deps_str.split(',') if d.strip()] if deps_str else []
+if deps:
+    existing_ids = {t['id'] for t in data['tasks']}
+    missing = [d for d in deps if d not in existing_ids]
+    if missing:
+        print(f\"Error: unknown task IDs in --depends-on: {', '.join(missing)}\", file=sys.stderr)
+        sys.exit(1)
 task = {
     'id': 't-' + str(int(time.time())),
     'prompt': sys.argv[1],
@@ -32,10 +41,13 @@ task = {
     'started_at': None,
     'completed_at': None
 }
+if deps:
+    task['depends_on'] = deps
 data['tasks'].append(task)
 json.dump(data, sys.stdout, indent=2)
-print(f\"Added task {task['id']} ({task['status']})\", file=sys.stderr)
-" "$prompt" "$status" | write_tasks "$tasks_file"
+dep_info = f' (depends on: {\", \".join(deps)})' if deps else ''
+print(f\"Added task {task['id']} ({task['status']}){dep_info}\", file=sys.stderr)
+" "$prompt" "$status" "$depends_on" | write_tasks "$tasks_file"
   release_task_lock "$tasks_file"
 }
 
@@ -62,12 +74,28 @@ colors = {
 reset = '\033[0m'
 print(f\"{'ID':<18} {'Status':<14} {'Claimed By':<12} {'Prompt'}\")
 print(f\"{'--':<18} {'------':<14} {'----------':<12} {'------'}\")
+completed_ids = {t['id'] for t in data['tasks'] if t.get('status') == 'completed'}
 for t in data['tasks']:
     s = t['status']
-    color = colors.get(s, '')
+    deps = t.get('depends_on', [])
+    if deps and s == 'pending':
+        unmet = [d for d in deps if d not in completed_ids]
+        if unmet:
+            s_display = f'waiting ({len(unmet)})'
+            color = '\033[90m'
+        else:
+            s_display = s
+            color = colors.get(s, '')
+    else:
+        s_display = s
+        color = colors.get(s, '')
     claimed = t.get('claimed_by') or '-'
     prompt = t['prompt'][:60] + ('...' if len(t['prompt']) > 60 else '')
-    print(f\"{t['id']:<18} {color}{s:<14}{reset} {claimed:<12} {prompt}\")
+    suffix = ''
+    if deps:
+        dep_str = ','.join(deps)
+        suffix = f'  [deps: {dep_str}]'
+    print(f\"{t['id']:<18} {color}{s_display:<14}{reset} {claimed:<12} {prompt}{suffix}\")
 "
 }
 

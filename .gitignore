@@ -32,3 +32,5 @@ projects.json
 # Agent-runner injected files (symlinks in clones)
 agent-docs
 shared-docs
+CLAUDE.md
+.claude/commands/finish.md

@@ -121,8 +121,16 @@ claim_task() {
 import json, sys, time, os
 with open('$TASKS_JSON', 'r') as f:
     data = json.load(f)
+completed_ids = {t['id'] for t in data['tasks'] if t.get('status') == 'completed'}
+waiting_count = 0
 for t in data['tasks']:
     if t['status'] == 'pending':
+        deps = t.get('depends_on', [])
+        if deps:
+            unmet = [d for d in deps if d not in completed_ids]
+            if unmet:
+                waiting_count += 1
+                continue
         t['status'] = 'in_progress'
         t['claimed_by'] = '$AGENT_ID'
         t['started_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
@@ -132,6 +140,8 @@ for t in data['tasks']:
         os.rename(tmp, '$TASKS_JSON')
         print(t['id'] + '\n' + t['prompt'])
         sys.exit(0)
+if waiting_count > 0:
+    print(f'WAITING:{waiting_count}', file=sys.stderr)
 sys.exit(1)
 " 2>/dev/null) || { release_lock; return 1; }
   release_lock
@@ -200,11 +210,27 @@ isleep() {
   sleep "$1"
 }
 
+last_waiting_msg=""
 while true; do
-  result=$(claim_task 2>/dev/null) || {
+  claim_stderr=$(mktemp)
+  result=$(claim_task 2>"$claim_stderr") || {
+    waiting_info=$(cat "$claim_stderr" 2>/dev/null)
+    rm -f "$claim_stderr"
+    if [[ "$waiting_info" == WAITING:* ]]; then
+      n="${waiting_info#WAITING:}"
+      msg="$n task(s) waiting on dependencies"
+      if [[ "$msg" != "$last_waiting_msg" ]]; then
+        printf "\033[1;36m%s\033[0m %s\n" "$AGENT_ID" "$msg"
+        last_waiting_msg="$msg"
+      fi
+    else
+      last_waiting_msg=""
+    fi
     isleep "$poll_interval"
     continue
   }
+  rm -f "$claim_stderr"
+  last_waiting_msg=""
 
   task_id=$(echo "$result" | head -1)
   prompt=$(echo "$result" | tail -n +2)
