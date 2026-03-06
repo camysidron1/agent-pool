@@ -33,8 +33,10 @@ projects = {
         }
     }
 }
-with open('$PROJECTS_JSON', 'w') as f:
+tmp = '$PROJECTS_JSON' + '.tmp'
+with open(tmp, 'w') as f:
     json.dump(projects, f, indent=2)
+os.rename(tmp, '$PROJECTS_JSON')
 "
     # Rename state files
     [[ -f "$DATA_DIR/pool.json" ]] && mv "$DATA_DIR/pool.json" "$DATA_DIR/pool-nebari.json"
