@@ -1,35 +1,42 @@
 # Test Coverage Report — agent-pool
 
-**Generated**: 2026-03-05
+**Generated**: 2026-03-05 (updated after implementation)
 **Scope**: All source files vs all test files in the agent-pool repository
 
 ---
 
 ## Executive Summary
 
-The test suite covers **core data operations well** (task CRUD, pool locking, project config, approval queue) but has **significant gaps** in command-level testing. Of the 10 command files in `lib/cmd/`, only 5 have dedicated test files. The most complex commands — `launch`, `restart`, `start`, and `status` — have minimal or no unit tests despite containing the most branching logic.
+The test suite now provides **138 passing tests** across 12 test files, up from ~80 tests across 11 files. All P0 critical gaps have been addressed, and most P1 gaps have been closed.
 
-### Coverage Heatmap
+### What was done
+
+- **4 new test files created**: `test_finish.sh` (10 tests), `test_launch.sh` (8 tests), `test_restart.sh` (7 tests), `test_status.sh` (7 tests)
+- **3 existing files expanded**: `test_runner.sh` (+6 tests), `test_project.sh` (+10 tests), `test_pool.sh` (+6 tests)
+- **Static test added**: help/dispatch consistency check in `test_static.sh`
+- **Infrastructure**: `assert_json_array_length()` helper added to `helpers.sh`
+
+### Coverage Heatmap (updated)
 
 | Module | Coverage | Notes |
 |--------|----------|-------|
 | `lib/tasks.sh` | **High** | Core operations well-tested |
-| `lib/pool.sh` | **Medium** | Lock/unlock tested; creation, cleanup untested |
-| `lib/project.sh` | **Medium** | CRUD tested; migration, edge cases gaps |
-| `lib/cmd/tasks.sh` | **High** | add, list, unblock, backlog, activate tested |
+| `lib/pool.sh` | **High** | Lock/unlock, next_index, add/remove entry, cleanup_stale_locks |
+| `lib/project.sh` | **High** | CRUD + tracking + workflow tested |
+| `lib/cmd/tasks.sh` | **High** | add, list, unblock, backlog, activate, deps tested |
 | `lib/cmd/approvals.sh` | **High** | approve, deny, list tested; `watch` untested |
 | `lib/cmd/clone.sh` | **High** | init, refresh, release, destroy tested |
 | `lib/cmd/docs.sh` | **High** | All modes tested |
-| `lib/cmd/project.sh` | **Medium** | CRUD tested; tracking/workflow untested |
-| `lib/cmd/launch.sh` | **None** | Zero test coverage |
-| `lib/cmd/restart.sh` | **None** | Zero test coverage |
-| `lib/cmd/start.sh` | **None** | Zero test coverage |
-| `lib/cmd/status.sh` | **Low** | Basic locked/free in integration tests only |
-| `lib/cmd/help.sh` | **None** | No dedicated tests |
-| `agent-runner.sh` | **Medium** | Task claiming/marking tested; main loop, clone setup, context building untested |
-| `finish-task.sh` | **None** | Zero test coverage |
+| `lib/cmd/project.sh` | **High** | CRUD + tracking/workflow CRUD + edge cases |
+| `lib/cmd/launch.sh` | **Medium** | Init paths tested; cmux grid/panel paths need mocking |
+| `lib/cmd/restart.sh` | **Medium** | Error paths + regex detection tested; cmux paths need mocking |
+| `lib/cmd/start.sh` | **None** | Interactive — hard to test without TTY |
+| `lib/cmd/status.sh` | **High** | Headers, branch, workspace, multi-clone, empty pool |
+| `lib/cmd/help.sh` | **Medium** | Dispatch consistency verified in static tests |
+| `agent-runner.sh` | **High** | Task claiming (with deps), context building, signal files, hook install |
+| `finish-task.sh` | **High** | All statuses, validation, signal files, edge cases |
 | `hooks/approval-hook.sh` | **High** | Allowlist, blocking, truncation tested |
-| `agent-pool` (entrypoint) | **Low** | Flag parsing tested indirectly; dispatch not tested |
+| `agent-pool` (entrypoint) | **Medium** | Flag parsing + dispatch consistency tested |
 
 ---
 

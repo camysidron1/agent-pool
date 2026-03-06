@@ -137,6 +137,29 @@ print('' if obj is None else obj)
   fi
 }
 
+assert_json_array_length() {
+  local file="$1" key="$2" expected="$3" msg="${4:-}"
+  local actual
+  actual=$(/usr/bin/python3 -c "
+import json, sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+keys = sys.argv[2].split('.')
+obj = data
+for k in keys:
+    if isinstance(obj, dict):
+        obj = obj.get(k, [])
+    else:
+        obj = []
+        break
+print(len(obj) if isinstance(obj, list) else 0)
+" "$file" "$key")
+  if [[ "$actual" != "$expected" ]]; then
+    echo "    FAIL: ${msg:-$file.$key expected length $expected, got $actual}"
+    return 1
+  fi
+}
+
 # --- test runner ---
 
 run_test() {

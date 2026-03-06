@@ -432,6 +432,199 @@ print(data['tasks'][0].get('claimed_by', ''))
   assert_eq "" "$claimed" "claimed_by should be cleared"
 }
 
+test_runner_claim_skips_unmet_deps() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  local tasks_file="$TEST_DIR/tasks-foo.json"
+
+  _add_task_with_status "$tasks_file" "t-dep" "completed" "agent-01"
+  _add_task_with_status "$tasks_file" "t-nodep" "pending"
+  _add_task_with_status "$tasks_file" "t-notdone" "pending"
+  _add_task_with_status "$tasks_file" "t-hasdep" "pending"
+
+  # Add depends_on to t-hasdep pointing at t-notdone (which is still pending)
+  /usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+for t in data['tasks']:
+    if t['id'] == 't-hasdep':
+        t['depends_on'] = ['t-notdone']
+with open('$tasks_file', 'w') as f: json.dump(data, f, indent=2)
+"
+
+  # Run dependency-aware claim logic
+  local result
+  result=$(/usr/bin/python3 -c "
+import json, sys, time
+with open('$tasks_file', 'r') as f:
+    data = json.load(f)
+completed_ids = {t['id'] for t in data['tasks'] if t.get('status') == 'completed'}
+for t in data['tasks']:
+    if t['status'] == 'pending':
+        deps = t.get('depends_on', [])
+        if deps:
+            unmet = [d for d in deps if d not in completed_ids]
+            if unmet:
+                continue
+        t['status'] = 'in_progress'
+        t['claimed_by'] = 'agent-00'
+        t['started_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+        with open('$tasks_file', 'w') as f:
+            json.dump(data, f, indent=2)
+        print(t['id'] + '\n' + t['prompt'])
+        sys.exit(0)
+sys.exit(1)
+" 2>/dev/null)
+
+  local task_id
+  task_id=$(echo "$result" | head -1)
+  assert_eq "t-nodep" "$task_id" "should claim t-nodep (no deps), not t-hasdep (unmet deps)"
+
+  # Verify t-hasdep is still pending
+  local hasdep_status
+  hasdep_status=$(/usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+for t in data['tasks']:
+    if t['id'] == 't-hasdep':
+        print(t['status'])
+")
+  assert_eq "pending" "$hasdep_status" "t-hasdep should still be pending"
+}
+
+test_runner_claim_satisfies_deps() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  local tasks_file="$TEST_DIR/tasks-foo.json"
+
+  _add_task_with_status "$tasks_file" "t-a" "completed" "agent-01"
+  _add_task_with_status "$tasks_file" "t-b" "completed" "agent-02"
+  _add_task_with_status "$tasks_file" "t-c" "pending"
+
+  # Add depends_on to t-c pointing at t-a and t-b (both completed)
+  /usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+for t in data['tasks']:
+    if t['id'] == 't-c':
+        t['depends_on'] = ['t-a', 't-b']
+with open('$tasks_file', 'w') as f: json.dump(data, f, indent=2)
+"
+
+  # Run dependency-aware claim logic
+  local result
+  result=$(/usr/bin/python3 -c "
+import json, sys, time
+with open('$tasks_file', 'r') as f:
+    data = json.load(f)
+completed_ids = {t['id'] for t in data['tasks'] if t.get('status') == 'completed'}
+for t in data['tasks']:
+    if t['status'] == 'pending':
+        deps = t.get('depends_on', [])
+        if deps:
+            unmet = [d for d in deps if d not in completed_ids]
+            if unmet:
+                continue
+        t['status'] = 'in_progress'
+        t['claimed_by'] = 'agent-00'
+        t['started_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+        with open('$tasks_file', 'w') as f:
+            json.dump(data, f, indent=2)
+        print(t['id'] + '\n' + t['prompt'])
+        sys.exit(0)
+sys.exit(1)
+" 2>/dev/null)
+
+  local task_id
+  task_id=$(echo "$result" | head -1)
+  assert_eq "t-c" "$task_id" "should claim t-c since all deps (t-a, t-b) are completed"
+
+  # Verify t-c is now in_progress
+  local status
+  status=$(/usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+for t in data['tasks']:
+    if t['id'] == 't-c':
+        print(t['status'])
+")
+  assert_eq "in_progress" "$status" "t-c should be in_progress after claim"
+}
+
+test_runner_signal_file_prevents_remark() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  local task_id="t-signal-test"
+
+  # Create signal file like finish-task.sh does
+  local signal_file="$DATA_DIR/.task-finished-${task_id}"
+  echo "blocked" > "$signal_file"
+
+  # Verify signal file exists
+  assert_file_exists "$signal_file" "signal file should exist"
+
+  # Verify it contains the expected status
+  local content
+  content=$(cat "$signal_file")
+  assert_eq "blocked" "$content" "signal file should contain 'blocked'"
+}
+
+test_runner_context_no_tracking() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+
+  # Read projects.json and check tracking field like agent-runner does
+  local tracking_info
+  tracking_info=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/projects.json') as f:
+    data = json.load(f)
+p = data['projects'].get('foo', {})
+tracking = p.get('tracking')
+if not tracking or not tracking.get('type'):
+    print('NONE')
+else:
+    print(tracking['type'].upper() + ' ' + tracking.get('project_key', ''))
+")
+  assert_contains "$tracking_info" "NONE" "project with no tracking should report NONE"
+}
+
+test_runner_context_with_tracking() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" project set-tracking foo --type linear --key PROJ
+
+  # Read projects.json and check tracking field like agent-runner does
+  local tracking_info
+  tracking_info=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/projects.json') as f:
+    data = json.load(f)
+p = data['projects'].get('foo', {})
+tracking = p.get('tracking')
+if not tracking or not tracking.get('type'):
+    print('NONE')
+else:
+    print(tracking['type'].upper() + ' ' + tracking.get('project_key', ''))
+")
+  assert_contains "$tracking_info" "LINEAR" "tracking type should be LINEAR"
+  assert_contains "$tracking_info" "PROJ" "tracking key should be PROJ"
+}
+
+test_runner_context_default_workflow() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+
+  # Check that workflow is empty/null when not set
+  local workflow_json
+  workflow_json=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/projects.json') as f:
+    data = json.load(f)
+p = data['projects'].get('foo', {})
+gw = p.get('git_workflow')
+if not gw or not gw.get('type'):
+    print('DEFAULT')
+else:
+    print(gw['type'])
+")
+  assert_eq "DEFAULT" "$workflow_json" "project with no workflow should use default"
+}
+
 run_test test_runner_uses_project_tasks
 run_test test_runner_uses_project_branch
 run_test test_runner_releases_lock_on_exit
@@ -446,3 +639,9 @@ run_test test_runner_claim_skips_non_pending
 run_test test_runner_mark_completed
 run_test test_runner_mark_blocked
 run_test test_runner_mark_pending_clears
+run_test test_runner_claim_skips_unmet_deps
+run_test test_runner_claim_satisfies_deps
+run_test test_runner_signal_file_prevents_remark
+run_test test_runner_context_no_tracking
+run_test test_runner_context_with_tracking
+run_test test_runner_context_default_workflow

@@ -96,6 +96,99 @@ sys.exit(1)
   fi
 }
 
+test_next_index_empty() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  echo '{"clones":[]}' > "$TEST_DIR/pool-foo.json"
+
+  source "$SCRIPT_DIR/lib/project.sh"
+  source "$SCRIPT_DIR/lib/pool.sh"
+  local idx
+  idx=$(next_index "$TEST_DIR/pool-foo.json")
+  assert_eq "-1" "$idx"
+}
+
+test_next_index_with_clones() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 3 -p foo
+
+  local idx
+  source "$SCRIPT_DIR/lib/project.sh"
+  source "$SCRIPT_DIR/lib/pool.sh"
+  idx=$(next_index "$TEST_DIR/pool-foo.json")
+  assert_eq "2" "$idx"
+}
+
+test_add_clone_entry() {
+  echo '{"clones":[{"index":0,"locked":false,"workspace_id":"","locked_at":"","branch":"main"},{"index":2,"locked":false,"workspace_id":"","locked_at":"","branch":"main"}]}' > "$TEST_DIR/pool-test.json"
+
+  source "$SCRIPT_DIR/lib/project.sh"
+  source "$SCRIPT_DIR/lib/pool.sh"
+  add_clone_entry "$TEST_DIR/pool-test.json" 1 "main"
+
+  local count indexes
+  count=$(/usr/bin/python3 -c "import json; print(len(json.load(open('$TEST_DIR/pool-test.json'))['clones']))")
+  assert_eq "3" "$count"
+  indexes=$(/usr/bin/python3 -c "
+import json
+data = json.load(open('$TEST_DIR/pool-test.json'))
+print(','.join(str(c['index']) for c in data['clones']))
+")
+  assert_eq "0,1,2" "$indexes" "entries should be sorted"
+}
+
+test_remove_clone_entry() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 3 -p foo
+
+  source "$SCRIPT_DIR/lib/project.sh"
+  source "$SCRIPT_DIR/lib/pool.sh"
+  remove_clone_entry "$TEST_DIR/pool-foo.json" 1
+
+  local indexes
+  indexes=$(/usr/bin/python3 -c "
+import json
+data = json.load(open('$TEST_DIR/pool-foo.json'))
+print(','.join(str(c['index']) for c in data['clones']))
+")
+  assert_eq "0,2" "$indexes"
+}
+
+test_unlock_clone() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 1 -p foo
+
+  source "$SCRIPT_DIR/lib/project.sh"
+  source "$SCRIPT_DIR/lib/pool.sh"
+  lock_clone "$TEST_DIR/pool-foo.json" 0 "test-ws"
+  unlock_clone "$TEST_DIR/pool-foo.json" 0
+
+  local locked ws
+  locked=$(/usr/bin/python3 -c "import json; print(json.load(open('$TEST_DIR/pool-foo.json'))['clones'][0]['locked'])")
+  assert_eq "False" "$locked"
+  ws=$(/usr/bin/python3 -c "import json; print(json.load(open('$TEST_DIR/pool-foo.json'))['clones'][0]['workspace_id'])")
+  assert_eq "" "$ws"
+}
+
+test_cleanup_stale_locks_no_cmux() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 1 -p foo
+
+  source "$SCRIPT_DIR/lib/project.sh"
+  source "$SCRIPT_DIR/lib/pool.sh"
+  lock_clone "$TEST_DIR/pool-foo.json" 0 "workspace:999"
+  cleanup_stale_locks "$TEST_DIR/pool-foo.json" 2>/dev/null || true
+
+  local locked
+  locked=$(/usr/bin/python3 -c "import json; print(json.load(open('$TEST_DIR/pool-foo.json'))['clones'][0]['locked'])")
+  assert_eq "False" "$locked" "stale workspace lock should be cleaned"
+}
+
 run_test test_lock_clone
 run_test test_find_free_clone
 run_test test_find_free_clone_all_locked
+run_test test_next_index_empty
+run_test test_next_index_with_clones
+run_test test_add_clone_entry
+run_test test_remove_clone_entry
+run_test test_unlock_clone
+run_test test_cleanup_stale_locks_no_cmux
