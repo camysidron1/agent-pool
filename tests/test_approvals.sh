@@ -201,6 +201,101 @@ test_hook_input_truncation() {
   [[ "$len" -eq 200 ]] || { echo "    FAIL: expected exactly 200, got $len"; return 1; }
 }
 
+test_hook_creates_notify_log() {
+  mkdir -p "$TEST_DIR/approvals"
+  local notify_log="$TEST_DIR/approvals/.notify.log"
+
+  # Simulate what the hook writes
+  local req_id="req-999-ap-01"
+  local agent_id="ap-01"
+  local tool_name="Bash"
+  local tool_input="echo hello"
+  echo "${req_id}|${agent_id}|${tool_name}|${tool_input}" >> "$notify_log"
+
+  assert_file_exists "$notify_log" "notify log should exist"
+  local content
+  content=$(cat "$notify_log")
+  assert_contains "$content" "req-999-ap-01" "should contain request ID"
+  assert_contains "$content" "Bash" "should contain tool name"
+}
+
+test_approve_sets_decided_at() {
+  mkdir -p "$TEST_DIR/approvals"
+  echo '{"id":"req-600-ap-01","agent":"ap-01","tool":"Write","input":"test","timestamp":"2026-03-04T12:00:00Z","status":"pending","decided_at":null}' \
+    > "$TEST_DIR/approvals/req-600-ap-01.json"
+
+  "$AGENT_POOL" approve req-600-ap-01 2>&1
+
+  local decided_at
+  decided_at=$(jq -r '.decided_at' "$TEST_DIR/approvals/req-600-ap-01.json")
+  # Should be a non-null UTC timestamp like 2026-03-05T...Z
+  [[ "$decided_at" != "null" ]] || { echo "    FAIL: decided_at should not be null"; return 1; }
+  [[ "$decided_at" == *T* ]] || { echo "    FAIL: decided_at should be ISO format, got '$decided_at'"; return 1; }
+}
+
+test_deny_sets_decided_at() {
+  mkdir -p "$TEST_DIR/approvals"
+  echo '{"id":"req-700-ap-01","agent":"ap-01","tool":"Edit","input":"test","timestamp":"2026-03-04T12:00:00Z","status":"pending","decided_at":null}' \
+    > "$TEST_DIR/approvals/req-700-ap-01.json"
+
+  "$AGENT_POOL" deny req-700-ap-01 2>&1
+
+  local status decided_at
+  status=$(jq -r '.status' "$TEST_DIR/approvals/req-700-ap-01.json")
+  decided_at=$(jq -r '.decided_at' "$TEST_DIR/approvals/req-700-ap-01.json")
+  assert_eq "denied" "$status"
+  [[ "$decided_at" != "null" ]] || { echo "    FAIL: decided_at should be set on deny"; return 1; }
+}
+
+test_approve_no_arg() {
+  local output rc=0
+  output=$("$AGENT_POOL" approve 2>&1) || rc=$?
+  [[ $rc -ne 0 ]] || { echo "    FAIL: expected non-zero exit with no arg"; return 1; }
+  assert_contains "$output" "Usage"
+}
+
+test_deny_no_arg() {
+  local output rc=0
+  output=$("$AGENT_POOL" deny 2>&1) || rc=$?
+  [[ $rc -ne 0 ]] || { echo "    FAIL: expected non-zero exit with no arg"; return 1; }
+  assert_contains "$output" "Usage"
+}
+
+test_approve_all_no_pending() {
+  mkdir -p "$TEST_DIR/approvals"
+  # Only an already-approved request
+  echo '{"id":"req-800-ap-01","agent":"ap-01","tool":"Bash","input":"x","timestamp":"2026-03-04T12:00:00Z","status":"approved","decided_at":"2026-03-04T12:01:00Z"}' \
+    > "$TEST_DIR/approvals/req-800-ap-01.json"
+
+  local output
+  output=$("$AGENT_POOL" approve --all)
+  assert_contains "$output" "Approved 0 pending request(s)."
+}
+
+test_approvals_age_format() {
+  mkdir -p "$TEST_DIR/approvals"
+  # Use a recent timestamp so age shows as Xs
+  local ts
+  ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  echo "{\"id\":\"req-900-ap-01\",\"agent\":\"ap-01\",\"tool\":\"Bash\",\"input\":\"x\",\"timestamp\":\"$ts\",\"status\":\"pending\",\"decided_at\":null}" \
+    > "$TEST_DIR/approvals/req-900-ap-01.json"
+
+  local output
+  output=$("$AGENT_POOL" approvals)
+  assert_contains "$output" "req-900-ap-01"
+  # The age column should contain a number followed by s/m/h
+  [[ "$output" =~ [0-9]+[smh] ]] || { echo "    FAIL: output should contain age like Ns/Nm/Nh"; return 1; }
+}
+
+test_hook_derives_agent_from_cwd() {
+  mkdir -p "$TEST_DIR/approvals"
+  mkdir -p "$TEST_DIR/my-agent-03"
+
+  local agent_id
+  agent_id=$(basename "$TEST_DIR/my-agent-03")
+  assert_eq "my-agent-03" "$agent_id" "agent ID should be derived from directory name"
+}
+
 run_test test_approvals_empty
 run_test test_approvals_lists_pending
 run_test test_approvals_ignores_non_pending
@@ -215,3 +310,11 @@ run_test test_hook_allows_task_tools
 run_test test_hook_blocks_write_tool
 run_test test_hook_blocks_edit_tool
 run_test test_hook_input_truncation
+run_test test_hook_creates_notify_log
+run_test test_approve_sets_decided_at
+run_test test_deny_sets_decided_at
+run_test test_approve_no_arg
+run_test test_deny_no_arg
+run_test test_approve_all_no_pending
+run_test test_approvals_age_format
+run_test test_hook_derives_agent_from_cwd

@@ -201,6 +201,163 @@ print(data['tasks'][0]['prompt'])
   assert_eq "test after stale" "$prompt" "should add task after clearing stale lock"
 }
 
+test_set_status_to_completed() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  local tasks_file="$TEST_DIR/tasks-foo.json"
+  _add_task_with_status "$tasks_file" "t-ss1" "in_progress" "agent-00"
+
+  "$AGENT_POOL" set-status t-ss1 completed -p foo 2>&1
+
+  local status
+  status=$(/usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+for t in data['tasks']:
+    if t['id'] == 't-ss1': print(t['status'])
+")
+  assert_eq "completed" "$status"
+
+  # completed_at should be set
+  local completed_at
+  completed_at=$(/usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+for t in data['tasks']:
+    if t['id'] == 't-ss1': print(t.get('completed_at', ''))
+")
+  [[ -n "$completed_at" && "$completed_at" != "None" ]] || { echo "    FAIL: completed_at should be set"; return 1; }
+}
+
+test_set_status_to_pending_clears() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  local tasks_file="$TEST_DIR/tasks-foo.json"
+  _add_task_with_status "$tasks_file" "t-ss2" "in_progress" "agent-01"
+
+  "$AGENT_POOL" set-status t-ss2 pending -p foo 2>&1
+
+  local claimed
+  claimed=$(/usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+for t in data['tasks']:
+    if t['id'] == 't-ss2': print(t.get('claimed_by') or '')
+")
+  assert_eq "" "$claimed" "claimed_by should be cleared"
+}
+
+test_set_status_invalid() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  local tasks_file="$TEST_DIR/tasks-foo.json"
+  _add_task_with_status "$tasks_file" "t-ss3" "pending"
+
+  if "$AGENT_POOL" set-status t-ss3 invalid_status -p foo 2>&1; then
+    echo "    FAIL: expected non-zero exit for invalid status"
+    return 1
+  fi
+}
+
+test_set_status_not_found() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  echo '{"tasks":[]}' > "$TEST_DIR/tasks-foo.json"
+
+  if "$AGENT_POOL" set-status t-999 completed -p foo 2>&1; then
+    echo "    FAIL: expected non-zero exit for missing task"
+    return 1
+  fi
+}
+
+test_add_with_depends_on() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" add "first task" -p foo
+  # Get the ID of the first task
+  local first_id
+  first_id=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/tasks-foo.json') as f: data = json.load(f)
+print(data['tasks'][0]['id'])
+")
+
+  sleep 1  # Ensure different timestamp for second task ID
+  "$AGENT_POOL" add --depends-on "$first_id" "second task" -p foo
+
+  # Verify depends_on is set on the second task
+  local deps
+  deps=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/tasks-foo.json') as f: data = json.load(f)
+t = data['tasks'][1]
+print(','.join(t.get('depends_on', [])))
+")
+  assert_eq "$first_id" "$deps" "second task should depend on first"
+}
+
+test_add_depends_on_invalid_id() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  echo '{"tasks":[]}' > "$TEST_DIR/tasks-foo.json"
+
+  if "$AGENT_POOL" add --depends-on "t-nonexistent" "dependent task" -p foo 2>&1; then
+    echo "    FAIL: expected non-zero exit for unknown dependency ID"
+    return 1
+  fi
+}
+
+test_tasks_display_waiting() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  local tasks_file="$TEST_DIR/tasks-foo.json"
+  _add_task_with_status "$tasks_file" "t-dep1" "pending"
+  # Add t-dep2 with depends_on t-dep1 (which is still pending, not completed)
+  _add_task_with_status "$tasks_file" "t-dep2" "pending"
+  /usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+for t in data['tasks']:
+    if t['id'] == 't-dep2':
+        t['depends_on'] = ['t-dep1']
+with open('$tasks_file', 'w') as f: json.dump(data, f, indent=2)
+"
+
+  local output
+  output=$("$AGENT_POOL" tasks -p foo)
+  assert_contains "$output" "waiting" "should show waiting for task with unmet deps"
+}
+
+test_tasks_display_deps_suffix() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  local tasks_file="$TEST_DIR/tasks-foo.json"
+  _add_task_with_status "$tasks_file" "t-a" "completed" "agent-01"
+  _add_task_with_status "$tasks_file" "t-b" "pending"
+  /usr/bin/python3 -c "
+import json
+with open('$tasks_file') as f: data = json.load(f)
+for t in data['tasks']:
+    if t['id'] == 't-b':
+        t['depends_on'] = ['t-a']
+with open('$tasks_file', 'w') as f: json.dump(data, f, indent=2)
+"
+
+  local output
+  output=$("$AGENT_POOL" tasks -p foo)
+  assert_contains "$output" "[deps: t-a]" "should show deps suffix"
+}
+
+test_set_status_no_args() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  local output
+  if output=$("$AGENT_POOL" set-status -p foo 2>&1); then
+    echo "    FAIL: expected non-zero exit with no args"
+    return 1
+  fi
+  assert_contains "$output" "Usage"
+}
+
+test_tasks_empty_list() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  echo '{"tasks":[]}' > "$TEST_DIR/tasks-foo.json"
+  local output
+  output=$("$AGENT_POOL" tasks -p foo)
+  assert_contains "$output" "no tasks"
+}
+
 run_test test_tasks_json_per_project
 run_test test_add_task_to_project
 run_test test_tasks_shows_project_tasks
@@ -216,3 +373,13 @@ run_test test_activate_not_backlogged
 run_test test_activate_not_found
 run_test test_add_no_prompt_shows_usage
 run_test test_task_lock_stale_detection
+run_test test_set_status_to_completed
+run_test test_set_status_to_pending_clears
+run_test test_set_status_invalid
+run_test test_set_status_not_found
+run_test test_add_with_depends_on
+run_test test_add_depends_on_invalid_id
+run_test test_tasks_display_waiting
+run_test test_tasks_display_deps_suffix
+run_test test_set_status_no_args
+run_test test_tasks_empty_list

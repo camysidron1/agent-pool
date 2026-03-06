@@ -179,6 +179,27 @@ test_refresh_preserves_docs() {
   assert_file_exists "$TEST_DIR/docs/shared/lessons.md" "shared docs should survive refresh"
 }
 
+test_source_repo_tilde_expansion() {
+  "$AGENT_POOL" project add foo --source "~/test-repo" --branch main --prefix foo
+  PROJECTS_JSON="$TEST_DIR/projects.json"
+  DATA_DIR="$TEST_DIR"
+  source "$SCRIPT_DIR/lib/project.sh"
+  local expanded
+  expanded=$(get_source_repo "foo")
+  assert_contains "$expanded" "$HOME" "tilde should be expanded"
+  assert_not_contains "$expanded" "~" "no literal tilde should remain"
+}
+
+test_auto_migrate_no_op_when_no_old_files() {
+  # No pool.json, no projects.json
+  PROJECTS_JSON="$TEST_DIR/projects.json"
+  DATA_DIR="$TEST_DIR"
+  source "$SCRIPT_DIR/lib/project.sh"
+  auto_migrate
+  # projects.json should NOT be created (auto_migrate only triggers when pool.json exists)
+  [[ ! -f "$TEST_DIR/projects.json" ]] || { echo "    FAIL: projects.json should not be created when no old files"; return 1; }
+}
+
 run_test test_two_projects_isolated
 run_test test_default_project_flag
 run_test test_backward_compat_migration
@@ -190,3 +211,5 @@ run_test test_resolve_invalid_project_flag
 run_test test_project_flag_before_command
 run_test test_unknown_command_shows_help
 run_test test_refresh_preserves_docs
+run_test test_source_repo_tilde_expansion
+run_test test_auto_migrate_no_op_when_no_old_files

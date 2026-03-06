@@ -53,6 +53,141 @@ test_project_required() {
   assert_contains "$output" "project" "error should mention project"
 }
 
+test_project_set_tracking() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" project set-tracking foo --type linear --key PROJ-123
+  assert_json_field "$TEST_DIR/projects.json" "projects.foo.tracking.type" "linear"
+  assert_json_field "$TEST_DIR/projects.json" "projects.foo.tracking.project_key" "PROJ-123"
+}
+
+test_project_set_tracking_with_label() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" project set-tracking foo --type jira --key TEAM --label "backend"
+  assert_json_field "$TEST_DIR/projects.json" "projects.foo.tracking.type" "jira"
+  assert_json_field "$TEST_DIR/projects.json" "projects.foo.tracking.project_key" "TEAM"
+  assert_json_field "$TEST_DIR/projects.json" "projects.foo.tracking.label" "backend"
+}
+
+test_project_clear_tracking() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" project set-tracking foo --type linear --key PROJ
+  "$AGENT_POOL" project clear-tracking foo
+  local is_null
+  is_null=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/projects.json') as f: data = json.load(f)
+print('yes' if data['projects']['foo'].get('tracking') is None else 'no')
+")
+  assert_eq "yes" "$is_null" "tracking should be null after clear"
+}
+
+test_project_set_workflow() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" project set-workflow foo --type trunk --instructions "Always rebase"
+  assert_json_field "$TEST_DIR/projects.json" "projects.foo.git_workflow.type" "trunk"
+  assert_json_field "$TEST_DIR/projects.json" "projects.foo.git_workflow.instructions" "Always rebase"
+}
+
+test_project_clear_workflow() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" project set-workflow foo --type trunk --instructions "test"
+  "$AGENT_POOL" project clear-workflow foo
+  local is_null
+  is_null=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/projects.json') as f: data = json.load(f)
+print('yes' if data['projects']['foo'].get('git_workflow') is None else 'no')
+")
+  assert_eq "yes" "$is_null" "git_workflow should be null after clear"
+}
+
+test_project_set_tracking_missing_args() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  if "$AGENT_POOL" project set-tracking foo --type linear 2>&1; then
+    echo "    FAIL: expected non-zero exit for missing --key"
+    return 1
+  fi
+  if "$AGENT_POOL" project set-tracking foo --key PROJ 2>&1; then
+    echo "    FAIL: expected non-zero exit for missing --type"
+    return 1
+  fi
+}
+
+test_project_set_workflow_missing_args() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  if "$AGENT_POOL" project set-workflow foo --type trunk 2>&1; then
+    echo "    FAIL: expected non-zero exit for missing --instructions"
+    return 1
+  fi
+  if "$AGENT_POOL" project set-workflow foo --instructions "test" 2>&1; then
+    echo "    FAIL: expected non-zero exit for missing --type"
+    return 1
+  fi
+}
+
+test_project_first_becomes_default() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main
+  assert_json_field "$TEST_DIR/projects.json" "default" "foo"
+}
+
+test_project_remove_clears_default() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main
+  "$AGENT_POOL" project remove foo
+  local default_val
+  default_val=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/projects.json') as f: data = json.load(f)
+print(data.get('default', ''))
+")
+  assert_eq "" "$default_val" "default should be empty after removing default project"
+}
+
+test_project_tracking_shows_in_list() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" project set-tracking foo --type linear --key PROJ
+  local output
+  output=$("$AGENT_POOL" project list)
+  assert_contains "$output" "Linear"
+}
+
+test_project_set_tracking_on_nonexistent() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  if "$AGENT_POOL" project set-tracking nonexistent --type linear --key PROJ 2>&1; then
+    echo "    FAIL: expected non-zero exit for nonexistent project"
+    return 1
+  fi
+}
+
+test_project_clear_tracking_on_nonexistent() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  if "$AGENT_POOL" project clear-tracking nonexistent 2>&1; then
+    echo "    FAIL: expected non-zero exit for nonexistent project"
+    return 1
+  fi
+}
+
+test_project_set_workflow_on_nonexistent() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  if "$AGENT_POOL" project set-workflow nonexistent --type trunk --instructions "test" 2>&1; then
+    echo "    FAIL: expected non-zero exit for nonexistent project"
+    return 1
+  fi
+}
+
+test_project_no_subcommand() {
+  local output rc=0
+  output=$("$AGENT_POOL" project 2>&1) || rc=$?
+  [[ $rc -ne 0 ]] || { echo "    FAIL: expected non-zero exit with no subcommand"; return 1; }
+  assert_contains "$output" "Usage"
+}
+
+test_project_add_no_source() {
+  local output rc=0
+  output=$("$AGENT_POOL" project add foo 2>&1) || rc=$?
+  [[ $rc -ne 0 ]] || { echo "    FAIL: expected non-zero exit without --source"; return 1; }
+  assert_contains "$output" "Usage"
+}
+
 run_test test_project_add
 run_test test_project_add_with_prefix
 run_test test_project_add_default_prefix
@@ -60,3 +195,18 @@ run_test test_project_list
 run_test test_project_remove
 run_test test_project_default
 run_test test_project_required
+run_test test_project_set_tracking
+run_test test_project_set_tracking_with_label
+run_test test_project_clear_tracking
+run_test test_project_set_workflow
+run_test test_project_clear_workflow
+run_test test_project_set_tracking_missing_args
+run_test test_project_set_workflow_missing_args
+run_test test_project_first_becomes_default
+run_test test_project_remove_clears_default
+run_test test_project_tracking_shows_in_list
+run_test test_project_set_tracking_on_nonexistent
+run_test test_project_clear_tracking_on_nonexistent
+run_test test_project_set_workflow_on_nonexistent
+run_test test_project_no_subcommand
+run_test test_project_add_no_source
