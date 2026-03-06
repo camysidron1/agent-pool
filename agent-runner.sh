@@ -87,6 +87,25 @@ LOCK_DIR="$TASKS_JSON.lock"
 AGENT_ID="agent-$(printf '%02d' "$CLONE_INDEX")"
 CLONE_PATH="$DATA_DIR/${PREFIX}-$(printf '%02d' "$CLONE_INDEX")"
 
+# Rename the cmux tab title (no-op outside cmux)
+rename_pane() {
+  local title="$1"
+  if [[ -n "${CMUX_SURFACE_ID:-}" ]]; then
+    cmux rename-tab "$title" 2>/dev/null || true
+  fi
+}
+
+# Build a short pane title from task id + first line of prompt
+generate_pane_title() {
+  local task_id="$1" prompt="$2"
+  local first_line max_len=40
+  first_line=$(echo "$prompt" | head -1 | sed 's/^[[:space:]]*//')
+  if [[ ${#first_line} -gt $max_len ]]; then
+    first_line="${first_line:0:$max_len}..."
+  fi
+  echo "${task_id}: ${first_line}"
+}
+
 poll_interval=3
 
 # Reset clone to project's default branch (best-effort, never fails the loop)
@@ -204,6 +223,7 @@ trap 'release_clone_lock; exit 130' INT
 trap 'release_clone_lock; exit 143' TERM
 
 printf "\033[1;36m%s\033[0m ready — polling for tasks (project: %s)...\n" "$AGENT_ID" "$PROJECT_NAME"
+rename_pane "$AGENT_ID: idle"
 
 # Portable interruptible sleep
 isleep() {
@@ -236,6 +256,8 @@ while true; do
   prompt=$(echo "$result" | tail -n +2)
 
   printf "\033[1;33m%s\033[0m claimed task %s\n" "$AGENT_ID" "$task_id"
+  pane_title=$(generate_pane_title "$task_id" "$prompt")
+  rename_pane "$pane_title"
 
   # Checkout fresh branch from project branch
   cd "$CLONE_PATH"
@@ -443,4 +465,5 @@ Commit your changes with a descriptive message when your task is complete. Do no
   reset_to_project_branch
 
   printf "\033[1;36m%s\033[0m polling for next task...\n" "$AGENT_ID"
+  rename_pane "$AGENT_ID: idle"
 done
