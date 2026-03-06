@@ -266,6 +266,20 @@ while true; do
     fi
   done
 
+  # Install /finish command into clone
+  mkdir -p "$CLONE_PATH/.claude/commands"
+  cp "$TOOL_DIR/commands/finish.md" "$CLONE_PATH/.claude/commands/finish.md"
+  if ! grep -qxF ".claude/commands/finish.md" "$CLONE_PATH/.gitignore" 2>/dev/null; then
+    echo ".claude/commands/finish.md" >> "$CLONE_PATH/.gitignore"
+  fi
+
+  # Export context so /finish command can mark the task from inside the session
+  export AGENT_POOL_TASK_ID="$task_id"
+  export AGENT_POOL_PROJECT="$PROJECT_NAME"
+  export AGENT_POOL_DATA_DIR="$DATA_DIR"
+  export AGENT_POOL_TOOL_DIR="$TOOL_DIR"
+  export AGENT_POOL_AGENT_ID="$AGENT_ID"
+
   # Append documentation rules to CLAUDE.md (idempotent)
   if ! grep -qF '## Documentation Rules' "$CLONE_PATH/CLAUDE.md" 2>/dev/null; then
     cat >> "$CLONE_PATH/CLAUDE.md" <<'DOCEOF'
