@@ -19,4 +19,4 @@ jobs:
           git config --global user.name "CI"
 
       - name: Run test suite
-        run: bash test-agent-pool.sh
+        run: bash tests/run-all.sh
