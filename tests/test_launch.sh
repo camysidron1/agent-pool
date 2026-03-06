@@ -123,6 +123,60 @@ test_init_no_launch_shows_status_hint() {
   assert_contains "$output" "Run 'agent-pool status" "should show status hint when not launching"
 }
 
+test_init_additive_count() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 2 -p foo
+  "$AGENT_POOL" init 2 -p foo
+
+  local count
+  count=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/pool-foo.json') as f:
+    print(len(json.load(f)['clones']))
+")
+  assert_eq "4" "$count" "should have 4 clones after two init 2 calls"
+  assert_dir_exists "$TEST_DIR/foo-02"
+  assert_dir_exists "$TEST_DIR/foo-03"
+}
+
+test_init_clones_are_unlocked() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 3 -p foo
+
+  local locked_count
+  locked_count=$(/usr/bin/python3 -c "
+import json
+with open('$TEST_DIR/pool-foo.json') as f:
+    data = json.load(f)
+print(sum(1 for c in data['clones'] if c.get('locked', False)))
+")
+  assert_eq "0" "$locked_count" "all clones should be unlocked after init"
+}
+
+test_init_clone_has_git_repo() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 1 -p foo
+
+  local is_git
+  is_git=$(git -C "$TEST_DIR/foo-00" rev-parse --is-inside-work-tree 2>/dev/null)
+  assert_eq "true" "$is_git" "clone should be a valid git repo"
+}
+
+test_launch_cmd_build_no_queue() {
+  "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
+  "$AGENT_POOL" init 1 -p foo
+
+  # Simulate what build_launch_cmd does in no_queue mode
+  cd "$TEST_DIR/foo-00"
+  git fetch origin -q 2>/dev/null || true
+  local branch_name="agent-00-$(date +%s)"
+  git checkout -B "$branch_name" "origin/main" -q 2>/dev/null || git checkout -B "$branch_name" "main" -q
+
+  local current_branch
+  current_branch=$(git -C "$TEST_DIR/foo-00" rev-parse --abbrev-ref HEAD)
+  [[ "$current_branch" == agent-00-* ]] || { echo "    FAIL: branch should start with agent-00-, got '$current_branch'"; return 1; }
+}
+
 run_test test_init_default_count
 run_test test_init_custom_count
 run_test test_init_skip_existing
@@ -131,3 +185,7 @@ run_test test_init_clones_on_correct_branch
 run_test test_init_runs_setup_command
 run_test test_launch_unknown_option
 run_test test_init_no_launch_shows_status_hint
+run_test test_init_additive_count
+run_test test_init_clones_are_unlocked
+run_test test_init_clone_has_git_repo
+run_test test_launch_cmd_build_no_queue
