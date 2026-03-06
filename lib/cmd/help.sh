@@ -56,6 +56,12 @@ Commands:
   docs <agent-id>       Show files and .md contents for an agent
   docs shared           Show shared documentation files
 
+  Review:
+  review                Dispatch a review agent to assess recent work quality
+                          --commits N        Commits to review (default: 20)
+                          --branches         Review open agent branches instead
+                          --auto             Mark as auto-review (for cron use)
+
   Maintenance:
   refresh <n|--all>     Reset clone(s) to project branch, clean branches, run setup
   release <n>           Manually free a locked clone
