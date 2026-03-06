@@ -204,8 +204,10 @@ groups = OrderedDict()
 for line in sys.stdin:
     line = line.strip()
     if not line: continue
-    idx, ws = line.split('\t', 1)
-    groups.setdefault(ws, []).append(idx)
+    parts = line.split('\t', 1)
+    idx = parts[0]
+    ws = parts[1] if len(parts) > 1 else ''
+    groups.setdefault(ws or '__none__', []).append(idx)
 for ws, idxs in groups.items():
     print(ws + '|' + ','.join(idxs))
 ")
@@ -214,6 +216,19 @@ for ws, idxs in groups.items():
 
   while IFS='|' read -r ws idx_list; do
     [[ -z "$ws" ]] && continue
+    # Clones without a workspace can't be restarted via cmux
+    if [[ "$ws" == "__none__" ]]; then
+      IFS=',' read -ra idxs <<< "$idx_list"
+      for cidx in "${idxs[@]}"; do
+        local clone_path
+        clone_path=$(get_clone_path "$prefix" "$cidx")
+        _kill_claude_in_clone "$clone_path"
+        refresh_one "$proj" "$cidx"
+        local runner_cmd="cd $clone_path && $RUNNER_SCRIPT $cidx --project $proj${runner_env_flag}${runner_perms_flag}"
+        printf "  Agent-%02d has no workspace. Run manually:\n    %s\n" "$cidx" "$runner_cmd"
+      done
+      continue
+    fi
     local surfaces
     surfaces=$(cmux --json list-pane-surfaces --workspace "$ws" 2>/dev/null | /usr/bin/python3 -c "
 import json, sys
