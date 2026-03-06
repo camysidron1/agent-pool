@@ -259,7 +259,7 @@ If you hit a blocker you can't resolve, run /finish blocked.
 Agents have access to slash commands installed in their clone's `.claude/commands/` directory. **Always mention relevant skills in your prompts** so agents know to use them. Current available skills:
 
 - **`/finish [status]`** — Marks the current task and ends the session. Statuses: `completed` (default), `blocked`, `pending` (retry), `backlogged`. **Every task prompt should end with instructions to use `/finish` when done.**
-- **`/update <clone-index> <message>`** — (Orchestrator only) Sends a message to a running agent via its mailbox. The agent picks it up on its next tool call. Use this to steer agents mid-task without restarting them.
+- **`/update <clone-index|all> <message>`** — (Orchestrator only) Sends a message to a running agent. Works regardless of task status — agents can be mid-task, idle after /finish, or polling. Supports `all` to update every active clone at once. Use this to steer agents, give follow-up instructions, or wake up idle agents with new work.
 
 Include skill references naturally in the prompt, e.g.:
 ```
@@ -424,4 +424,12 @@ agent-pool launch --here             # Launch one agent in current terminal
 agent-pool refresh <n|--all>         # Reset clone to project branch
 agent-pool release <n>               # Free a locked clone
 agent-pool restart                   # Kill and relaunch all agents
+
+# Agent docs (plans, reports, reviews written by agents)
+agent-pool docs                      # List all agent doc directories
+agent-pool docs agent-00             # Show files for a specific agent
+agent-pool docs shared               # Show shared docs across all agents
+# Read a specific doc:
+cat ~/.agent-pool/docs/agents/agent-00/<filename>.md
+cat ~/.agent-pool/docs/shared/<filename>.md
 ```

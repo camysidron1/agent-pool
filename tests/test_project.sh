@@ -115,10 +115,9 @@ test_project_set_tracking_missing_args() {
 
 test_project_set_workflow_missing_args() {
   "$AGENT_POOL" project add foo --source "$REPO_A" --branch main --prefix foo
-  if "$AGENT_POOL" project set-workflow foo --type trunk 2>&1; then
-    echo "    FAIL: expected non-zero exit for missing --instructions"
-    return 1
-  fi
+  # --type alone is valid (--instructions is optional)
+  "$AGENT_POOL" project set-workflow foo --type trunk 2>&1
+  # --instructions without --type should fail
   if "$AGENT_POOL" project set-workflow foo --instructions "test" 2>&1; then
     echo "    FAIL: expected non-zero exit for missing --type"
     return 1
