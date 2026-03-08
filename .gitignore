@@ -20,6 +20,9 @@ docs/
 # Temp files
 *.tmp
 
+# Node modules
+node_modules/
+
 # Agent mailbox files
 .mailbox
 
