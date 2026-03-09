@@ -1,5 +1,8 @@
 import { Watchdog } from "./watchdog";
-import type { TaskStore } from "../stores/interfaces";
+import { DaemonClient } from "../daemon/client";
+import { parseMessage, serializeMessage, createRequest } from "../daemon/protocol";
+import type { TaskStore, Task } from "../stores/interfaces";
+import { join } from "path";
 
 export interface RunnerOptions {
   dataDir: string;
@@ -8,8 +11,11 @@ export interface RunnerOptions {
   pollIntervalMs?: number;
 }
 
+export type RunnerMode = "polling" | "push";
+
 /**
  * Runner daemon: polls for tasks, launches Claude agents, manages lifecycle.
+ * Supports dual-mode: push-based via daemon or polling fallback.
  * Integrates with Watchdog for heartbeat-based health monitoring.
  */
 export class Runner {
@@ -17,6 +23,8 @@ export class Runner {
   private watchdog: Watchdog;
   private running = false;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private daemonClient: DaemonClient | null = null;
+  private _mode: RunnerMode = "polling";
 
   constructor(options: RunnerOptions) {
     this.options = options;
@@ -30,8 +38,12 @@ export class Runner {
     );
   }
 
+  get mode(): RunnerMode {
+    return this._mode;
+  }
+
   /**
-   * Start the runner: begins watchdog monitoring and task polling.
+   * Start the runner: try daemon push mode, fall back to polling.
    */
   async start(): Promise<void> {
     if (this.running) return;
@@ -40,16 +52,15 @@ export class Runner {
     // Start watchdog for health monitoring
     this.watchdog.start();
 
-    // Start polling for tasks
-    const pollInterval = this.options.pollIntervalMs ?? 5000;
-    this.pollTimer = setInterval(async () => {
-      if (!this.running) return;
-      try {
-        await this.poll();
-      } catch (err) {
-        console.error(`Runner poll error: ${err}`);
-      }
-    }, pollInterval);
+    // Try to connect to daemon for push-based mode
+    const connected = await this.tryDaemonConnect();
+    if (connected) {
+      this._mode = "push";
+      await this.startPushMode();
+    } else {
+      this._mode = "polling";
+      this.startPollingMode();
+    }
   }
 
   /**
@@ -62,6 +73,58 @@ export class Runner {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    if (this.daemonClient) {
+      this.daemonClient.close();
+      this.daemonClient = null;
+    }
+  }
+
+  /**
+   * Try to connect to the daemon socket.
+   */
+  private async tryDaemonConnect(): Promise<boolean> {
+    const socketPath = join(this.options.dataDir, "apd.sock");
+    const client = new DaemonClient({ socketPath, timeoutMs: 2000 });
+    const connected = await client.connect();
+    if (connected) {
+      this.daemonClient = client;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Push mode: send runner.ready to daemon, wait for task assignments.
+   */
+  private async startPushMode(): Promise<void> {
+    if (!this.daemonClient || !this.running) return;
+
+    try {
+      await this.daemonClient.request("runner.ready", {
+        agentId: this.options.agentId,
+      });
+    } catch {
+      // Daemon connection lost, fall back to polling
+      this._mode = "polling";
+      this.daemonClient?.close();
+      this.daemonClient = null;
+      this.startPollingMode();
+    }
+  }
+
+  /**
+   * Polling mode: periodically check for available tasks.
+   */
+  private startPollingMode(): void {
+    const pollInterval = this.options.pollIntervalMs ?? 5000;
+    this.pollTimer = setInterval(async () => {
+      if (!this.running) return;
+      try {
+        await this.poll();
+      } catch (err) {
+        console.error(`Runner poll error: ${err}`);
+      }
+    }, pollInterval);
   }
 
   /**
@@ -71,6 +134,13 @@ export class Runner {
     const task = await this.options.taskStore.claim(this.options.agentId);
     if (!task) return;
 
+    await this.executeTask(task);
+  }
+
+  /**
+   * Execute a claimed task with heartbeat management.
+   */
+  private async executeTask(task: Task): Promise<void> {
     // Write initial heartbeat on task claim
     await Watchdog.writeHeartbeat(
       this.options.dataDir,
@@ -97,6 +167,21 @@ export class Runner {
         this.options.dataDir,
         this.options.agentId
       );
+
+      // In push mode, signal ready for next task
+      if (this._mode === "push" && this.daemonClient?.connected) {
+        try {
+          await this.daemonClient.request("runner.ready", {
+            agentId: this.options.agentId,
+          });
+        } catch {
+          // Lost daemon connection, switch to polling
+          this._mode = "polling";
+          this.daemonClient?.close();
+          this.daemonClient = null;
+          this.startPollingMode();
+        }
+      }
     }
   }
 }
