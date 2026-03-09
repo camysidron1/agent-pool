@@ -59,6 +59,29 @@ agent-pool add --depends-on t-003 "Phase 3: migration guide"     # → t-004
 - Task JSON stores `depends_on: ["t-001", "t-002"]` (omitted when empty)
 - Dependency IDs are validated at add time — unknown IDs are rejected
 
+## Shipping Work — Push Branch + Create PR
+
+Agents work on clones, not the main repo. **Every task that produces code changes must end with a PR.**
+
+### For agents completing a task
+1. **Commit** your changes on the clone's task branch
+2. **Push** the branch to origin: `git push -u origin <branch-name>`
+3. **Create a PR** to the project's base branch (usually `main`):
+   ```bash
+   gh pr create --title "Brief description" --body "What changed and why"
+   ```
+4. **Enable auto-merge** if the project workflow specifies it:
+   ```bash
+   gh pr merge --auto --squash
+   ```
+5. Run `/finish` to mark the task complete
+
+### For the orchestrator
+- When dispatching tasks, always include PR instructions in the prompt
+- After tasks complete, check for open PRs: `gh pr list`
+- For parallel tasks that may conflict, sequence the PRs or have the later agent rebase
+- The `/finish` command already includes PR + auto-merge guidance — agents just need to follow it
+
 ## Key Conventions
 
 - **No shebang in lib/ files** — they are sourced, not executed directly
@@ -77,6 +100,21 @@ agent-pool add --depends-on t-003 "Phase 3: migration guide"     # → t-004
 ## Running Tests
 
 ```bash
-./tests/run-all.sh                  # Run all tests
-./tests/run-all.sh test_tasks.sh    # Run specific test file
+./tests/run-all.sh                  # Run all tests (v1 bash)
+./tests/run-all.sh test_tasks.sh    # Run specific test file (v1)
+cd v2 && bun test                   # Run all v2 tests (236 tests)
 ```
+
+## Project Memory & Documentation
+
+Persistent project context lives in Claude Code's auto-memory system:
+
+```
+~/.claude/projects/-Users-camysidron--agent-pool/memory/
+  MEMORY.md            # Project overview (auto-loaded every session)
+  architecture.md      # v2 architecture, DI model, key types
+  v2-status.md         # Phase tracking (what's done, what's next)
+  research-index.md    # Index of all 36 docs in docs/
+```
+
+`MEMORY.md` is loaded into every conversation automatically. Check it first for project context before searching.
