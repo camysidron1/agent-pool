@@ -37,4 +37,9 @@ agent-docs
 shared-docs
 CLAUDE.md
 .claude/commands/finish.md
+
+# v2 build artifacts
+v2/node_modules/
+v2/dist/
+v2/bun.lock
 .claude/commands/finish.md
