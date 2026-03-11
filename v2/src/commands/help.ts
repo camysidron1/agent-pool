@@ -29,7 +29,10 @@ export function registerHelpCommand(program: Command, _ctx: AppContext): void {
       console.log('  release [index]          Release clone(s)');
       console.log('  destroy [index]          Destroy clone(s)');
       console.log('  restart [index]          Restart agent(s)');
+      console.log('  logs [task-id]            View task execution logs');
       console.log('  review [options]          Dispatch a review agent');
+      console.log('  daemon <subcommand>      Manage the daemon');
+      console.log('  integration <subcommand> Manage integrations');
       console.log('  approvals                Manage approvals');
       console.log('  help                     Show this help');
     });

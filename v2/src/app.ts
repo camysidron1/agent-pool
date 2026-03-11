@@ -21,6 +21,8 @@ import { registerRestartCommand } from './commands/restart.js';
 import { registerApprovalsCommands } from './commands/approvals.js';
 import { registerReviewCommand } from './commands/review.js';
 import { registerLogsCommand } from './commands/logs.js';
+import { registerDaemonCommand } from './commands/daemon.js';
+import { registerIntegrationCommand } from './commands/integration.js';
 
 export function createApp(ctx: AppContext): Command {
   const program = new Command();
@@ -61,7 +63,13 @@ export function createApp(ctx: AppContext): Command {
   // Logs
   registerLogsCommand(program, ctx);
 
-  // WP7 stubs
+  // Daemon
+  registerDaemonCommand(program, ctx);
+
+  // Integrations
+  registerIntegrationCommand(program, ctx);
+
+  // Approvals
   registerApprovalsCommands(program, ctx);
 
   return program;
