@@ -14,10 +14,19 @@ These are symlinked to a persistent store outside the repo. They survive clone r
 Do NOT write .md files to paths like documentation/, docs/, design/, state/, etc. within the repo.
 Code comments and inline docs in source files are fine — this rule is about standalone documentation files.
 
+## CLI Entrypoint
+
+`agent-pool` now runs v2 (TypeScript/Bun). The v1 bash CLI is available as `agent-pool-v1`.
+
+- v2 uses SQLite at `~/.agent-pool/data/agent-pool.db`
+- Run `agent-pool migrate` to import v1 JSON data into SQLite
+- The v1 runner (`agent-runner.sh`) still uses v1 JSON files directly
+
 ## Project Structure
 
 ```
-agent-pool              # CLI entrypoint — thin dispatcher (~70 lines)
+agent-pool              # v2 wrapper — delegates to v2/src/index.ts via bun
+agent-pool-v1           # v1 bash CLI (fallback)
 agent-runner.sh         # Task runner daemon (polls tasks, launches claude)
 finish-task.sh          # Marks task status from inside a Claude session
 lib/
