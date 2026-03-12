@@ -1,5 +1,7 @@
 import { createInterface } from 'readline';
-import { rmSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { join } from 'path';
+import { spawnSync } from 'child_process';
 import type { Command } from 'commander';
 import type { AppContext } from '../container.js';
 import { ProjectService } from '../services/project-service.js';
@@ -232,11 +234,37 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
 
       console.log(green(`Done. ${count} agents launched in current workspace.`));
 
-      // --- 10. Driver pane: exec claude with startup message ---
+      // --- 10. Install dispatch/update commands into source repo for the driver ---
+      const sourceCommandsDir = join(project.source, '.claude', 'commands');
+      mkdirSync(sourceCommandsDir, { recursive: true });
+      const installedCommands: string[] = [];
+      for (const name of ['dispatch.md', 'update.md']) {
+        const src = join(ctx.config.toolDir, 'commands', name);
+        if (existsSync(src)) {
+          const dest = join(sourceCommandsDir, name);
+          writeFileSync(dest, readFileSync(src, 'utf-8'));
+          installedCommands.push(dest);
+        }
+      }
+
+      // --- 11. Driver pane: exec claude with startup message ---
       const pendingTasks = ctx.stores.tasks.getAll(project.name).filter(t => t.status === 'pending');
       const pendingCount = pendingTasks.length;
 
-      const startupMsg = `agent-pool: ${count} agents active for project '${project.name}'. ${pendingCount} pending tasks in queue. Ready to receive tasks.`;
+      const startupMsg = `You are the orchestrator of an agent-pool with ${count} active agents for project '${project.name}'. ${pendingCount} pending tasks in queue.
+
+IMPORTANT: You MUST use the agent-pool CLI for all task operations. Never guess file paths or read JSON files directly.
+
+Key commands:
+  agent-pool tasks                    — Check task queue (pending, in_progress, completed, blocked)
+  agent-pool add "detailed prompt"    — Dispatch a task to an agent
+  agent-pool add --priority 5 "..."   — Higher priority (claimed first)
+  agent-pool add --depends-on t-1 "." — Task depends on another
+  agent-pool status                   — Check clone/agent status
+  agent-pool unblock <id>             — Re-queue a blocked task
+
+Run /dispatch for the full orchestrator protocol with prompt-writing guidelines.
+Ready to receive tasks.`;
 
       const claudeArgs = ['claude'];
       if (skipPermissions) claudeArgs.push('--dangerously-skip-permissions');
@@ -244,13 +272,19 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
 
       console.log(yellow(`\nStarting driver in ${project.source}...`));
 
-      const proc = Bun.spawn(claudeArgs, {
+      // Use spawnSync to block the event loop — prevents Bun's async
+      // internals from consuming stdin bytes meant for Claude
+      const result = spawnSync(claudeArgs[0], claudeArgs.slice(1), {
         cwd: project.source,
-        stdout: 'inherit',
-        stderr: 'inherit',
-        stdin: 'inherit',
+        stdio: 'inherit',
       });
-      await proc.exited;
+
+      // Clean up installed commands from source repo
+      for (const dest of installedCommands) {
+        try { rmSync(dest); } catch { /* best-effort */ }
+      }
+
+      process.exit(result.status ?? 0);
     });
 }
 

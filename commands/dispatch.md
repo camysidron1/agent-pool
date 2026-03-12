@@ -223,8 +223,19 @@ Use `-p <project>` for non-default projects.
    acli jira workitem create --project "EN" --type "Task" --summary "Title" --description "..." --assignee "@me" --label "agent-pool"
    acli jira workitem transition --key "EN-XXX" --status "In Progress" --yes
    ```
-4. **Include ticket key in prompt**: `agent-pool add "EN-123: Fix the login bug. ..."`
-5. **After completion**: transition to "Done" or add comment about PR
+4. **Add to current sprint** — tickets being worked on MUST be in the active sprint:
+   ```bash
+   # Find the active sprint ID (ENG board = 67)
+   acli jira board list-sprints --id 67 --state active
+   # Add ticket to sprint via Jira REST API (Basic auth with Atlassian API token)
+   ATLASSIAN_TOKEN="ATATT3xFfGF01kqNYRxdafjhtL-StnryI-WC5UZR-ItnsTZ83Uc5X3nk8GIQ9GDp5W9zFmPnx_rqBoFy2IP-qiPfQeO25IL4lgptaheijMj99f0x6iKxA6csQrhlsdUc6A17YBFWuehe0pj4zw4Q735V1Av7RLoMK-BOo07ssXiVs7Pq9go0DZ4=01CA21C2"
+   curl -s -u "cam@nebari.ai:$ATLASSIAN_TOKEN" \
+     -X POST -H "Content-Type: application/json" \
+     "https://nebari-ai.atlassian.net/rest/agile/1.0/sprint/<SPRINT_ID>/issue" \
+     -d '{"issues":["ENG-XXX"]}'
+   ```
+5. **Include ticket key in prompt**: `agent-pool add "EN-123: Fix the login bug. ..."`
+6. **After completion**: transition to "Done" or add comment about PR
 
 ### Defaults
 - **Project**: `EN` — override with user instruction

@@ -56,26 +56,45 @@ export function registerStatusCommand(program: Command, ctx: AppContext): void {
         console.log(formatQueueSummary(summary));
       }
 
-      // Clone counts
+      // Clone counts — cross-reference with in_progress tasks
       const clones = poolService.list(project.name);
-      const locked = clones.filter(c => c.locked).length;
-      const free = clones.length - locked;
+      const inProgressTasks = tasks.filter(t => t.status === 'in_progress');
+      const busyAgents = new Map<string, string>(); // agentId -> taskId
+      for (const t of inProgressTasks) {
+        if (t.claimedBy) busyAgents.set(t.claimedBy, t.id);
+      }
 
-      console.log(`\nClones: ${clones.length} total, ${locked} locked, ${free} free`);
+      let activeCount = 0;
+      let workingCount = 0;
+      let freeCount = 0;
+      for (const clone of clones) {
+        const agentId = `agent-${String(clone.cloneIndex).padStart(2, '0')}`;
+        if (busyAgents.has(agentId)) workingCount++;
+        else if (clone.locked) activeCount++;
+        else freeCount++;
+      }
+
+      console.log(`\nAgents: ${clones.length} total, ${workingCount} working, ${activeCount} idle, ${freeCount} offline`);
 
       if (clones.length === 0) {
         console.log('(no clones — run agent-pool init)');
       } else {
         console.log('');
-        console.log('Clone    Status       Branch               Workspace');
-        console.log('-----    ------       ------               ---------');
+        console.log('Agent     Status            Task');
+        console.log('-----     ------            ----');
         for (const clone of clones) {
-          const idx = String(clone.cloneIndex).padStart(2, '0');
-          const status = clone.locked ? red('LOCKED') : green('free');
-          const statusPad = clone.locked ? '       ' : '         ';
-          const branch = clone.branch;
-          const workspace = clone.workspaceId || '-';
-          console.log(`${idx}       ${status}${statusPad}${branch.padEnd(21)}${workspace}`);
+          const agentId = `agent-${String(clone.cloneIndex).padStart(2, '0')}`;
+          const taskId = busyAgents.get(agentId);
+          let status: string;
+          if (taskId) {
+            status = yellow('working');
+          } else if (clone.locked) {
+            status = green('idle');
+          } else {
+            status = dim('offline');
+          }
+          const taskStr = taskId || (clone.locked ? 'waiting for tasks' : '-');
+          console.log(`${agentId}   ${status.padEnd(25)}${taskStr}`);
         }
       }
 

@@ -173,7 +173,7 @@ describe('CLI e2e', () => {
     expect(r.stdout).toContain('Project: statproj');
     expect(r.stdout).toContain('Tasks: 2 total');
     expect(r.stdout).toContain('pending: 2');
-    expect(r.stdout).toContain('Clones: 0 total');
+    expect(r.stdout).toContain('Agents: 0 total');
     expect(r.stdout).toContain('(no clones — run agent-pool init)');
     rmSync(source, { recursive: true, force: true });
   });
@@ -254,9 +254,9 @@ describe('CLI e2e', () => {
 
     // Status should show 2 clones with per-clone table
     const st = await run('status');
-    expect(st.stdout).toContain('Clones: 2 total');
-    expect(st.stdout).toContain('Clone    Status       Branch               Workspace');
-    expect(st.stdout).toContain('-----    ------       ------               ---------');
+    expect(st.stdout).toContain('Agents: 2 total');
+    expect(st.stdout).toContain('Agent     Status');
+    expect(st.stdout).toContain('-----     ------');
 
     // Release a clone
     const rel = await run('release', '0');
@@ -268,9 +268,9 @@ describe('CLI e2e', () => {
     expect(d.exitCode).toBe(0);
     expect(d.stdout).toContain('Destroyed 2 clones');
 
-    // Status should show 0 clones
+    // Status should show 0 agents
     const st2 = await run('status');
-    expect(st2.stdout).toContain('Clones: 0 total');
+    expect(st2.stdout).toContain('Agents: 0 total');
 
     rmSync(source, { recursive: true, force: true });
   });

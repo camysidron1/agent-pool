@@ -63,8 +63,14 @@ export class RealCmuxClient implements CmuxClient {
   async createPane(workspace: string, command?: string): Promise<string> {
     const args = ['cmux', 'new-split', 'right', '--workspace', workspace];
     if (command) args.push('--command', command);
-    const output = await runJson<{ surfaceRef?: string }>(args);
-    return output.surfaceRef || '';
+    const output = await run(args);
+    try {
+      const data = JSON.parse(output);
+      return data.surfaceRef || '';
+    } catch {
+      const surfaceMatch = output.match(/surface:\S+/);
+      return surfaceMatch ? surfaceMatch[0] : '';
+    }
   }
 
   async sendKeys(paneId: string, keys: string): Promise<void> {
@@ -78,23 +84,41 @@ export class RealCmuxClient implements CmuxClient {
   async newWorkspace(opts: { command?: string }): Promise<{ workspaceRef: string; surfaceRef: string }> {
     const args = ['cmux', 'new-workspace'];
     if (opts.command) args.push('--command', opts.command);
-    const output = await runJson<{ workspaceRef: string; surfaceRef: string }>(args);
-    return { workspaceRef: output.workspaceRef, surfaceRef: output.surfaceRef };
+    const output = await run(args);
+    // cmux may return JSON or plain text like "OK <uuid>" or "OK workspace:<ref> surface:<ref>"
+    try {
+      const data = JSON.parse(output);
+      return { workspaceRef: data.workspaceRef, surfaceRef: data.surfaceRef };
+    } catch {
+      // Parse plain text: "OK <workspace-ref>" or "OK workspace:<ref> surface:<ref>"
+      const parts = output.split(/\s+/).filter(p => p !== 'OK');
+      const workspaceMatch = parts.find(p => p.startsWith('workspace:')) || parts[0] || '';
+      const surfaceMatch = parts.find(p => p.startsWith('surface:')) || '';
+      return { workspaceRef: workspaceMatch, surfaceRef: surfaceMatch };
+    }
   }
 
   async newSplit(direction: 'right' | 'down', opts: { workspace?: string; surface?: string }): Promise<{ surfaceRef: string }> {
     const args = ['cmux', 'new-split', direction];
     if (opts.workspace) args.push('--workspace', opts.workspace);
     if (opts.surface) args.push('--surface', opts.surface);
-    const output = await runJson<{ surfaceRef: string }>(args);
-    return { surfaceRef: output.surfaceRef };
+    const output = await run(args);
+    // cmux may return JSON or plain text like "OK surface:123 workspace:456"
+    try {
+      const data = JSON.parse(output);
+      return { surfaceRef: data.surfaceRef };
+    } catch {
+      // Parse plain text format: "OK surface:<ref> workspace:<ref>"
+      const surfaceMatch = output.match(/surface:\S+/);
+      return { surfaceRef: surfaceMatch ? surfaceMatch[0] : '' };
+    }
   }
 
   async send(opts: { workspace?: string; surface?: string }, text: string): Promise<void> {
     const args = ['cmux', 'send'];
     if (opts.workspace) args.push('--workspace', opts.workspace);
     if (opts.surface) args.push('--surface', opts.surface);
-    args.push('--', text);
+    args.push('--', text + '\\n');
     await run(args);
   }
 
