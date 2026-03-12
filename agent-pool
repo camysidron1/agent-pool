@@ -2,4 +2,6 @@
 # agent-pool — v2 entrypoint (TypeScript/Bun)
 # For v1 bash version: agent-pool-v1
 TOOL_DIR="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")")" && pwd)"
+export AGENT_POOL_DATA_DIR="${AGENT_POOL_DATA_DIR:-$TOOL_DIR}"
+export AGENT_POOL_TOOL_DIR="${AGENT_POOL_TOOL_DIR:-$TOOL_DIR}"
 exec bun run "$TOOL_DIR/v2/src/index.ts" "$@"
