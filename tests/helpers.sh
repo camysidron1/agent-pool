@@ -3,7 +3,7 @@
 
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_DIR="$(cd "$TESTS_DIR/.." && pwd)"
-AGENT_POOL="$SCRIPT_DIR/agent-pool"
+AGENT_POOL="$SCRIPT_DIR/agent-pool-v1"
 AGENT_RUNNER="$SCRIPT_DIR/agent-runner.sh"
 
 # --- counters ---
