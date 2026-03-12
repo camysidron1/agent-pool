@@ -9,6 +9,8 @@ import {
 export interface DaemonClientOptions {
   socketPath: string;
   timeoutMs?: number;
+  onPush?: (msg: DaemonResponse) => void;
+  onDisconnect?: () => void;
 }
 
 /**
@@ -24,10 +26,14 @@ export class DaemonClient {
     string,
     { resolve: (r: DaemonResponse) => void; reject: (e: Error) => void }
   >();
+  private onPush: ((msg: DaemonResponse) => void) | null;
+  private onDisconnect: (() => void) | null;
 
   constructor(options: DaemonClientOptions) {
     this.socketPath = options.socketPath;
     this.timeoutMs = options.timeoutMs ?? 5000;
+    this.onPush = options.onPush ?? null;
+    this.onDisconnect = options.onDisconnect ?? null;
   }
 
   /**
@@ -67,10 +73,13 @@ export class DaemonClient {
         this.buffer = this.buffer.slice(newlineIdx + 1);
         const msg = parseMessage(line);
         if (msg && "id" in msg) {
-          const pending = this.pendingRequests.get(msg.id);
+          const resp = msg as DaemonResponse;
+          const pending = this.pendingRequests.get(resp.id);
           if (pending) {
-            this.pendingRequests.delete(msg.id);
-            pending.resolve(msg as DaemonResponse);
+            this.pendingRequests.delete(resp.id);
+            pending.resolve(resp);
+          } else if (this.onPush) {
+            this.onPush(resp);
           }
         }
       }
@@ -83,6 +92,7 @@ export class DaemonClient {
     this.socket.on("close", () => {
       this.rejectAll("Socket closed");
       this.socket = null;
+      if (this.onDisconnect) this.onDisconnect();
     });
   }
 
