@@ -6,6 +6,7 @@ import { join } from 'path';
 import type { AppContext } from '../container.js';
 import type { AgentAdapter, AgentContext } from '../adapters/agent.js';
 import type { Project, Task, TaskStatus } from '../stores/interfaces.js';
+import { DaemonClient } from '../daemon/client.js';
 
 export interface RunnerOptions {
   cloneIndex: number;
@@ -14,6 +15,7 @@ export interface RunnerOptions {
   skipPermissions: boolean;
   pollInterval?: number; // ms, default 3000
   nonInteractive?: boolean; // skip interactive prompts (for CI/testing)
+  daemonSocketPath?: string; // path to daemon socket; auto-detected from dataDir if omitted
 }
 
 export class AgentRunner {
@@ -22,6 +24,8 @@ export class AgentRunner {
   private projectName: string | null = null;
   private timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private softTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+  private daemonClient: DaemonClient | null = null;
+  private pushMode = false;
 
   constructor(
     private ctx: AppContext,
@@ -48,11 +52,120 @@ export class AgentRunner {
 
     this.setupSignalHandlers();
 
-    console.log(
-      `${this.agentId} ready — polling for tasks (project: ${project.name})...`,
-    );
-    await this.renamePaneQuiet(`${this.agentId}: idle`);
+    // Try push mode via daemon first
+    const connected = await this.tryConnectDaemon();
+    if (connected) {
+      console.log(
+        `${this.agentId} ready — push mode via daemon (project: ${project.name})`,
+      );
+      await this.renamePaneQuiet(`${this.agentId}: idle`);
+      await this.runPushLoop(project, clonePath);
+    }
 
+    // Fall back to polling if push mode wasn't used or daemon disconnected
+    if (this.running) {
+      console.log(
+        `${this.agentId} ready — polling for tasks (project: ${project.name})...`,
+      );
+      await this.renamePaneQuiet(`${this.agentId}: idle`);
+      await this.runPollLoop(project, clonePath);
+    }
+
+    this.cleanup();
+  }
+
+  private async tryConnectDaemon(): Promise<boolean> {
+    const socketPath = this.options.daemonSocketPath
+      ?? join(this.ctx.config.dataDir, 'apd.sock');
+
+    const client = new DaemonClient({
+      socketPath,
+      timeoutMs: 2000,
+      onPush: (msg) => this.handlePush(msg),
+      onDisconnect: () => {
+        console.log(`${this.agentId} daemon disconnected, falling back to polling`);
+        this.pushMode = false;
+        this.daemonClient = null;
+      },
+    });
+
+    const ok = await client.connect();
+    if (ok) {
+      this.daemonClient = client;
+      this.pushMode = true;
+      return true;
+    }
+    console.log(`${this.agentId} daemon not available, using polling mode`);
+    return false;
+  }
+
+  private pushTaskQueue: Task[] = [];
+  private pushResolve: (() => void) | null = null;
+
+  private handlePush(msg: import('../daemon/protocol.js').DaemonResponse): void {
+    if (msg.result?.type === 'task.assigned' && msg.result.task) {
+      this.pushTaskQueue.push(msg.result.task as Task);
+      if (this.pushResolve) {
+        this.pushResolve();
+        this.pushResolve = null;
+      }
+    } else if (msg.result?.type === 'task.available') {
+      // Nudge — re-send runner.ready to request a task
+      this.sendRunnerReady().catch(() => {});
+    }
+  }
+
+  private async sendRunnerReady(): Promise<void> {
+    if (!this.daemonClient?.connected) return;
+    try {
+      await this.daemonClient.request('runner.ready', { agentId: this.agentId });
+    } catch {
+      // daemon may have disconnected
+    }
+  }
+
+  private async waitForPushTask(): Promise<Task | null> {
+    // Check queue first
+    if (this.pushTaskQueue.length > 0) {
+      return this.pushTaskQueue.shift()!;
+    }
+    // Wait for a push or disconnect
+    await new Promise<void>((resolve) => {
+      this.pushResolve = resolve;
+      // Also resolve on periodic check so we can detect disconnect
+      const interval = setInterval(() => {
+        if (!this.pushMode || !this.running) {
+          clearInterval(interval);
+          resolve();
+        }
+      }, 1000);
+    });
+    return this.pushTaskQueue.shift() ?? null;
+  }
+
+  private async runPushLoop(project: Project, clonePath: string): Promise<void> {
+    // Signal readiness
+    await this.sendRunnerReady();
+
+    while (this.running && this.pushMode) {
+      const task = await this.waitForPushTask();
+
+      if (!task) {
+        // Disconnected or stopped
+        continue;
+      }
+
+      await this.executeTask(task, project, clonePath);
+
+      if (this.running && this.pushMode) {
+        console.log(`${this.agentId} signaling ready for next task...`);
+        await this.renamePaneQuiet(`${this.agentId}: idle`);
+        await this.sendRunnerReady();
+      }
+    }
+  }
+
+  private async runPollLoop(project: Project, clonePath: string): Promise<void> {
     while (this.running) {
       const task = this.ctx.stores.tasks.claim(project.name, this.agentId);
 
@@ -61,45 +174,56 @@ export class AgentRunner {
         continue;
       }
 
-      console.log(`${this.agentId} claimed task ${task.id}`);
-      await this.renamePaneQuiet(this.generatePaneTitle(task));
-
-      const agentCtx = this.buildAgentContext(task, project, clonePath);
-      const startedAt = new Date().toISOString();
-
-      await this.adapter.setup(agentCtx);
-
-      // Set up timeout if configured
-      this.setupTimeouts(task, agentCtx);
-
-      const exitCode = await this.adapter.run(agentCtx);
-
-      // Clear timeouts
-      this.clearTimeouts();
-
-      const completedAt = new Date().toISOString();
-
-      // Write task log
-      this.writeTaskLog(agentCtx, startedAt, completedAt, exitCode);
-
-      if (exitCode === 0) {
-        this.ctx.stores.tasks.mark(task.id, 'completed');
-        console.log(`${this.agentId} completed task ${task.id}`);
-      } else {
-        await this.handleNonZeroExit(task, exitCode);
-      }
-
-      await this.resetClone(clonePath, project.branch);
+      await this.executeTask(task, project, clonePath);
 
       console.log(`${this.agentId} polling for next task...`);
       await this.renamePaneQuiet(`${this.agentId}: idle`);
     }
+  }
 
-    this.cleanup();
+  private async executeTask(task: Task, project: Project, clonePath: string): Promise<void> {
+    console.log(`${this.agentId} claimed task ${task.id}`);
+    await this.renamePaneQuiet(this.generatePaneTitle(task));
+
+    const agentCtx = this.buildAgentContext(task, project, clonePath);
+    const startedAt = new Date().toISOString();
+
+    await this.adapter.setup(agentCtx);
+
+    // Set up timeout if configured
+    this.setupTimeouts(task, agentCtx);
+
+    const exitCode = await this.adapter.run(agentCtx);
+
+    // Clear timeouts
+    this.clearTimeouts();
+
+    const completedAt = new Date().toISOString();
+
+    // Write task log
+    this.writeTaskLog(agentCtx, startedAt, completedAt, exitCode);
+
+    if (exitCode === 0) {
+      this.ctx.stores.tasks.mark(task.id, 'completed');
+      console.log(`${this.agentId} completed task ${task.id}`);
+    } else {
+      await this.handleNonZeroExit(task, exitCode);
+    }
+
+    await this.resetClone(clonePath, project.branch);
   }
 
   stop(): void {
     this.running = false;
+    this.pushMode = false;
+    if (this.pushResolve) {
+      this.pushResolve();
+      this.pushResolve = null;
+    }
+    if (this.daemonClient) {
+      this.daemonClient.close();
+      this.daemonClient = null;
+    }
   }
 
   buildTrackingContext(project: Project): string | undefined {
