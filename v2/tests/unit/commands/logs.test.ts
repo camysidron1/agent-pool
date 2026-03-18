@@ -2,6 +2,9 @@ import { describe, test, expect, beforeEach, afterEach, mock } from 'bun:test';
 import { createTestContext, type TestContext } from '../../fixtures/context.js';
 import { registerLogsCommand } from '../../../src/commands/logs.js';
 import { Command } from 'commander';
+import { writeFileSync, mkdtempSync, unlinkSync, rmSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 
 describe('logs command', () => {
   let ctx: TestContext;
@@ -124,5 +127,91 @@ describe('logs command', () => {
 
     expect(output[0]).toContain('running');
     expect(output[0]).toContain('in progress');
+  });
+
+  describe('content viewing flags', () => {
+    let tmpDir: string;
+    let logFile: string;
+    let stdoutChunks: string[];
+    let origStdoutWrite: typeof process.stdout.write;
+
+    beforeEach(() => {
+      tmpDir = mkdtempSync(join(tmpdir(), 'logs-test-'));
+      logFile = join(tmpDir, 'agent.log');
+      stdoutChunks = [];
+      origStdoutWrite = process.stdout.write;
+      process.stdout.write = ((chunk: string | Uint8Array) => {
+        stdoutChunks.push(typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk));
+        return true;
+      }) as typeof process.stdout.write;
+    });
+
+    afterEach(() => {
+      process.stdout.write = origStdoutWrite;
+      rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    function stdoutText(): string {
+      return stdoutChunks.join('');
+    }
+
+    test('--cat dumps full log file', async () => {
+      const t1 = addProjectAndTask();
+      const content = 'line 1\nline 2\nline 3\n';
+      writeFileSync(logFile, content);
+      ctx.stores.tasks.addLog({ taskId: t1, agentId: 'agent-01', logPath: logFile, startedAt: '2025-01-01T00:00:00Z', completedAt: '2025-01-01T00:05:00Z', exitCode: 0 });
+
+      await program.parseAsync(['node', 'test', 'logs', t1, '--cat']);
+
+      expect(stdoutText()).toBe(content);
+    });
+
+    test('--tail shows last N lines', async () => {
+      const t1 = addProjectAndTask();
+      const lines = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`);
+      writeFileSync(logFile, lines.join('\n') + '\n');
+      ctx.stores.tasks.addLog({ taskId: t1, agentId: 'agent-01', logPath: logFile, startedAt: '2025-01-01T00:00:00Z', completedAt: '2025-01-01T00:05:00Z', exitCode: 0 });
+
+      await program.parseAsync(['node', 'test', 'logs', t1, '--tail', '3']);
+
+      const result = stdoutText();
+      expect(result).toContain('line 99');
+      expect(result).toContain('line 100');
+      expect(result).not.toContain('line 97');
+    });
+
+    test('--cat errors when log file does not exist', async () => {
+      const t1 = addProjectAndTask();
+      const missingPath = join(tmpDir, 'missing.log');
+      ctx.stores.tasks.addLog({ taskId: t1, agentId: 'agent-01', logPath: missingPath, startedAt: '2025-01-01T00:00:00Z', completedAt: '2025-01-01T00:05:00Z', exitCode: 0 });
+
+      const errors: string[] = [];
+      const origError = console.error;
+      console.error = (...args: unknown[]) => { errors.push(args.map(String).join(' ')); };
+
+      await program.parseAsync(['node', 'test', 'logs', t1, '--cat']);
+
+      console.error = origError;
+      expect(errors.some(e => e.includes('Log file not found'))).toBe(true);
+    });
+
+    test('--cat with no logs shows "No logs found."', async () => {
+      const t1 = addProjectAndTask();
+
+      await program.parseAsync(['node', 'test', 'logs', t1, '--cat']);
+
+      expect(output).toContain('No logs found.');
+    });
+
+    test('content flags without task-id show error', async () => {
+      const errors: string[] = [];
+      const origError = console.error;
+      console.error = (...args: unknown[]) => { errors.push(args.map(String).join(' ')); };
+
+      await program.parseAsync(['node', 'test', 'logs', '--cat']);
+
+      console.error = origError;
+      expect(errors.some(e => e.includes('task-id is required'))).toBe(true);
+    });
   });
 });

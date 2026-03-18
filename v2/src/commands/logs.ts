@@ -1,3 +1,5 @@
+import { existsSync } from 'fs';
+import { readFileSync } from 'fs';
 import type { Command } from 'commander';
 import type { AppContext } from '../container.js';
 import { TaskService } from '../services/task-service.js';
@@ -10,9 +12,53 @@ export function registerLogsCommand(program: Command, ctx: AppContext): void {
     .argument('[task-id]', 'Task ID to view logs for')
     .option('--agent <id>', 'Filter by agent ID')
     .option('--last <n>', 'Show last N logs', parseInt)
-    .action((taskId: string | undefined, opts: { agent?: string; last?: number }) => {
+    .option('--cat', 'Dump full log file to stdout')
+    .option('--tail <n>', 'Show last N lines (default 50)', parseInt)
+    .option('-f, --follow', 'Stream new content as it is written')
+    .action(async (taskId: string | undefined, opts: { agent?: string; last?: number; cat?: boolean; tail?: number; follow?: boolean }) => {
       const taskService = new TaskService(ctx.stores.tasks);
 
+      // Content viewing flags require a task-id
+      const wantsContent = opts.cat || opts.tail !== undefined || opts.follow;
+      if (wantsContent && !taskId) {
+        console.error('A task-id is required when using --cat, --tail, or --follow.');
+        return;
+      }
+
+      if (wantsContent && taskId) {
+        const logs = taskService.getLogs({ taskId, limit: 1 });
+        if (logs.length === 0) {
+          console.log('No logs found.');
+          return;
+        }
+        const logPath = logs[0].logPath;
+
+        if (!existsSync(logPath)) {
+          console.error(`Log file not found: ${logPath}`);
+          return;
+        }
+
+        if (opts.follow) {
+          await followLog(logPath, taskId, ctx);
+          return;
+        }
+
+        const content = readFileSync(logPath, 'utf-8');
+
+        if (opts.cat) {
+          process.stdout.write(content);
+          return;
+        }
+
+        // --tail
+        const n = opts.tail ?? 50;
+        const lines = content.split('\n');
+        const tail = lines.slice(-n).join('\n');
+        process.stdout.write(tail);
+        return;
+      }
+
+      // Default metadata listing
       const filter: { taskId?: string; agentId?: string; limit?: number } = {};
       if (taskId) filter.taskId = taskId;
       if (opts.agent) filter.agentId = opts.agent;
@@ -41,6 +87,40 @@ export function registerLogsCommand(program: Command, ctx: AppContext): void {
         );
       }
     });
+}
+
+async function followLog(logPath: string, taskId: string, ctx: AppContext): Promise<void> {
+  let offset = 0;
+
+  const flush = () => {
+    const content = readFileSync(logPath, 'utf-8');
+    if (content.length > offset) {
+      process.stdout.write(content.slice(offset));
+      offset = content.length;
+    }
+  };
+
+  // Output existing content
+  flush();
+
+  // Poll for new content until task completes or interrupted
+  return new Promise<void>((resolve) => {
+    const interval = setInterval(() => {
+      flush();
+      const task = ctx.stores.tasks.get(taskId);
+      if (!task || task.status !== 'in_progress') {
+        flush(); // Final flush
+        clearInterval(interval);
+        resolve();
+      }
+    }, 500);
+
+    // Allow Ctrl+C to stop
+    process.on('SIGINT', () => {
+      clearInterval(interval);
+      resolve();
+    });
+  });
 }
 
 function formatDuration(start: Date, end: Date): string {
