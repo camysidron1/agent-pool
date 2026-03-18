@@ -75,6 +75,7 @@ function createMockCtx(dataDir: string, taskStore: TaskStore): AppContext {
           workflowInstructions: null,
           workflowAutoMerge: null,
           workflowMergeMethod: null,
+          agentType: null,
         }),
         getDefault: () => ({
           name: 'test-proj',
@@ -90,6 +91,7 @@ function createMockCtx(dataDir: string, taskStore: TaskStore): AppContext {
           workflowInstructions: null,
           workflowAutoMerge: null,
           workflowMergeMethod: null,
+          agentType: null,
         }),
         add: () => {},
         remove: () => false,

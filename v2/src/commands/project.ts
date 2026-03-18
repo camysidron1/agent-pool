@@ -40,13 +40,14 @@ export function registerProjectCommand(program: Command, ctx: AppContext): void 
         return;
       }
 
-      const nameW = 16, prefixW = 12, branchW = 12, trackW = 16, workflowW = 16;
+      const nameW = 16, prefixW = 12, branchW = 12, trackW = 16, workflowW = 16, agentW = 10;
       const header = [
         'Name'.padEnd(nameW),
         'Prefix'.padEnd(prefixW),
         'Branch'.padEnd(branchW),
         'Tracking'.padEnd(trackW),
         'Workflow'.padEnd(workflowW),
+        'Agent'.padEnd(agentW),
         'Source',
       ].join(' ');
       const sep = [
@@ -55,6 +56,7 @@ export function registerProjectCommand(program: Command, ctx: AppContext): void 
         '------'.padEnd(branchW),
         '--------'.padEnd(trackW),
         '--------'.padEnd(workflowW),
+        '-----'.padEnd(agentW),
         '------',
       ].join(' ');
       console.log(header);
@@ -66,12 +68,14 @@ export function registerProjectCommand(program: Command, ctx: AppContext): void 
           ? `${p.trackingType[0].toUpperCase()}${p.trackingType.slice(1)} (${p.trackingProjectKey})`
           : '-';
         const workflow = p.workflowType || '-';
+        const agent = p.agentType || 'claude';
         const row = [
           name.padEnd(nameW),
           (p.prefix || '-').padEnd(prefixW),
           p.branch.padEnd(branchW),
           tracking.padEnd(trackW),
           workflow.padEnd(workflowW),
+          agent.padEnd(agentW),
           p.source,
         ].join(' ');
         console.log(row);
@@ -154,5 +158,26 @@ export function registerProjectCommand(program: Command, ctx: AppContext): void 
       const projectService = new ProjectService(ctx.stores.projects);
       projectService.clearWorkflow(name);
       console.log(`Workflow cleared for '${name}'`);
+    });
+
+  projectCmd
+    .command('set-agent')
+    .description('Set agent type for a project')
+    .requiredOption('--type <type>', 'Agent type (claude or codex)')
+    .argument('<name>', 'Project name')
+    .action((name: string, opts: { type: string }) => {
+      const projectService = new ProjectService(ctx.stores.projects);
+      projectService.setAgent(name, opts.type);
+      console.log(`Agent type set to '${opts.type}' for '${name}'`);
+    });
+
+  projectCmd
+    .command('clear-agent')
+    .description('Clear agent type (revert to default)')
+    .argument('<name>', 'Project name')
+    .action((name: string) => {
+      const projectService = new ProjectService(ctx.stores.projects);
+      projectService.clearAgent(name);
+      console.log(`Agent type cleared for '${name}'`);
     });
 }

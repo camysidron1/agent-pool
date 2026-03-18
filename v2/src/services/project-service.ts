@@ -91,4 +91,20 @@ export class ProjectService {
       workflowMergeMethod: null,
     });
   }
+
+  setAgent(name: string, type: string): void {
+    const valid = ['claude', 'codex'];
+    if (!valid.includes(type)) {
+      throw new Error(`Invalid agent type '${type}'. Must be one of: ${valid.join(', ')}`);
+    }
+    const project = this.store.get(name);
+    if (!project) {
+      throw new Error(`Project '${name}' not found`);
+    }
+    this.store.update(name, { agentType: type });
+  }
+
+  clearAgent(name: string): void {
+    this.store.update(name, { agentType: null });
+  }
 }

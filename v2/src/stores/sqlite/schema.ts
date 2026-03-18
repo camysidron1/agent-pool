@@ -117,6 +117,10 @@ const MIGRATIONS: string[] = [
   CREATE INDEX idx_task_logs_task ON task_logs(task_id);
   CREATE INDEX idx_task_logs_agent ON task_logs(agent_id);
   `,
+  // v4: Add agent_type to projects
+  `
+  ALTER TABLE projects ADD COLUMN agent_type TEXT;
+  `,
 ];
 
 /**

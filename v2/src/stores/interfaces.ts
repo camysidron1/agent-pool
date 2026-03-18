@@ -19,6 +19,7 @@ export interface Project {
   workflowInstructions: string | null;
   workflowAutoMerge: boolean | null;
   workflowMergeMethod: string | null;
+  agentType: string | null;
 }
 
 export interface ProjectInput {

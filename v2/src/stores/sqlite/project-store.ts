@@ -16,6 +16,7 @@ interface ProjectRow {
   workflow_instructions: string | null;
   workflow_auto_merge: number | null;
   workflow_merge_method: string | null;
+  agent_type: string | null;
 }
 
 function rowToProject(row: ProjectRow): Project {
@@ -34,6 +35,7 @@ function rowToProject(row: ProjectRow): Project {
     workflowInstructions: row.workflow_instructions,
     workflowAutoMerge: row.workflow_auto_merge === null ? null : row.workflow_auto_merge === 1,
     workflowMergeMethod: row.workflow_merge_method,
+    agentType: row.agent_type,
   };
 }
 
@@ -100,6 +102,7 @@ export class SqliteProjectStore implements ProjectStore {
       workflowInstructions: 'workflow_instructions',
       workflowAutoMerge: 'workflow_auto_merge',
       workflowMergeMethod: 'workflow_merge_method',
+      agentType: 'agent_type',
     };
 
     const sets: string[] = [];

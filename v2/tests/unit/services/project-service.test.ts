@@ -35,6 +35,7 @@ class MockProjectStore implements ProjectStore {
       workflowInstructions: null,
       workflowAutoMerge: null,
       workflowMergeMethod: null,
+      agentType: null,
     });
   }
 
