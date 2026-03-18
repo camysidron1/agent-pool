@@ -4,6 +4,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { Watchdog, type HeartbeatData } from '../../../src/runner/watchdog.js';
 import type { Task, TaskInput, TaskLog, TaskStatus, TaskStore } from '../../../src/stores/interfaces.js';
+import { EventBus, type PoolEvent } from '../../../src/daemon/event-bus.js';
 
 /** Create a minimal mock TaskStore that records mark() calls. */
 function createMockTaskStore(): TaskStore & {
@@ -217,6 +218,60 @@ describe('Watchdog', () => {
   test('clearHeartbeat is idempotent', async () => {
     // Should not throw when file doesn't exist
     await Watchdog.clearHeartbeat(tempDir, 'nonexistent-agent');
+  });
+
+  test('emits agent.stuck event via EventBus', async () => {
+    const eventBus = new EventBus(null, () => {});
+    const events: PoolEvent[] = [];
+    eventBus.on('agent.stuck', (event) => { events.push(event); });
+
+    const oldTimestamp = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    await writeHeartbeatFile(tempDir, 'agent-ev-01', {
+      timestamp: oldTimestamp,
+      pid: process.pid,
+      task_id: 't-ev-100',
+      last_tool: 'Read',
+    });
+
+    const watchdog = new Watchdog(
+      { dataDir: tempDir, staleThresholdMs: 5 * 60 * 1000 },
+      null,
+      () => {},
+      eventBus,
+    );
+
+    const stuck = await watchdog.scan();
+    await (watchdog as any).handleStuckAgents(stuck);
+
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('agent.stuck');
+    expect(events[0].payload.agentId).toBe('agent-ev-01');
+    expect(events[0].payload.taskId).toBe('t-ev-100');
+    expect(events[0].payload.reason).toBe('stale_heartbeat');
+    expect(events[0].payload.lastHeartbeat).toBe(oldTimestamp);
+    expect(events[0].timestamp).toBeDefined();
+  });
+
+  test('does not emit events when no EventBus provided', async () => {
+    const oldTimestamp = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    await writeHeartbeatFile(tempDir, 'agent-ev-02', {
+      timestamp: oldTimestamp,
+      pid: process.pid,
+      task_id: 't-ev-200',
+      last_tool: 'Read',
+    });
+
+    // No eventBus passed — should work without errors
+    const watchdog = new Watchdog(
+      { dataDir: tempDir, staleThresholdMs: 5 * 60 * 1000 },
+      null,
+      () => {},
+    );
+
+    const stuck = await watchdog.scan();
+    expect(stuck).toHaveLength(1);
+    await (watchdog as any).handleStuckAgents(stuck);
+    // No assertion needed — just verifying no errors thrown
   });
 
   test('start and stop lifecycle', async () => {
