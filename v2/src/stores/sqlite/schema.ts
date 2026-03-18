@@ -121,6 +121,25 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE projects ADD COLUMN agent_type TEXT;
   `,
+
+  // v5: Pipelines table + pipeline columns on tasks
+  `
+  CREATE TABLE pipelines (
+    id TEXT PRIMARY KEY,
+    project_name TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    params TEXT,
+    status TEXT NOT NULL DEFAULT 'pending'
+      CHECK(status IN ('pending','in_progress','completed','failed','cancelled')),
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+  );
+  CREATE INDEX idx_pipelines_project ON pipelines(project_name);
+
+  ALTER TABLE tasks ADD COLUMN pipeline_id TEXT REFERENCES pipelines(id) ON DELETE SET NULL;
+  ALTER TABLE tasks ADD COLUMN pipeline_step_id TEXT;
+  CREATE INDEX idx_tasks_pipeline ON tasks(pipeline_id);
+  `,
 ];
 
 /**

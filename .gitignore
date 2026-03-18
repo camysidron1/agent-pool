@@ -20,6 +20,17 @@ docs/
 # Temp files
 *.tmp
 
+# Task-finished marker files
+.task-finished-*
+
+# SQLite database (runtime data)
+agent-pool.db
+agent-pool.db-shm
+agent-pool.db-wal
+
+# Runtime data directory
+data/
+
 # Agent mailbox files
 .mailbox
 

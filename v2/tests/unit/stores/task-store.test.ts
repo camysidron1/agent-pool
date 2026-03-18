@@ -355,4 +355,60 @@ describe('SqliteTaskStore', () => {
   test('peek returns null when no claimable tasks', () => {
     expect(ctx.stores.tasks.peek('proj')).toBeNull();
   });
+
+  // --- releaseAgent ---
+
+  test('releaseAgent resets in_progress tasks for the agent', () => {
+    const t1 = ctx.stores.tasks.add({ projectName: 'proj', prompt: 'stuck' });
+    ctx.stores.tasks.claim('proj', 'agent-01');
+
+    const released = ctx.stores.tasks.releaseAgent('proj', 'agent-01');
+    expect(released).toBe(1);
+
+    const updated = ctx.stores.tasks.get(t1.id)!;
+    expect(updated.status).toBe('pending');
+    expect(updated.claimedBy).toBeNull();
+    expect(updated.startedAt).toBeNull();
+  });
+
+  test('releaseAgent does not touch completed/blocked/pending tasks', () => {
+    const t1 = ctx.stores.tasks.add({ projectName: 'proj', prompt: 'pending' });
+    const t2 = ctx.stores.tasks.add({ projectName: 'proj', prompt: 'completed' });
+    ctx.stores.tasks.claim('proj', 'agent-01'); // claims t1
+    ctx.stores.tasks.claim('proj', 'agent-01'); // claims t2
+    ctx.stores.tasks.mark(t2.id, 'completed');
+
+    const t3 = ctx.stores.tasks.add({ projectName: 'proj', prompt: 'blocked' });
+    ctx.stores.tasks.mark(t3.id, 'blocked', { claimedBy: 'agent-01' });
+
+    const t4 = ctx.stores.tasks.add({ projectName: 'proj', prompt: 'still pending' });
+
+    const released = ctx.stores.tasks.releaseAgent('proj', 'agent-01');
+    expect(released).toBe(1); // only t1 was in_progress
+
+    expect(ctx.stores.tasks.get(t1.id)!.status).toBe('pending');
+    expect(ctx.stores.tasks.get(t2.id)!.status).toBe('completed');
+    expect(ctx.stores.tasks.get(t3.id)!.status).toBe('blocked');
+    expect(ctx.stores.tasks.get(t4.id)!.status).toBe('pending');
+  });
+
+  test('releaseAgent does not touch other agents tasks', () => {
+    ctx.stores.tasks.add({ projectName: 'proj', prompt: 'agent-01 task' });
+    ctx.stores.tasks.add({ projectName: 'proj', prompt: 'agent-02 task' });
+    ctx.stores.tasks.claim('proj', 'agent-01');
+    ctx.stores.tasks.claim('proj', 'agent-02');
+
+    const released = ctx.stores.tasks.releaseAgent('proj', 'agent-01');
+    expect(released).toBe(1);
+
+    // agent-02's task should still be in_progress
+    const all = ctx.stores.tasks.getAll('proj');
+    const agent02Task = all.find(t => t.claimedBy === 'agent-02')!;
+    expect(agent02Task.status).toBe('in_progress');
+  });
+
+  test('releaseAgent returns 0 when no tasks to release', () => {
+    const released = ctx.stores.tasks.releaseAgent('proj', 'agent-99');
+    expect(released).toBe(0);
+  });
 });

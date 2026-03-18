@@ -1,5 +1,4 @@
-import { createInterface } from 'readline';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { spawnSync } from 'child_process';
 import type { Command } from 'commander';
@@ -10,21 +9,16 @@ import { bold, green, yellow, dim } from '../util/colors.js';
 import type { Project } from '../stores/interfaces.js';
 import { buildRunnerCommand } from '../util/runner-command.js';
 
-function prompt(question: string): Promise<string> {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise(resolve => {
-    rl.question(question, answer => {
-      rl.close();
-      resolve(answer);
-    });
-  });
-}
-
 export function registerStartCommand(program: Command, ctx: AppContext): void {
   program
     .command('start')
     .description('Interactive guided setup — teardown, init, and launch')
     .action(async () => {
+      // Use Bun's built-in synchronous prompt() — Node's readline hangs
+      // on repeated calls under Bun due to stdin event loop issues.
+      const ask = (question: string, fallback: string): string =>
+        prompt(question) ?? fallback;
+
       const projectService = new ProjectService(ctx.stores.projects);
       const poolService = new PoolService(ctx.stores.clones, ctx.git, ctx.cmux);
 
@@ -42,7 +36,7 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
       } else {
         console.log('Available projects:');
         projects.forEach((p, i) => console.log(`  ${i + 1}) ${p.name}`));
-        const choice = (await prompt('Select project [1]: ')) || '1';
+        const choice = ask('Select project [1]: ', '1');
         const idx = parseInt(choice, 10);
         if (isNaN(idx) || idx < 1 || idx > projects.length) {
           console.error('Invalid selection.');
@@ -53,7 +47,7 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
       }
 
       // --- 2. Agent count ---
-      const countStr = (await prompt('Number of agents [4]: ')) || '4';
+      const countStr = ask('Number of agents [4]: ', '4');
       const count = parseInt(countStr, 10);
       if (isNaN(count) || count < 1) {
         console.error('Invalid count.');
@@ -61,7 +55,7 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
       }
 
       // --- 3. Skip permissions ---
-      const skipAnswer = (await prompt('Skip permissions? [y/N]: ')) || 'n';
+      const skipAnswer = ask('Skip permissions? [y/N]: ', 'n');
       const skipPermissions = /^[yY]/.test(skipAnswer);
 
       // --- 3b. Agent type ---
@@ -130,15 +124,27 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
 
       // --- 6. Reset pool — remove old clone dirs, clear DB entries ---
       const existingClones = poolService.list(project.name);
-      if (existingClones.length > 0) {
-        for (const clone of existingClones) {
-          const clonePath = poolService.getClonePath(project.prefix, clone.cloneIndex, ctx.config.dataDir);
+      for (const clone of existingClones) {
+        const clonePath = poolService.getClonePath(project.prefix, clone.cloneIndex, ctx.config.dataDir);
+        try { rmSync(clonePath, { recursive: true, force: true }); } catch {}
+        poolService.removeClone(project.name, clone.cloneIndex);
+      }
+
+      // Also remove any clone dirs on disk not tracked in DB (leftover from
+      // a crashed or interrupted previous run). Each rmSync is individually
+      // wrapped so one failure doesn't skip the rest.
+      const prefix = project.prefix + '-';
+      let entries: ReturnType<typeof readdirSync> = [];
+      try { entries = readdirSync(ctx.config.dataDir, { withFileTypes: true }); } catch {}
+      for (const entry of entries) {
+        if (entry.isDirectory() && entry.name.startsWith(prefix)) {
+          const dirPath = join(ctx.config.dataDir, entry.name);
           try {
-            rmSync(clonePath, { recursive: true, force: true });
-          } catch {
-            // Directory may not exist
+            rmSync(dirPath, { recursive: true, force: true });
+            console.log(`  Removed orphan dir ${entry.name}`);
+          } catch (e: any) {
+            console.warn(`  Warning: could not remove ${dirPath}: ${e.message}`);
           }
-          poolService.removeClone(project.name, clone.cloneIndex);
         }
       }
 
@@ -251,17 +257,19 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
       const pendingTasks = ctx.stores.tasks.getAll(project.name).filter(t => t.status === 'pending');
       const pendingCount = pendingTasks.length;
 
+      const p = `-p ${project.name}`;
       const startupMsg = `You are the orchestrator of an agent-pool with ${count} active agents for project '${project.name}'. ${pendingCount} pending tasks in queue.
 
 IMPORTANT: You MUST use the agent-pool CLI for all task operations. Never guess file paths or read JSON files directly.
+IMPORTANT: Always pass ${p} to scope commands to this project.
 
 Key commands:
-  agent-pool tasks                    — Check task queue (pending, in_progress, completed, blocked)
-  agent-pool add "detailed prompt"    — Dispatch a task to an agent
-  agent-pool add --priority 5 "..."   — Higher priority (claimed first)
-  agent-pool add --depends-on t-1 "." — Task depends on another
-  agent-pool status                   — Check clone/agent status
-  agent-pool unblock <id>             — Re-queue a blocked task
+  agent-pool ${p} tasks                    — Check task queue (pending, in_progress, completed, blocked)
+  agent-pool ${p} add "detailed prompt"    — Dispatch a task to an agent
+  agent-pool ${p} add --priority 5 "..."   — Higher priority (claimed first)
+  agent-pool ${p} add --depends-on t-1 "." — Task depends on another
+  agent-pool ${p} status                   — Check clone/agent status
+  agent-pool ${p} unblock <id>             — Re-queue a blocked task
 
 Run /dispatch for the full orchestrator protocol with prompt-writing guidelines.
 Ready to receive tasks.`;

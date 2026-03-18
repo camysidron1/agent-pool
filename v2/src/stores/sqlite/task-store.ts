@@ -16,6 +16,8 @@ interface TaskRow {
   retry_count: number;
   retry_strategy: 'same' | 'augmented' | 'escalate';
   result: string | null;
+  pipeline_id: string | null;
+  pipeline_step_id: string | null;
 }
 
 interface TaskLogRow {
@@ -45,6 +47,8 @@ function rowToTask(row: TaskRow): Task {
     retryCount: row.retry_count,
     retryStrategy: row.retry_strategy,
     result: row.result,
+    pipelineId: row.pipeline_id,
+    pipelineStepId: row.pipeline_step_id,
   };
 }
 
@@ -78,12 +82,14 @@ export class SqliteTaskStore implements TaskStore {
     const timeoutMinutes = input.timeoutMinutes ?? null;
     const retryMax = input.retryMax ?? 1;
     const retryStrategy = input.retryStrategy ?? 'same';
+    const pipelineId = input.pipelineId ?? null;
+    const pipelineStepId = input.pipelineStepId ?? null;
 
     this.db.transaction(() => {
       this.db.query(
-        `INSERT INTO tasks (id, project_name, prompt, status, created_at, priority, timeout_minutes, retry_max, retry_strategy)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(id, input.projectName, input.prompt, status, now, priority, timeoutMinutes, retryMax, retryStrategy);
+        `INSERT INTO tasks (id, project_name, prompt, status, created_at, priority, timeout_minutes, retry_max, retry_strategy, pipeline_id, pipeline_step_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(id, input.projectName, input.prompt, status, now, priority, timeoutMinutes, retryMax, retryStrategy, pipelineId, pipelineStepId);
 
       if (input.dependsOn && input.dependsOn.length > 0) {
         for (const depId of input.dependsOn) {
@@ -250,6 +256,14 @@ export class SqliteTaskStore implements TaskStore {
     return rowToTaskLog(row);
   }
 
+  releaseAgent(projectName: string, agentId: string): number {
+    this.db.query(
+      `UPDATE tasks SET status = 'pending', claimed_by = NULL, started_at = NULL
+       WHERE project_name = ? AND claimed_by = ? AND status = 'in_progress'`
+    ).run(projectName, agentId);
+    return (this.db.query('SELECT changes() as c').get() as any).c;
+  }
+
   getLogs(filter: { taskId?: string; agentId?: string; limit?: number }): TaskLog[] {
     const conditions: string[] = [];
     const values: unknown[] = [];
@@ -270,5 +284,12 @@ export class SqliteTaskStore implements TaskStore {
       `SELECT * FROM task_logs ${where} ORDER BY created_at DESC ${limit}`
     ).all(...values) as TaskLogRow[];
     return rows.map(rowToTaskLog);
+  }
+
+  getByPipeline(pipelineId: string): Task[] {
+    const rows = this.db.query(
+      'SELECT * FROM tasks WHERE pipeline_id = ? ORDER BY created_at'
+    ).all(pipelineId) as TaskRow[];
+    return rows.map(rowToTask);
   }
 }

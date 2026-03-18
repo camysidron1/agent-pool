@@ -7,4 +7,9 @@ const toolDir = process.env.AGENT_POOL_TOOL_DIR || `${process.env.HOME}/.agent-p
 
 const ctx = createProductionContext({ dataDir, toolDir });
 const app = createApp(ctx);
-app.parse(process.argv);
+try {
+  await app.parseAsync(process.argv);
+} catch (err: any) {
+  console.error(`Error: ${err.message}`);
+  process.exit(1);
+}

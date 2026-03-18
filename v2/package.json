@@ -12,7 +12,8 @@
     "test:e2e": "bun test tests/e2e"
   },
   "dependencies": {
-    "commander": "^12.1.0"
+    "commander": "^12.1.0",
+    "yaml": "^2.8.2"
   },
   "devDependencies": {
     "@types/bun": "^1.2.0"

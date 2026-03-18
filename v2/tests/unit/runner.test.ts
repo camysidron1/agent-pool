@@ -926,6 +926,48 @@ describe('AgentRunner', () => {
     });
   });
 
+  describe('push mode', () => {
+    test('falls back to poll when daemon unavailable', async () => {
+      addProject(ctx);
+      const added = ctx.stores.tasks.add({ projectName: 'myproj', prompt: 'push test' });
+
+      const runner = makeRunner(ctx, adapter, { mode: 'push' });
+
+      adapter.run = async (agentCtx: AgentContext) => {
+        adapter.runCalls.push(agentCtx);
+        runner.stop();
+        return 0;
+      };
+
+      await runner.start();
+
+      // Should have fallen back to poll and still picked up the task
+      expect(adapter.setupCalls).toHaveLength(1);
+      expect(adapter.setupCalls[0].taskId).toBe(added.id);
+      expect(ctx.stores.tasks.get(added.id)!.status).toBe('completed');
+    });
+
+    test('executeTask works identically to inline poll logic', async () => {
+      addProject(ctx);
+      const added = ctx.stores.tasks.add({ projectName: 'myproj', prompt: 'exec test' });
+
+      const runner = makeRunner(ctx, adapter);
+      const project = ctx.stores.projects.get('myproj')!;
+      const clonePath = `${ctx.config.dataDir}/mp-01`;
+
+      // Claim the task manually (as the daemon would)
+      const task = ctx.stores.tasks.claim('myproj', 'agent-01');
+      expect(task).not.toBeNull();
+
+      await runner.executeTask(task!, project, clonePath);
+
+      expect(adapter.setupCalls).toHaveLength(1);
+      expect(adapter.runCalls).toHaveLength(1);
+      expect(adapter.setupCalls[0].taskId).toBe(added.id);
+      expect(ctx.stores.tasks.get(added.id)!.status).toBe('completed');
+    });
+  });
+
   describe('retry logic', () => {
     test('task with retryMax=3 resets to pending with incremented retryCount on failure', async () => {
       addProject(ctx);

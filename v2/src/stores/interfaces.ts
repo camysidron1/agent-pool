@@ -55,6 +55,8 @@ export interface Task {
   retryCount: number;
   retryStrategy: RetryStrategy;
   result: string | null;
+  pipelineId: string | null;
+  pipelineStepId: string | null;
 }
 
 export interface TaskInput {
@@ -66,6 +68,20 @@ export interface TaskInput {
   timeoutMinutes?: number;
   retryMax?: number;
   retryStrategy?: RetryStrategy;
+  pipelineId?: string;
+  pipelineStepId?: string;
+}
+
+export type PipelineStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled';
+
+export interface Pipeline {
+  id: string;
+  projectName: string;
+  name: string;
+  params: Record<string, string> | null;
+  status: PipelineStatus;
+  createdAt: string;
+  completedAt: string | null;
 }
 
 export interface TaskLog {
@@ -102,6 +118,15 @@ export interface CloneStore {
   nextIndex(projectName: string): number;
 }
 
+export interface PipelineStore {
+  get(id: string): Pipeline | null;
+  getAll(projectName: string): Pipeline[];
+  create(pipeline: Omit<Pipeline, 'completedAt'>): Pipeline;
+  updateStatus(id: string, status: PipelineStatus): void;
+  refreshStatus(id: string): PipelineStatus;
+  getByProject(projectName: string): Pipeline[];
+}
+
 export interface TaskStore {
   getAll(projectName: string): Task[];
   get(id: string): Task | null;
@@ -117,4 +142,7 @@ export interface TaskStore {
   addDependency(taskId: string, dependsOn: string): void;
   addLog(log: Omit<TaskLog, 'id' | 'createdAt'>): TaskLog;
   getLogs(filter: { taskId?: string; agentId?: string; limit?: number }): TaskLog[];
+  /** Reset all in_progress tasks claimed by a given agent back to pending. Returns count released. */
+  releaseAgent(projectName: string, agentId: string): number;
+  getByPipeline(pipelineId: string): Task[];
 }

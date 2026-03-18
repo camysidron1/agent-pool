@@ -1,4 +1,5 @@
 import type { Command } from 'commander';
+import { spawnSync } from 'child_process';
 import type { AppContext } from '../container.js';
 import { ProjectService } from '../services/project-service.js';
 import { PoolService } from '../services/pool-service.js';
@@ -216,13 +217,11 @@ async function launchHere(
   console.log(green(`Running agent ${clone.cloneIndex} in current terminal`));
   console.log(`  ${cmd}`);
 
-  // Execute the command in-place
-  const proc = Bun.spawn(['sh', '-c', cmd], {
-    stdout: 'inherit',
-    stderr: 'inherit',
-    stdin: 'inherit',
+  // Use spawnSync to block the event loop — prevents Bun's async
+  // internals from consuming stdin bytes meant for the child process
+  spawnSync('sh', ['-c', cmd], {
+    stdio: 'inherit',
   });
-  await proc.exited;
 
   poolService.unlock(project.name, clone.cloneIndex);
 }

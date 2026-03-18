@@ -94,4 +94,28 @@ describe('buildRunnerCommand', () => {
     const cmd = buildRunnerCommand(clonePath, 1, project, toolDir, {});
     expect(cmd).not.toContain('--agent');
   });
+
+  test('adds --push flag when push is true', () => {
+    const cmd = buildRunnerCommand(clonePath, 1, project, toolDir, { push: true });
+    expect(cmd).toContain('--push');
+  });
+
+  test('omits --push flag when not set', () => {
+    const cmd = buildRunnerCommand(clonePath, 1, project, toolDir, {});
+    expect(cmd).not.toContain('--push');
+  });
+
+  test('combines all flags including push and agent', () => {
+    const cmd = buildRunnerCommand(clonePath, 3, project, toolDir, {
+      skipPermissions: true,
+      env: 'production',
+      agent: 'codex',
+      push: true,
+    });
+    expect(cmd).toContain('--skip-permissions');
+    expect(cmd).toContain('--env production');
+    expect(cmd).toContain('--agent codex');
+    expect(cmd).toContain('--push');
+    expect(cmd).toContain('agent-runner.sh');
+  });
 });

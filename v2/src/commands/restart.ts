@@ -5,6 +5,46 @@ import { PoolService } from '../services/pool-service.js';
 import { green } from '../util/colors.js';
 import { buildRunnerCommand } from '../util/runner-command.js';
 
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Try to restart an agent in its existing pane by sending Ctrl-C + new command.
+ * Handles both surface: refs (from start) and workspace: refs (from launch).
+ */
+async function restartInExistingPane(ctx: AppContext, workspaceId: string, cmd: string): Promise<boolean> {
+  try {
+    if (workspaceId.startsWith('surface:')) {
+      const surfaceRef = workspaceId.slice('surface:'.length);
+      // Kill existing process
+      await ctx.cmux.sendKeys(surfaceRef, '\x03');
+      await sleep(300);
+      await ctx.cmux.sendKeys(surfaceRef, '\x03');
+      await sleep(500);
+      // Send new runner command
+      await ctx.cmux.send({ surface: surfaceRef }, cmd);
+      return true;
+    }
+
+    if (workspaceId.startsWith('workspace:')) {
+      const panes = await ctx.cmux.listPanes(workspaceId);
+      if (panes.length > 0) {
+        const paneId = panes[0].id;
+        await ctx.cmux.sendKeys(paneId, '\x03');
+        await sleep(300);
+        await ctx.cmux.sendKeys(paneId, '\x03');
+        await sleep(500);
+        await ctx.cmux.send({ surface: paneId }, cmd);
+        return true;
+      }
+    }
+  } catch {
+    // Pane/workspace may no longer exist
+  }
+  return false;
+}
+
 export function registerRestartCommand(program: Command, ctx: AppContext): void {
   program
     .command('restart')
@@ -48,6 +88,13 @@ export function registerRestartCommand(program: Command, ctx: AppContext): void 
       }
 
       for (const clone of targetClones) {
+        // Release any stuck in_progress tasks for this agent
+        const agentId = `agent-${String(clone.cloneIndex).padStart(2, '0')}`;
+        const released = ctx.stores.tasks.releaseAgent(project.name, agentId);
+        if (released > 0) {
+          console.log(`Released ${released} stuck task(s) for ${agentId}`);
+        }
+
         // Refresh
         await poolService.refreshClone(
           project.name,
@@ -61,26 +108,21 @@ export function registerRestartCommand(program: Command, ctx: AppContext): void 
         const clonePath = poolService.getClonePath(project.prefix, clone.cloneIndex, ctx.config.dataDir);
         const cmd = buildRunnerCommand(clonePath, clone.cloneIndex, project, ctx.config.toolDir, opts);
 
-        // If clone had a workspace, try to send to its pane
-        if (clone.workspaceId && clone.workspaceId.startsWith('workspace:')) {
-          try {
-            const panes = await ctx.cmux.listPanes(clone.workspaceId);
-            if (panes.length > 0) {
-              await ctx.cmux.sendKeys(panes[0].id, cmd);
-              poolService.lock(project.name, clone.cloneIndex, clone.workspaceId);
-              console.log(green(`Restarted clone ${clone.cloneIndex} in existing workspace`));
-              continue;
-            }
-          } catch {
-            // Workspace may not exist anymore
+        // Try to restart in existing pane/surface
+        if (clone.workspaceId) {
+          const restarted = await restartInExistingPane(ctx, clone.workspaceId, cmd);
+          if (restarted) {
+            poolService.lock(project.name, clone.cloneIndex, clone.workspaceId);
+            console.log(green(`Restarted clone ${clone.cloneIndex} in existing pane`));
+            continue;
           }
         }
 
-        // Otherwise launch in a new workspace
-        const { workspaceRef } = await ctx.cmux.newWorkspace({ command: cmd });
-        await ctx.cmux.renameWorkspace(workspaceRef, `${project.name}-${clone.cloneIndex}`);
-        poolService.lock(project.name, clone.cloneIndex, workspaceRef);
-        console.log(green(`Restarted clone ${clone.cloneIndex} in new workspace`));
+        // Fallback: launch as a new split in the current workspace
+        const { surfaceRef } = await ctx.cmux.newSplit('right', {});
+        await ctx.cmux.send({ surface: surfaceRef }, cmd);
+        poolService.lock(project.name, clone.cloneIndex, `surface:${surfaceRef}`);
+        console.log(green(`Restarted clone ${clone.cloneIndex} in new split`));
       }
     });
 }

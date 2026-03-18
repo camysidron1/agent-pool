@@ -6,6 +6,7 @@ import { applyMigrations } from '../../src/stores/sqlite/schema.js';
 import { SqliteProjectStore } from '../../src/stores/sqlite/project-store.js';
 import { SqliteCloneStore } from '../../src/stores/sqlite/clone-store.js';
 import { SqliteTaskStore } from '../../src/stores/sqlite/task-store.js';
+import { SqlitePipelineStore } from '../../src/stores/sqlite/pipeline-store.js';
 import { MockCmuxClient } from '../../src/cmux/mock.js';
 import { MockGitClient } from '../../src/git/mock.js';
 import type { AppContext } from '../../src/container.js';
@@ -23,6 +24,7 @@ export function createTestContext(): TestContext {
     projects: new SqliteProjectStore(db),
     clones: new SqliteCloneStore(db),
     tasks: new SqliteTaskStore(db),
+    pipelines: new SqlitePipelineStore(db),
   };
 
   const cmux = new MockCmuxClient();

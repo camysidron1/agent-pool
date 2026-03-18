@@ -12,11 +12,19 @@ export function registerRunAgentCommand(program: Command, ctx: AppContext): void
     .option('--env <name>', 'Environment name')
     .option('--skip-permissions', 'Skip permission prompts')
     .option('--agent <type>', 'Agent type (claude or codex)')
+    .option('--push', 'use push mode (connect to daemon instead of polling)')
     .action(async (indexStr: string, opts: {
       env?: string;
       skipPermissions?: boolean;
       agent?: string;
+      push?: boolean;
     }) => {
+      const cloneIndex = parseInt(indexStr, 10);
+      if (isNaN(cloneIndex)) {
+        console.error('Error: index must be a number');
+        process.exit(1);
+      }
+
       const projectService = new ProjectService(ctx.stores.projects);
       const globalOpts = program.opts();
       const project = projectService.resolve(globalOpts.project);
@@ -25,10 +33,12 @@ export function registerRunAgentCommand(program: Command, ctx: AppContext): void
       const adapter = createAdapter(agentType, ctx.git);
 
       const runner = new AgentRunner(ctx, adapter, {
-        cloneIndex: parseInt(indexStr, 10),
+        cloneIndex,
         projectName: project.name,
         envName: opts.env,
         skipPermissions: !!opts.skipPermissions,
+        nonInteractive: true,
+        mode: opts.push ? 'push' : 'poll',
       });
 
       await runner.start();

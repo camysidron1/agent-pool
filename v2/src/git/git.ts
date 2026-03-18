@@ -69,6 +69,12 @@ export class RealGitClient implements GitClient {
   }
 
   async createBranch(repoPath: string, branch: string, startPoint?: string): Promise<void> {
+    // Delete existing branch if it exists (from a previous run/retry)
+    try {
+      await run(['git', '-C', repoPath, 'branch', '-D', branch]);
+    } catch {
+      // Branch doesn't exist, fine
+    }
     const args = ['git', '-C', repoPath, 'checkout', '-b', branch];
     if (startPoint) args.push(startPoint);
     await run(args);

@@ -162,6 +162,121 @@ describe("DaemonClient", () => {
     mockServer.close();
   });
 
+  test("onPush callback fires on push messages", async () => {
+    const sockPath = join(tempDir, "push.sock");
+    const mockServer = createServer((socket) => {
+      let buffer = "";
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString();
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 1);
+          const msg = parseMessage(line);
+          if (msg && isRequest(msg)) {
+            // Respond to the request
+            socket.write(serializeMessage(createResponse(msg.id, { ok: true })));
+            // Then send a push message
+            socket.write(
+              serializeMessage({
+                id: "push",
+                result: { type: "task.assigned", task: { id: "t-1" } },
+              })
+            );
+          }
+        }
+      });
+    });
+    await new Promise<void>((resolve) =>
+      mockServer.listen(sockPath, resolve)
+    );
+
+    const client = new DaemonClient({ socketPath: sockPath });
+    await client.connect();
+
+    const pushMessages: any[] = [];
+    client.onPush((msg) => pushMessages.push(msg));
+
+    await client.request("runner.ready", { agentId: "agent-01" });
+
+    // Wait for the push message to arrive
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(pushMessages).toHaveLength(1);
+    expect(pushMessages[0].result.type).toBe("task.assigned");
+    expect(pushMessages[0].result.task.id).toBe("t-1");
+
+    client.close();
+    mockServer.close();
+  });
+
+  test("regular request/response still works with push handler registered", async () => {
+    const sockPath = join(tempDir, "pushreq.sock");
+    const mockServer = createServer((socket) => {
+      let buffer = "";
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString();
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 1);
+          const msg = parseMessage(line);
+          if (msg && isRequest(msg)) {
+            socket.write(
+              serializeMessage(createResponse(msg.id, { echo: msg.method }))
+            );
+          }
+        }
+      });
+    });
+    await new Promise<void>((resolve) =>
+      mockServer.listen(sockPath, resolve)
+    );
+
+    const client = new DaemonClient({ socketPath: sockPath });
+    await client.connect();
+
+    // Register push handler
+    const pushMessages: any[] = [];
+    client.onPush((msg) => pushMessages.push(msg));
+
+    // Normal request should still work
+    const resp = await client.request("test.echo");
+    expect(resp.result).toEqual({ echo: "test.echo" });
+
+    // No push messages should have arrived
+    expect(pushMessages).toHaveLength(0);
+
+    client.close();
+    mockServer.close();
+  });
+
+  test("onDisconnect callback fires on server close", async () => {
+    const sockPath = join(tempDir, "ondisconnect.sock");
+    const mockServer = createServer((socket) => {
+      // Close after a short delay
+      setTimeout(() => socket.destroy(), 30);
+    });
+    await new Promise<void>((resolve) =>
+      mockServer.listen(sockPath, resolve)
+    );
+
+    const client = new DaemonClient({ socketPath: sockPath });
+    await client.connect();
+
+    let disconnected = false;
+    client.onDisconnect(() => {
+      disconnected = true;
+    });
+
+    await new Promise((r) => setTimeout(r, 100));
+    expect(disconnected).toBe(true);
+    expect(client.connected).toBe(false);
+
+    client.close();
+    mockServer.close();
+  });
+
   test("multiple sequential requests", async () => {
     const sockPath = join(tempDir, "multi.sock");
     const mockServer = createServer((socket) => {

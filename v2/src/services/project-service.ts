@@ -14,6 +14,10 @@ export class ProjectService {
   }
 
   remove(name: string): void {
+    const project = this.store.get(name);
+    if (!project) {
+      throw new Error(`Project '${name}' not found`);
+    }
     this.store.remove(name);
   }
 
@@ -62,6 +66,10 @@ export class ProjectService {
   }
 
   clearTracking(name: string): void {
+    const project = this.store.get(name);
+    if (!project) {
+      throw new Error(`Project '${name}' not found`);
+    }
     this.store.update(name, {
       trackingType: null,
       trackingProjectKey: null,
@@ -84,6 +92,10 @@ export class ProjectService {
   }
 
   clearWorkflow(name: string): void {
+    const project = this.store.get(name);
+    if (!project) {
+      throw new Error(`Project '${name}' not found`);
+    }
     this.store.update(name, {
       workflowType: null,
       workflowInstructions: null,

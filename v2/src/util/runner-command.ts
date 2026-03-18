@@ -7,6 +7,7 @@ export interface RunnerCommandOpts {
   skipPermissions?: boolean;
   queue?: boolean;
   agent?: string;
+  push?: boolean;
 }
 
 export function buildRunnerCommand(
@@ -27,5 +28,6 @@ export function buildRunnerCommand(
   const envFlag = opts.env ? ` --env ${opts.env}` : '';
   const skipFlag = opts.skipPermissions ? ' --skip-permissions' : '';
   const agentFlag = opts.agent ? ` --agent ${opts.agent}` : '';
-  return `cd ${clonePath} && ${toolDir}/agent-runner.sh ${index} --project ${project.name}${envFlag}${skipFlag}${agentFlag}`;
+  const pushFlag = opts.push ? ' --push' : '';
+  return `cd ${clonePath} && ${toolDir}/agent-runner.sh ${index} --project ${project.name}${envFlag}${skipFlag}${agentFlag}${pushFlag}`;
 }

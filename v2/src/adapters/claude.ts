@@ -40,7 +40,7 @@ Use the merge method specified in your workflow instructions (squash, merge, or 
 2. Run the finish script:
 
 \`\`\`bash
-bun run "$AGENT_POOL_TOOL_DIR/src/finish-task.ts" $ARGUMENTS
+bun run "$AGENT_POOL_TOOL_DIR/v2/src/finish-task.ts" $ARGUMENTS
 \`\`\`
 
 3. After the script succeeds, print a brief confirmation message including the PR URL if one was created.
