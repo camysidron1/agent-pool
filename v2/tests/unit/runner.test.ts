@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { existsSync, readdirSync } from 'fs';
+import { existsSync, readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { createTestContext, type TestContext } from '../fixtures/context.js';
 import { AgentRunner, type RunnerOptions } from '../../src/runner/runner.js';
@@ -547,6 +547,92 @@ describe('AgentRunner', () => {
     expect(adapter.setupCalls[1].prompt).toBe('second');
     expect(ctx.stores.tasks.get(t1.id)!.status).toBe('completed');
     expect(ctx.stores.tasks.get(t2.id)!.status).toBe('completed');
+  });
+
+  describe('heartbeats', () => {
+    test('heartbeat file is created during task execution', async () => {
+      addProject(ctx);
+      ctx.stores.tasks.add({ projectName: 'myproj', prompt: 'heartbeat test' });
+
+      const runner = makeRunner(ctx, adapter);
+      let heartbeatExistsDuringRun = false;
+
+      adapter.run = async (agentCtx: AgentContext) => {
+        adapter.runCalls.push(agentCtx);
+        // Check heartbeat exists while task is running
+        const hbPath = join(ctx.config.dataDir, 'heartbeats', 'agent-01.json');
+        heartbeatExistsDuringRun = existsSync(hbPath);
+        runner.stop();
+        return 0;
+      };
+
+      await runner.start();
+
+      expect(heartbeatExistsDuringRun).toBe(true);
+    });
+
+    test('heartbeat file is cleared after task completes', async () => {
+      addProject(ctx);
+      ctx.stores.tasks.add({ projectName: 'myproj', prompt: 'hb clear test' });
+
+      const runner = makeRunner(ctx, adapter);
+
+      adapter.run = async (agentCtx: AgentContext) => {
+        adapter.runCalls.push(agentCtx);
+        runner.stop();
+        return 0;
+      };
+
+      await runner.start();
+
+      const hbPath = join(ctx.config.dataDir, 'heartbeats', 'agent-01.json');
+      expect(existsSync(hbPath)).toBe(false);
+    });
+
+    test('heartbeat file is cleared on cleanup()', async () => {
+      addProject(ctx);
+      ctx.stores.tasks.add({ projectName: 'myproj', prompt: 'cleanup hb' });
+
+      const runner = makeRunner(ctx, adapter, { projectName: 'myproj' });
+
+      // Make run() write heartbeat but not clear it (simulate stuck state)
+      adapter.run = async (agentCtx: AgentContext) => {
+        adapter.runCalls.push(agentCtx);
+        runner.stop();
+        return 0;
+      };
+
+      await runner.start();
+
+      // cleanup() is called at end of start(), heartbeat should be gone
+      const hbPath = join(ctx.config.dataDir, 'heartbeats', 'agent-01.json');
+      expect(existsSync(hbPath)).toBe(false);
+    });
+
+    test('heartbeat contains correct agentId and taskId', async () => {
+      addProject(ctx);
+      const added = ctx.stores.tasks.add({ projectName: 'myproj', prompt: 'hb content' });
+
+      const runner = makeRunner(ctx, adapter);
+      let heartbeatData: any = null;
+
+      adapter.run = async (agentCtx: AgentContext) => {
+        adapter.runCalls.push(agentCtx);
+        const hbPath = join(ctx.config.dataDir, 'heartbeats', 'agent-01.json');
+        if (existsSync(hbPath)) {
+          heartbeatData = JSON.parse(readFileSync(hbPath, 'utf-8'));
+        }
+        runner.stop();
+        return 0;
+      };
+
+      await runner.start();
+
+      expect(heartbeatData).not.toBeNull();
+      expect(heartbeatData.task_id).toBe(added.id);
+      expect(heartbeatData.pid).toBe(process.pid);
+      expect(heartbeatData.last_tool).toBe('setup');
+    });
   });
 
   describe('interactive exit status prompting', () => {

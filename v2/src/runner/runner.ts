@@ -7,6 +7,7 @@ import type { AppContext } from '../container.js';
 import type { AgentAdapter, AgentContext } from '../adapters/agent.js';
 import type { Project, Task, TaskStatus } from '../stores/interfaces.js';
 import { DaemonClient } from '../daemon/client.js';
+import { Watchdog } from '../runner/watchdog.js';
 
 export interface RunnerOptions {
   cloneIndex: number;
@@ -26,6 +27,7 @@ export class AgentRunner {
   private softTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private daemonClient: DaemonClient | null = null;
   private pushMode = false;
+  private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private ctx: AppContext,
@@ -190,13 +192,21 @@ export class AgentRunner {
 
     await this.adapter.setup(agentCtx);
 
+    // Write initial heartbeat and start periodic updates
+    await Watchdog.writeHeartbeat(this.ctx.config.dataDir, this.agentId, task.id, 'setup');
+    this.heartbeatInterval = setInterval(() => {
+      Watchdog.writeHeartbeat(this.ctx.config.dataDir, this.agentId, task.id, 'running').catch(() => {});
+    }, 30_000);
+
     // Set up timeout if configured
     this.setupTimeouts(task, agentCtx);
 
     const exitCode = await this.adapter.run(agentCtx);
 
-    // Clear timeouts
+    // Clear timeouts and heartbeat
     this.clearTimeouts();
+    if (this.heartbeatInterval) { clearInterval(this.heartbeatInterval); this.heartbeatInterval = null; }
+    await Watchdog.clearHeartbeat(this.ctx.config.dataDir, this.agentId).catch(() => {});
 
     const completedAt = new Date().toISOString();
 
@@ -294,6 +304,8 @@ export class AgentRunner {
 
   cleanup(): void {
     this.clearTimeouts();
+    if (this.heartbeatInterval) { clearInterval(this.heartbeatInterval); this.heartbeatInterval = null; }
+    Watchdog.clearHeartbeat(this.ctx.config.dataDir, this.agentId).catch(() => {});
     if (!this.projectName) return;
     try {
       this.ctx.stores.clones.unlock(this.projectName, this.options.cloneIndex);
