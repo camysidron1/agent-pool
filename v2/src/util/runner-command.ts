@@ -29,5 +29,5 @@ export function buildRunnerCommand(
   const skipFlag = opts.skipPermissions ? ' --skip-permissions' : '';
   const agentFlag = opts.agent ? ` --agent ${opts.agent}` : '';
   const pushFlag = opts.push ? ' --push' : '';
-  return `cd ${clonePath} && ${toolDir}/agent-runner.sh ${index} --project ${project.name}${envFlag}${skipFlag}${agentFlag}${pushFlag}`;
+  return `cd ${clonePath} && agent-pool run-agent ${index} ${project.name}${skipFlag}${envFlag}${agentFlag}${pushFlag}`;
 }
