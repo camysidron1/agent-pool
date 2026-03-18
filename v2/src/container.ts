@@ -4,6 +4,7 @@ import { join } from 'path';
 import type { ProjectStore, CloneStore, TaskStore } from './stores/interfaces.js';
 import type { CmuxClient } from './cmux/interfaces.js';
 import type { GitClient } from './git/interfaces.js';
+import type { EventBus } from './daemon/event-bus.js';
 import { SqliteProjectStore } from './stores/sqlite/project-store.js';
 import { SqliteCloneStore } from './stores/sqlite/clone-store.js';
 import { SqliteTaskStore } from './stores/sqlite/task-store.js';
@@ -25,6 +26,7 @@ export interface AppContext {
     dataDir: string;
     toolDir: string;
   };
+  eventBus?: EventBus;
 }
 
 export function createProductionContext(opts: { dataDir: string; toolDir: string }): AppContext {
