@@ -6,6 +6,7 @@ import { ProjectService } from '../services/project-service.js';
 import { PoolService } from '../services/pool-service.js';
 import { bold, green, yellow, dim } from '../util/colors.js';
 import type { Project } from '../stores/interfaces.js';
+import { buildRunnerCommand } from '../util/runner-command.js';
 
 function prompt(question: string): Promise<string> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -15,17 +16,6 @@ function prompt(question: string): Promise<string> {
       resolve(answer);
     });
   });
-}
-
-function buildRunnerCommand(
-  clonePath: string,
-  index: number,
-  project: Project,
-  toolDir: string,
-  opts: { skipPermissions?: boolean },
-): string {
-  const skipFlag = opts.skipPermissions ? ' --skip-permissions' : '';
-  return `cd ${clonePath} && ${toolDir}/agent-runner.sh ${index} --project ${project.name}${skipFlag}`;
 }
 
 export function registerStartCommand(program: Command, ctx: AppContext): void {
@@ -71,6 +61,10 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
       // --- 3. Skip permissions ---
       const skipAnswer = (await prompt('Skip permissions? [y/N]: ')) || 'n';
       const skipPermissions = /^[yY]/.test(skipAnswer);
+
+      // --- 3b. Agent type ---
+      const agentAnswer = (await prompt('Agent type [claude]: ')) || 'claude';
+      const agent = agentAnswer.trim() || 'claude';
 
       // --- 4. Teardown existing sessions ---
       const lockedClones = poolService.list(project.name).filter(c => c.locked);
@@ -185,7 +179,7 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
         const { surfaceRef } = await ctx.cmux.newSplit('right', {});
         surfaces.push(surfaceRef);
         const clonePath = poolService.getClonePath(project.prefix, cloneIndexes[0], ctx.config.dataDir);
-        const cmd = buildRunnerCommand(clonePath, cloneIndexes[0], project, ctx.config.toolDir, { skipPermissions });
+        const cmd = buildRunnerCommand(clonePath, cloneIndexes[0], project, ctx.config.toolDir, { skipPermissions, agent });
         await ctx.cmux.send({ surface: surfaceRef }, cmd);
         poolService.lock(project.name, cloneIndexes[0], `surface:${surfaceRef}`);
         console.log(dim(`  Agent ${String(cloneIndexes[0]).padStart(2, '0')} (top-left)`));
@@ -196,7 +190,7 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
         const { surfaceRef } = await ctx.cmux.newSplit('right', { surface: surfaces[0] });
         surfaces.push(surfaceRef);
         const clonePath = poolService.getClonePath(project.prefix, cloneIndexes[1], ctx.config.dataDir);
-        const cmd = buildRunnerCommand(clonePath, cloneIndexes[1], project, ctx.config.toolDir, { skipPermissions });
+        const cmd = buildRunnerCommand(clonePath, cloneIndexes[1], project, ctx.config.toolDir, { skipPermissions, agent });
         await ctx.cmux.send({ surface: surfaceRef }, cmd);
         poolService.lock(project.name, cloneIndexes[1], `surface:${surfaceRef}`);
         console.log(dim(`  Agent ${String(cloneIndexes[1]).padStart(2, '0')} (top-right)`));
@@ -207,7 +201,7 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
         const { surfaceRef } = await ctx.cmux.newSplit('down', { surface: surfaces[0] });
         surfaces.push(surfaceRef);
         const clonePath = poolService.getClonePath(project.prefix, cloneIndexes[2], ctx.config.dataDir);
-        const cmd = buildRunnerCommand(clonePath, cloneIndexes[2], project, ctx.config.toolDir, { skipPermissions });
+        const cmd = buildRunnerCommand(clonePath, cloneIndexes[2], project, ctx.config.toolDir, { skipPermissions, agent });
         await ctx.cmux.send({ surface: surfaceRef }, cmd);
         poolService.lock(project.name, cloneIndexes[2], `surface:${surfaceRef}`);
         console.log(dim(`  Agent ${String(cloneIndexes[2]).padStart(2, '0')} (bottom-left)`));
@@ -218,7 +212,7 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
         const { surfaceRef } = await ctx.cmux.newSplit('down', { surface: surfaces[1] });
         surfaces.push(surfaceRef);
         const clonePath = poolService.getClonePath(project.prefix, cloneIndexes[3], ctx.config.dataDir);
-        const cmd = buildRunnerCommand(clonePath, cloneIndexes[3], project, ctx.config.toolDir, { skipPermissions });
+        const cmd = buildRunnerCommand(clonePath, cloneIndexes[3], project, ctx.config.toolDir, { skipPermissions, agent });
         await ctx.cmux.send({ surface: surfaceRef }, cmd);
         poolService.lock(project.name, cloneIndexes[3], `surface:${surfaceRef}`);
         console.log(dim(`  Agent ${String(cloneIndexes[3]).padStart(2, '0')} (bottom-right)`));
@@ -230,7 +224,7 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
         const { surfaceRef } = await ctx.cmux.newSplit('down', { surface: surfaces[parentIdx] });
         surfaces.push(surfaceRef);
         const clonePath = poolService.getClonePath(project.prefix, cloneIndexes[i], ctx.config.dataDir);
-        const cmd = buildRunnerCommand(clonePath, cloneIndexes[i], project, ctx.config.toolDir, { skipPermissions });
+        const cmd = buildRunnerCommand(clonePath, cloneIndexes[i], project, ctx.config.toolDir, { skipPermissions, agent });
         await ctx.cmux.send({ surface: surfaceRef }, cmd);
         poolService.lock(project.name, cloneIndexes[i], `surface:${surfaceRef}`);
         console.log(dim(`  Agent ${String(cloneIndexes[i]).padStart(2, '0')} (extra-${i + 1})`));

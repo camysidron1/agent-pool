@@ -4,23 +4,7 @@ import { ProjectService } from '../services/project-service.js';
 import { PoolService } from '../services/pool-service.js';
 import { bold, green, yellow } from '../util/colors.js';
 import type { Clone, Project } from '../stores/interfaces.js';
-
-function buildRunnerCommand(
-  clonePath: string,
-  index: number,
-  project: Project,
-  toolDir: string,
-  opts: { env?: string; skipPermissions?: boolean; queue?: boolean },
-): string {
-  if (opts.queue === false) {
-    // No queue — run claude directly
-    const flags = opts.skipPermissions ? ' --dangerously-skip-permissions' : '';
-    return `cd ${clonePath} && claude${flags}`;
-  }
-  const envFlag = opts.env ? ` --env ${opts.env}` : '';
-  const skipFlag = opts.skipPermissions ? ' --skip-permissions' : '';
-  return `cd ${clonePath} && ${toolDir}/agent-runner.sh ${index} --project ${project.name}${envFlag}${skipFlag}`;
-}
+import { buildRunnerCommand } from '../util/runner-command.js';
 
 export async function launchAgents(
   ctx: AppContext,
@@ -36,6 +20,7 @@ export async function launchAgents(
     skipPermissions?: boolean;
     queue?: boolean;
     driver?: boolean;
+    agent?: string;
   },
 ): Promise<void> {
   const projectService = new ProjectService(ctx.stores.projects);
@@ -94,7 +79,7 @@ async function launchGrid(
   ctx: AppContext,
   poolService: PoolService,
   project: Project,
-  opts: { env?: string; skipPermissions?: boolean; queue?: boolean; driver?: boolean },
+  opts: { env?: string; skipPermissions?: boolean; queue?: boolean; driver?: boolean; agent?: string },
 ): Promise<void> {
   const maxPanes = 4;
   const clones: Clone[] = [];
@@ -167,7 +152,7 @@ async function launchPanel(
   ctx: AppContext,
   poolService: PoolService,
   project: Project,
-  opts: { env?: string; skipPermissions?: boolean; queue?: boolean; down?: boolean; right?: boolean },
+  opts: { env?: string; skipPermissions?: boolean; queue?: boolean; down?: boolean; right?: boolean; agent?: string },
 ): Promise<void> {
   const clone = await findOrCreateClone(ctx, poolService, project);
   if (!clone) {
@@ -194,7 +179,7 @@ async function launchWorkspace(
   ctx: AppContext,
   poolService: PoolService,
   project: Project,
-  opts: { env?: string; skipPermissions?: boolean; queue?: boolean },
+  opts: { env?: string; skipPermissions?: boolean; queue?: boolean; agent?: string },
 ): Promise<void> {
   const clone = await findOrCreateClone(ctx, poolService, project);
   if (!clone) {
@@ -216,7 +201,7 @@ async function launchHere(
   ctx: AppContext,
   poolService: PoolService,
   project: Project,
-  opts: { env?: string; skipPermissions?: boolean; queue?: boolean },
+  opts: { env?: string; skipPermissions?: boolean; queue?: boolean; agent?: string },
 ): Promise<void> {
   const clone = await findOrCreateClone(ctx, poolService, project);
   if (!clone) {
@@ -256,6 +241,7 @@ export function registerLaunchCommand(program: Command, ctx: AppContext): void {
     .option('--skip-permissions', 'Skip permission prompts')
     .option('--no-queue', 'Run without task queue')
     .option('--no-driver', 'Skip driver pane')
+    .option('--agent <type>', 'Agent type (claude or codex)')
     .action(async (opts: {
       grid?: boolean;
       panel?: boolean;
@@ -267,6 +253,7 @@ export function registerLaunchCommand(program: Command, ctx: AppContext): void {
       skipPermissions?: boolean;
       queue?: boolean;
       driver?: boolean;
+      agent?: string;
     }) => {
       await launchAgents(ctx, program, opts);
     });

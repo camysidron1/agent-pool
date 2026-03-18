@@ -3,6 +3,7 @@ import type { AppContext } from '../container.js';
 import { ProjectService } from '../services/project-service.js';
 import { PoolService } from '../services/pool-service.js';
 import { green } from '../util/colors.js';
+import { buildRunnerCommand } from '../util/runner-command.js';
 
 export function registerRestartCommand(program: Command, ctx: AppContext): void {
   program
@@ -12,10 +13,12 @@ export function registerRestartCommand(program: Command, ctx: AppContext): void 
     .option('--env <name>', 'Environment name')
     .option('--skip-permissions', 'Skip permission prompts')
     .option('--no-queue', 'Run without task queue')
+    .option('--agent <type>', 'Agent type (claude or codex)')
     .action(async (indexStr: string | undefined, opts: {
       env?: string;
       skipPermissions?: boolean;
       queue?: boolean;
+      agent?: string;
     }) => {
       const projectService = new ProjectService(ctx.stores.projects);
       const poolService = new PoolService(ctx.stores.clones, ctx.git, ctx.cmux);
@@ -56,15 +59,7 @@ export function registerRestartCommand(program: Command, ctx: AppContext): void 
 
         // Build runner command
         const clonePath = poolService.getClonePath(project.prefix, clone.cloneIndex, ctx.config.dataDir);
-        let cmd: string;
-        if (opts.queue === false) {
-          const flags = opts.skipPermissions ? ' --dangerously-skip-permissions' : '';
-          cmd = `cd ${clonePath} && claude${flags}`;
-        } else {
-          const envFlag = opts.env ? ` --env ${opts.env}` : '';
-          const skipFlag = opts.skipPermissions ? ' --skip-permissions' : '';
-          cmd = `cd ${clonePath} && ${ctx.config.toolDir}/agent-runner.sh ${clone.cloneIndex} --project ${project.name}${envFlag}${skipFlag}`;
-        }
+        const cmd = buildRunnerCommand(clonePath, clone.cloneIndex, project, ctx.config.toolDir, opts);
 
         // If clone had a workspace, try to send to its pane
         if (clone.workspaceId && clone.workspaceId.startsWith('workspace:')) {
