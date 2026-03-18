@@ -26,6 +26,10 @@ Code comments and inline docs in source files are fine — this rule is about st
 
 /** Fetch origin and create a task branch from origin/{branch}. Fix local origin URLs. */
 export async function checkoutTaskBranch(git: GitClient, ctx: AgentContext): Promise<void> {
+  // Clean working directory from previous task before switching branches
+  await git.resetHard(ctx.clonePath, 'HEAD');
+  await git.clean(ctx.clonePath);
+
   await git.fetch(ctx.clonePath);
   const localBranch = `${ctx.agentId}-${ctx.taskId}`;
   await git.createBranch(ctx.clonePath, localBranch, `origin/${ctx.branch}`);
