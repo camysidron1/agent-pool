@@ -8,6 +8,8 @@ import { PoolService } from '../services/pool-service.js';
 import { bold, green, yellow, dim } from '../util/colors.js';
 import type { Project } from '../stores/interfaces.js';
 import { buildRunnerCommand } from '../util/runner-command.js';
+import { startDaemon } from '../daemon/index.js';
+import { DaemonClient } from '../daemon/client.js';
 
 export function registerStartCommand(program: Command, ctx: AppContext): void {
   program
@@ -158,7 +160,21 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
         }
       }
 
-      // --- 8. Init clones ---
+      // --- 8. Start daemon (stop existing first) ---
+      const socketPath = join(ctx.config.dataDir, 'apd.sock');
+      const existingClient = new DaemonClient({ socketPath, timeoutMs: 2000 });
+      if (await existingClient.connect()) {
+        try { await existingClient.request('shutdown'); } catch {}
+        existingClient.close();
+        await sleep(300);
+      }
+      const daemonServer = await startDaemon({
+        dataDir: ctx.config.dataDir,
+        taskStore: ctx.stores.tasks,
+      });
+      console.log(green('Daemon started.'));
+
+      // --- 9. Init clones ---
       console.log(bold(`\nLaunching ${count} agents for '${project.name}'...`));
 
       const cloneIndexes: number[] = [];
@@ -177,7 +193,7 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
 
       console.log(`${count} clones ready.`);
 
-      // --- 9. Launch agents in current workspace as splits ---
+      // --- 10. Launch agents in current workspace as splits ---
       console.log(`Launching ${count} agents in current workspace...`);
 
       const surfaces: string[] = [];
@@ -240,7 +256,7 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
 
       console.log(green(`Done. ${count} agents launched in current workspace.`));
 
-      // --- 10. Install dispatch/update commands into source repo for the driver ---
+      // --- 11. Install dispatch/update commands into source repo for the driver ---
       const sourceCommandsDir = join(project.source, '.claude', 'commands');
       mkdirSync(sourceCommandsDir, { recursive: true });
       const installedCommands: string[] = [];
@@ -253,7 +269,7 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
         }
       }
 
-      // --- 11. Driver pane: exec claude with startup message ---
+      // --- 12. Driver pane: exec claude with startup message ---
       const pendingTasks = ctx.stores.tasks.getAll(project.name).filter(t => t.status === 'pending');
       const pendingCount = pendingTasks.length;
 
@@ -291,6 +307,9 @@ Ready to receive tasks.`;
       for (const dest of installedCommands) {
         try { rmSync(dest); } catch { /* best-effort */ }
       }
+
+      // Stop daemon on exit
+      daemonServer.stop();
 
       process.exit(result.status ?? 0);
     });
