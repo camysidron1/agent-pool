@@ -11,6 +11,7 @@ import {
   type DaemonResponse,
 } from "../../../src/daemon/protocol";
 import type { Task, TaskStore } from "../../../src/stores/interfaces";
+import type { PoolEvent } from "../../../src/daemon/event-bus";
 
 function createMockTaskStore(): TaskStore & { tasks: Task[] } {
   const tasks: Task[] = [];
@@ -265,5 +266,79 @@ describe("DaemonServer", () => {
     await new Promise((r) => setTimeout(r, 300));
 
     expect(await Bun.file(socketPath).exists()).toBe(false);
+  });
+
+  test("emits task.created event on task.add", async () => {
+    await server.start();
+    const events: PoolEvent[] = [];
+    server.getEventBus().on("task.created", (e) => events.push(e));
+
+    const sock = await connectToSocket(server.socketPath);
+    await sendRequest(sock, "task.add", { description: "emit test", status: "pending" });
+    sock.destroy();
+
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe("task.created");
+    expect(events[0].payload.taskId).toBe("t-1");
+  });
+
+  test("emits task.claimed event on task.claim", async () => {
+    await server.start();
+    await store.add({ description: "claimable", status: "pending" });
+    const events: PoolEvent[] = [];
+    server.getEventBus().on("task.claimed", (e) => events.push(e));
+
+    const sock = await connectToSocket(server.socketPath);
+    await sendRequest(sock, "task.claim", { agentId: "agent-1" });
+    sock.destroy();
+
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe("task.claimed");
+    expect(events[0].payload.taskId).toBe("t-1");
+    expect(events[0].payload.agentId).toBe("agent-1");
+  });
+
+  test("emits task.completed event on task.mark with completed status", async () => {
+    await server.start();
+    await store.add({ description: "completable", status: "active" });
+    const events: PoolEvent[] = [];
+    server.getEventBus().on("task.completed", (e) => events.push(e));
+
+    const sock = await connectToSocket(server.socketPath);
+    await sendRequest(sock, "task.mark", { id: "t-1", fields: { status: "completed" } });
+    sock.destroy();
+
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe("task.completed");
+    expect(events[0].payload.taskId).toBe("t-1");
+  });
+
+  test("emits agent.ready event on runner.ready", async () => {
+    await server.start();
+    const events: PoolEvent[] = [];
+    server.getEventBus().on("agent.ready", (e) => events.push(e));
+
+    const sock = await connectToSocket(server.socketPath);
+    await sendRequest(sock, "runner.ready", { agentId: "agent-2" });
+    sock.destroy();
+
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe("agent.ready");
+    expect(events[0].payload.agentId).toBe("agent-2");
+  });
+
+  test("loads IntegrationManager on start", async () => {
+    await server.start();
+    const mgr = server.getIntegrationManager();
+    expect(mgr).not.toBeNull();
+    // No integrations dir exists, so loaded integrations should be empty
+    expect(mgr!.getIntegrations()).toEqual([]);
+  });
+
+  test("exposes EventBus via getter", async () => {
+    const bus = server.getEventBus();
+    expect(bus).toBeDefined();
+    expect(typeof bus.on).toBe("function");
+    expect(typeof bus.emit).toBe("function");
   });
 });

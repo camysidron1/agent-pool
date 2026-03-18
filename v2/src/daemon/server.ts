@@ -10,6 +10,8 @@ import {
 } from "./protocol";
 import type { TaskStore } from "../stores/interfaces";
 import { Watchdog } from "../runner/watchdog";
+import { EventBus } from "./event-bus";
+import { IntegrationManager } from "../integrations/manager";
 
 export interface DaemonServerOptions {
   dataDir: string;
@@ -28,6 +30,8 @@ export class DaemonServer {
   private clients = new Set<Socket>();
   private readyRunners: Socket[] = [];
   private watchdog: Watchdog;
+  private eventBus: EventBus;
+  private integrationManager: IntegrationManager | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private idleTimeoutMs: number;
   private startedAt: Date | null = null;
@@ -35,13 +39,16 @@ export class DaemonServer {
   constructor(options: DaemonServerOptions) {
     this.options = options;
     this.idleTimeoutMs = options.idleTimeoutMs ?? 5 * 60 * 1000;
+    this.eventBus = new EventBus(join(options.dataDir, "events.jsonl"));
     this.watchdog = new Watchdog(
       {
         dataDir: options.dataDir,
         staleThresholdMs: 5 * 60 * 1000,
         scanIntervalMs: 30 * 1000,
       },
-      options.taskStore
+      options.taskStore,
+      console.warn,
+      this.eventBus as any // 4th arg consumed once Watchdog accepts EventBus
     );
   }
 
@@ -87,6 +94,10 @@ export class DaemonServer {
 
     this.startedAt = new Date();
     this.watchdog.start();
+
+    this.integrationManager = new IntegrationManager(this.options.dataDir, this.eventBus);
+    await this.integrationManager.load();
+
     this.resetIdleTimer();
 
     // Signal handlers for graceful shutdown
@@ -185,18 +196,33 @@ export class DaemonServer {
       case "task.list":
         return await taskStore.list();
 
-      case "task.add":
-        return await taskStore.add(req.params);
+      case "task.add": {
+        const result = await taskStore.add(req.params);
+        this.eventBus.emit({ type: "task.created", timestamp: new Date().toISOString(), payload: { taskId: result.id } });
+        return result;
+      }
 
-      case "task.claim":
-        return await taskStore.claim(req.params?.agentId);
+      case "task.claim": {
+        const result = await taskStore.claim(req.params?.agentId);
+        if (result) {
+          this.eventBus.emit({ type: "task.claimed", timestamp: new Date().toISOString(), payload: { taskId: result.id, agentId: req.params?.agentId } });
+        }
+        return result;
+      }
 
-      case "task.mark":
+      case "task.mark": {
         await taskStore.update(req.params?.id, req.params?.fields);
+        const status = req.params?.fields?.status;
+        if (status === "completed" || status === "blocked" || status === "cancelled") {
+          const eventType = `task.${status}` as const;
+          this.eventBus.emit({ type: eventType, timestamp: new Date().toISOString(), payload: { taskId: req.params?.id, status } });
+        }
         return { ok: true };
+      }
 
       case "runner.ready":
         this.readyRunners.push(socket);
+        this.eventBus.emit({ type: "agent.ready", timestamp: new Date().toISOString(), payload: { agentId: req.params?.agentId } });
         // Try to push a task immediately
         await this.pushTaskToRunner(socket, req.params?.agentId);
         return { ok: true };
@@ -269,6 +295,14 @@ export class DaemonServer {
         this.stop();
       }, this.idleTimeoutMs);
     }
+  }
+
+  getEventBus(): EventBus {
+    return this.eventBus;
+  }
+
+  getIntegrationManager(): IntegrationManager | null {
+    return this.integrationManager;
   }
 
   /**
