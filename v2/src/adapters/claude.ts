@@ -1,28 +1,19 @@
 // Claude CLI adapter — implements AgentAdapter for the `claude` CLI
 
-import { mkdirSync, existsSync, readFileSync, writeFileSync, symlinkSync, unlinkSync, readdirSync } from 'fs';
+import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
 import type { AgentAdapter, AgentContext } from './agent.js';
 import type { GitClient } from '../git/interfaces.js';
-
-const DOC_RULES_MARKER = '## Documentation Rules';
-
-const DOC_RULES = `
-## Documentation Rules — IMPORTANT
-
-NEVER create documentation, design docs, plans, reviews, or markdown files inside the repository tree.
-ALL non-code documentation must go in one of these locations:
-
-- \`agent-docs/\` — YOUR private workspace for this task (plans, todos, notes, reviews)
-  Example: agent-docs/todo.md, agent-docs/implementation-plan.md
-- \`shared-docs/\` — shared across all agents (lessons learned, architecture decisions)
-  Example: shared-docs/lessons.md
-
-These are symlinked to a persistent store outside the repo. They survive clone refreshes and are visible to the orchestrator.
-
-Do NOT write .md files to paths like documentation/, docs/, design/, state/, etc. within the repo.
-Code comments and inline docs in source files are fine — this rule is about standalone documentation files.
-`;
+import {
+  DOC_RULES,
+  DOC_RULES_MARKER,
+  checkoutTaskBranch,
+  setupDocs,
+  updateGitignore,
+  setupOutputCapture,
+  buildScriptArgs,
+  buildPromptWithContext,
+} from './base-setup.js';
 
 const FINISH_COMMAND = `---
 description: "Mark the current agent-pool task with a status and end the session"
@@ -62,36 +53,25 @@ export class ClaudeAdapter implements AgentAdapter {
 
   async setup(ctx: AgentContext): Promise<void> {
     // 1. Checkout fresh branch from origin/{branch}
-    await this.git.fetch(ctx.clonePath);
-    const localBranch = `${ctx.agentId}-${ctx.taskId}`;
-    await this.git.createBranch(ctx.clonePath, localBranch, `origin/${ctx.branch}`);
+    await checkoutTaskBranch(this.git, ctx);
 
-    // 2. Fix origin remote if it's a local path
-    const originUrl = await this.git.getRemoteUrl(ctx.clonePath);
-    if (originUrl && originUrl.startsWith('/')) {
-      const sourceRemote = await this.git.getRemoteUrl(originUrl);
-      if (sourceRemote) {
-        await this.git.setRemoteUrl(ctx.clonePath, sourceRemote);
-      }
-    }
-
-    // 3. Install hooks into .claude/settings.json
+    // 2. Install hooks into .claude/settings.json
     this.installHooks(ctx);
 
-    // 4. Setup docs directories
-    this.setupDocs(ctx);
+    // 3. Setup docs directories
+    setupDocs(ctx);
 
-    // 5. Install /finish command
+    // 4. Install /finish command
     this.installFinishCommand(ctx);
 
-    // 6. Install /update and /dispatch slash commands
+    // 5. Install /update and /dispatch slash commands
     this.installSlashCommands(ctx);
 
-    // 7. Append doc rules to CLAUDE.md
+    // 6. Append doc rules to CLAUDE.md
     this.appendDocRules(ctx);
 
-    // 8. Update .gitignore
-    this.updateGitignore(ctx);
+    // 7. Update .gitignore
+    updateGitignore(ctx, ['agent-docs', 'shared-docs', 'CLAUDE.md', '.claude/commands/finish.md', '.claude/commands/update.md', '.claude/commands/dispatch.md']);
   }
 
   private proc: ReturnType<typeof Bun.spawn> | null = null;
@@ -116,12 +96,9 @@ export class ClaudeAdapter implements AgentAdapter {
     }
 
     // Set up output capture via `script`
-    const logDir = join(ctx.dataDir, 'logs', ctx.agentId);
-    mkdirSync(logDir, { recursive: true });
-    this.rotateLogFiles(logDir, 20);
-    const logPath = join(logDir, `${ctx.taskId}.log`);
+    const { logPath } = setupOutputCapture(ctx.agentId, ctx.dataDir, ctx.taskId);
 
-    const args = this.buildScriptArgs(claudeArgs, logPath);
+    const args = buildScriptArgs(claudeArgs, logPath);
 
     this.proc = Bun.spawn(args, {
       cwd: ctx.clonePath,
@@ -155,47 +132,11 @@ export class ClaudeAdapter implements AgentAdapter {
 
   /** Build `script` command args for output capture (platform-aware). */
   buildScriptArgs(claudeArgs: string[], logPath: string): string[] {
-    if (process.platform === 'darwin') {
-      // macOS: script -q <file> <cmd...>
-      return ['script', '-q', logPath, ...claudeArgs];
-    } else {
-      // Linux: script -qc "<cmd...>" <file>
-      const cmdStr = claudeArgs.map(a => a.includes(' ') ? `"${a}"` : a).join(' ');
-      return ['script', '-qc', cmdStr, logPath];
-    }
-  }
-
-  /** Keep only the most recent maxLogs files per agent log directory. */
-  private rotateLogFiles(logDir: string, maxLogs: number): void {
-    try {
-      const files = readdirSync(logDir)
-        .filter(f => f.endsWith('.log'))
-        .map(f => ({ name: f, path: join(logDir, f) }));
-
-      if (files.length <= maxLogs) return;
-
-      // Sort by mtime, oldest first
-      files.sort((a, b) => {
-        const aStat = Bun.file(a.path).lastModified;
-        const bStat = Bun.file(b.path).lastModified;
-        return aStat - bStat;
-      });
-
-      const toDelete = files.slice(0, files.length - maxLogs);
-      for (const f of toDelete) {
-        unlinkSync(f.path);
-      }
-    } catch {
-      // best-effort rotation
-    }
+    return buildScriptArgs(claudeArgs, logPath);
   }
 
   buildPrompt(ctx: AgentContext): string {
-    let prompt = '';
-    if (ctx.trackingContext) prompt += ctx.trackingContext + '\n';
-    if (ctx.workflowContext) prompt += ctx.workflowContext + '\n';
-    prompt += ctx.prompt;
-    return prompt;
+    return buildPromptWithContext(ctx);
   }
 
   private installHooks(ctx: AgentContext): void {
@@ -255,30 +196,6 @@ export class ClaudeAdapter implements AgentAdapter {
     writeFileSync(settingsFile, JSON.stringify(settings, null, 2));
   }
 
-  private setupDocs(ctx: AgentContext): void {
-    const agentDocsSource = join(ctx.dataDir, 'docs', 'agents', ctx.agentId);
-    const sharedDocsSource = join(ctx.dataDir, 'docs', 'shared');
-    const agentDocsLink = join(ctx.clonePath, 'agent-docs');
-    const sharedDocsLink = join(ctx.clonePath, 'shared-docs');
-
-    // Create source directories
-    mkdirSync(agentDocsSource, { recursive: true });
-    mkdirSync(sharedDocsSource, { recursive: true });
-
-    // Create symlinks (remove existing first)
-    for (const [source, link] of [
-      [agentDocsSource, agentDocsLink],
-      [sharedDocsSource, sharedDocsLink],
-    ]) {
-      try {
-        unlinkSync(link);
-      } catch {
-        // doesn't exist, fine
-      }
-      symlinkSync(source, link);
-    }
-  }
-
   private installFinishCommand(ctx: AgentContext): void {
     const commandsDir = join(ctx.clonePath, '.claude', 'commands');
     mkdirSync(commandsDir, { recursive: true });
@@ -305,29 +222,6 @@ export class ClaudeAdapter implements AgentAdapter {
       writeFileSync(claudeMd, content + DOC_RULES);
     } else {
       writeFileSync(claudeMd, DOC_RULES);
-    }
-  }
-
-  private updateGitignore(ctx: AgentContext): void {
-    const gitignorePath = join(ctx.clonePath, '.gitignore');
-    const entries = ['agent-docs', 'shared-docs', 'CLAUDE.md', '.claude/commands/finish.md', '.claude/commands/update.md', '.claude/commands/dispatch.md'];
-
-    let content = '';
-    if (existsSync(gitignorePath)) {
-      content = readFileSync(gitignorePath, 'utf-8');
-    }
-
-    const lines = content.split('\n');
-    let modified = false;
-    for (const entry of entries) {
-      if (!lines.includes(entry)) {
-        lines.push(entry);
-        modified = true;
-      }
-    }
-
-    if (modified) {
-      writeFileSync(gitignorePath, lines.join('\n'));
     }
   }
 }

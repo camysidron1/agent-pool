@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, lstatSync, writeFileSync
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { ClaudeAdapter } from '../../../src/adapters/claude.js';
+import { rotateLogFiles } from '../../../src/adapters/base-setup.js';
 import { MockGitClient } from '../../../src/git/mock.js';
 import type { AgentContext } from '../../../src/adapters/agent.js';
 
@@ -328,14 +329,7 @@ describe('ClaudeAdapter', () => {
         writeFileSync(filePath, `log content ${i}`);
       }
 
-      // Call rotateLogFiles via a run() that creates the dir + rotates
-      // Since rotateLogFiles is private, we test it indirectly through behavior.
-      // We can test by making a new adapter and using the public interface approach,
-      // but since it's called in run(), let's call it via a subclass trick.
-
-      // Actually, let's just call it by accessing the prototype
-      const rotateLogFiles = (ClaudeAdapter.prototype as any).rotateLogFiles;
-      rotateLogFiles.call(adapter, logDir, 20);
+      rotateLogFiles(logDir, 20);
 
       const remaining = readdirSync(logDir).filter(f => f.endsWith('.log'));
       expect(remaining).toHaveLength(20);
@@ -349,8 +343,7 @@ describe('ClaudeAdapter', () => {
         writeFileSync(join(logDir, `t-${i}.log`), `log ${i}`);
       }
 
-      const rotateLogFiles = (ClaudeAdapter.prototype as any).rotateLogFiles;
-      rotateLogFiles.call(adapter, logDir, 20);
+      rotateLogFiles(logDir, 20);
 
       const remaining = readdirSync(logDir).filter(f => f.endsWith('.log'));
       expect(remaining).toHaveLength(5);
@@ -365,8 +358,7 @@ describe('ClaudeAdapter', () => {
       }
       writeFileSync(join(logDir, 'notes.txt'), 'not a log');
 
-      const rotateLogFiles = (ClaudeAdapter.prototype as any).rotateLogFiles;
-      rotateLogFiles.call(adapter, logDir, 3);
+      rotateLogFiles(logDir, 3);
 
       const allFiles = readdirSync(logDir);
       const logs = allFiles.filter(f => f.endsWith('.log'));
