@@ -1,6 +1,7 @@
 import { readdir, readFile, unlink, mkdir } from "fs/promises";
 import { join } from "path";
 import type { TaskStore } from "../stores/interfaces.js";
+import type { EventBus } from "../daemon/event-bus.js";
 
 export interface HeartbeatData {
   timestamp: string;
@@ -29,17 +30,20 @@ export class Watchdog {
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private taskStore: TaskStore | null;
   private logger: (msg: string) => void;
+  private eventBus: EventBus | null;
 
   constructor(
     options: WatchdogOptions,
     taskStore: TaskStore | null = null,
-    logger: (msg: string) => void = console.warn
+    logger: (msg: string) => void = console.warn,
+    eventBus?: EventBus
   ) {
     this.dataDir = options.dataDir;
     this.staleThresholdMs = options.staleThresholdMs ?? 5 * 60 * 1000;
     this.scanIntervalMs = options.scanIntervalMs ?? 30 * 1000;
     this.taskStore = taskStore;
     this.logger = logger;
+    this.eventBus = eventBus ?? null;
   }
 
   get heartbeatDir(): string {
@@ -146,6 +150,19 @@ export class Watchdog {
         await unlink(join(this.heartbeatDir, `${agent.agentId}.json`));
       } catch {
         // already cleaned up
+      }
+
+      if (this.eventBus) {
+        this.eventBus.emit({
+          type: 'agent.stuck',
+          timestamp: new Date().toISOString(),
+          payload: {
+            agentId: agent.agentId,
+            taskId: agent.taskId,
+            reason: agent.reason,
+            lastHeartbeat: agent.lastHeartbeat,
+          },
+        });
       }
     }
   }
