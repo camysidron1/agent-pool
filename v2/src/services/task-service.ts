@@ -15,6 +15,10 @@ export class TaskService {
     return this.store.get(id);
   }
 
+  next(projectName: string): Task | null {
+    return this.store.peek(projectName);
+  }
+
   claim(projectName: string, agentId: string): Task | null {
     return this.store.claim(projectName, agentId);
   }

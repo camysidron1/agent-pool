@@ -114,23 +114,30 @@ export class SqliteTaskStore implements TaskStore {
     return row ? rowToTask(row) : null;
   }
 
+  private findNextClaimable(projectName: string): TaskRow | null {
+    return this.db.query(`
+      SELECT t.* FROM tasks t
+      WHERE t.project_name = ? AND t.status = 'pending'
+        AND NOT EXISTS (
+          SELECT 1 FROM task_dependencies td
+          JOIN tasks dep ON dep.id = td.depends_on
+          WHERE td.task_id = t.id AND dep.status != 'completed'
+        )
+      ORDER BY t.priority DESC, t.created_at ASC
+      LIMIT 1
+    `).get(projectName) as TaskRow | null;
+  }
+
+  peek(projectName: string): Task | null {
+    const row = this.findNextClaimable(projectName);
+    return row ? rowToTask(row) : null;
+  }
+
   claim(projectName: string, agentId: string): Task | null {
     let claimed: Task | null = null;
 
     this.db.transaction(() => {
-      // Find first pending task where all dependencies are completed (or has no deps)
-      // Priority DESC, then created_at ASC
-      const row = this.db.query(`
-        SELECT t.* FROM tasks t
-        WHERE t.project_name = ? AND t.status = 'pending'
-          AND NOT EXISTS (
-            SELECT 1 FROM task_dependencies td
-            JOIN tasks dep ON dep.id = td.depends_on
-            WHERE td.task_id = t.id AND dep.status != 'completed'
-          )
-        ORDER BY t.priority DESC, t.created_at ASC
-        LIMIT 1
-      `).get(projectName) as TaskRow | null;
+      const row = this.findNextClaimable(projectName);
 
       if (!row) return;
 

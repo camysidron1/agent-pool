@@ -317,4 +317,42 @@ describe('SqliteTaskStore', () => {
   test('getLogs returns empty for no matches', () => {
     expect(ctx.stores.tasks.getLogs({ taskId: 't-nonexistent' })).toEqual([]);
   });
+
+  test('peek returns next claimable task without mutating state', () => {
+    const task = ctx.stores.tasks.add({ projectName: 'proj', prompt: 'peekable' });
+
+    const peeked = ctx.stores.tasks.peek('proj');
+    expect(peeked).not.toBeNull();
+    expect(peeked!.id).toBe(task.id);
+    expect(peeked!.status).toBe('pending');
+
+    // Verify no mutation
+    const after = ctx.stores.tasks.get(task.id)!;
+    expect(after.status).toBe('pending');
+    expect(after.claimedBy).toBeNull();
+  });
+
+  test('peek returns same task as claim would select', () => {
+    ctx.stores.tasks.add({ projectName: 'proj', prompt: 'low', priority: 1 });
+    ctx.stores.tasks.add({ projectName: 'proj', prompt: 'high', priority: 10 });
+
+    const peeked = ctx.stores.tasks.peek('proj');
+    expect(peeked!.prompt).toBe('high');
+
+    // Claim should select the same task
+    const claimed = ctx.stores.tasks.claim('proj', 'agent-1');
+    expect(claimed!.id).toBe(peeked!.id);
+  });
+
+  test('peek skips tasks with unmet dependencies', () => {
+    const dep = ctx.stores.tasks.add({ projectName: 'proj', prompt: 'dep' });
+    ctx.stores.tasks.add({ projectName: 'proj', prompt: 'waiting', dependsOn: [dep.id] });
+
+    const peeked = ctx.stores.tasks.peek('proj');
+    expect(peeked!.id).toBe(dep.id);
+  });
+
+  test('peek returns null when no claimable tasks', () => {
+    expect(ctx.stores.tasks.peek('proj')).toBeNull();
+  });
 });

@@ -41,6 +41,10 @@ class MockTaskStore implements TaskStore {
     return task;
   }
 
+  peek(projectName: string): Task | null {
+    return this.tasks.find(t => t.projectName === projectName && t.status === 'pending') ?? null;
+  }
+
   claim(projectName: string, agentId: string): Task | null {
     const task = this.tasks.find(t => t.projectName === projectName && t.status === 'pending');
     if (!task) return null;
