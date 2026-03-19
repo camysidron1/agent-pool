@@ -113,6 +113,8 @@ export interface TaskStore {
   updateFields(id: string, fields: Partial<Pick<Task, 'priority' | 'timeoutMinutes' | 'retryMax' | 'retryStrategy' | 'result' | 'prompt' | 'retryCount'>>): void;
   getDependencies(taskId: string): string[];
   addDependency(taskId: string, dependsOn: string): void;
+  /** Return the top N eligible pending tasks in claim order (priority DESC, created_at ASC), without claiming them. */
+  nextEligible(projectName: string, limit?: number): Task[];
   addLog(log: Omit<TaskLog, 'id' | 'createdAt'>): TaskLog;
   getLogs(filter: { taskId?: string; agentId?: string; limit?: number }): TaskLog[];
 }

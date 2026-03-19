@@ -150,6 +150,21 @@ export class SqliteTaskStore implements TaskStore {
     return claimed;
   }
 
+  nextEligible(projectName: string, limit: number = 1): Task[] {
+    const rows = this.db.query(`
+      SELECT t.* FROM tasks t
+      WHERE t.project_name = ? AND t.status = 'pending'
+        AND NOT EXISTS (
+          SELECT 1 FROM task_dependencies td
+          JOIN tasks dep ON dep.id = td.depends_on
+          WHERE td.task_id = t.id AND dep.status != 'completed'
+        )
+      ORDER BY t.priority DESC, t.created_at ASC
+      LIMIT ?
+    `).all(projectName, limit) as TaskRow[];
+    return rows.map(rowToTask);
+  }
+
   mark(id: string, status: TaskStatus, fields?: Partial<Task>): void {
     const sets: string[] = ['status = ?'];
     const values: unknown[] = [status];
