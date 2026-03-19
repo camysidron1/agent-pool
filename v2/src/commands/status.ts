@@ -6,6 +6,7 @@ import { ProjectService } from '../services/project-service.js';
 import { TaskService } from '../services/task-service.js';
 import { PoolService } from '../services/pool-service.js';
 import { bold, red, green, yellow, dim } from '../util/colors.js';
+import { formatQueueSummary } from '../util/queue-summary.js';
 import type { HeartbeatData } from '../runner/watchdog.js';
 
 const STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
@@ -46,6 +47,13 @@ export function registerStatusCommand(program: Command, ctx: AppContext): void {
       console.log(`\nTasks: ${tasks.length} total`);
       for (const [status, count] of Object.entries(counts)) {
         console.log(`  ${status}: ${count}`);
+      }
+
+      // Queue summary with claimability info
+      if (tasks.length > 0) {
+        console.log('');
+        const summary = taskService.getQueueSummary(project.name);
+        console.log(formatQueueSummary(summary));
       }
 
       // Clone counts

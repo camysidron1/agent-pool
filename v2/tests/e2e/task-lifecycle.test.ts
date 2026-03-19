@@ -51,7 +51,7 @@ describe('Task lifecycle', () => {
     // Now t2 should show as regular pending (no waiting)
     tasks = await run('tasks');
     // t2 should not show waiting anymore since dep is completed
-    const t2Line = tasks.stdout.split('\n').find(l => l.includes(t2));
+    const t2Line = tasks.stdout.split('\n').find(l => l.startsWith(t2));
     expect(t2Line).toContain('pending');
     expect(t2Line).not.toContain('waiting');
 
@@ -83,7 +83,7 @@ describe('Task lifecycle', () => {
     // Complete B, should show pending (no waiting)
     await run('set-status', tB, 'completed');
     tasks = await run('tasks');
-    const tCLine = tasks.stdout.split('\n').find(l => l.includes('Task C'));
+    const tCLine = tasks.stdout.split('\n').find(l => l.startsWith('t-') && l.includes('Task C'));
     expect(tCLine).toContain('pending');
     expect(tCLine).not.toContain('waiting');
 
@@ -187,14 +187,14 @@ describe('Task lifecycle', () => {
     const r2 = await run('set-status', taskId, 'completed');
     expect(r2.exitCode).toBe(0);
     let tasks = await run('tasks');
-    const completedLine = tasks.stdout.split('\n').find(l => l.includes(taskId));
+    const completedLine = tasks.stdout.split('\n').find(l => l.startsWith(taskId));
     expect(completedLine).toContain('completed');
 
     // Reset back to pending
     const r3 = await run('set-status', taskId, 'pending');
     expect(r3.exitCode).toBe(0);
     tasks = await run('tasks');
-    const pendingLine = tasks.stdout.split('\n').find(l => l.includes(taskId));
+    const pendingLine = tasks.stdout.split('\n').find(l => l.startsWith(taskId));
     expect(pendingLine).toContain('pending');
     expect(pendingLine).not.toContain('completed');
 

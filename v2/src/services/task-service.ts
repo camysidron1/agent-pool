@@ -1,5 +1,18 @@
 import type { TaskStore, TaskInput, Task, TaskLog, TaskStatus } from '../stores/interfaces.js';
 
+export interface QueueSummary {
+  total: number;
+  pending: number;
+  inProgress: number;
+  blocked: number;
+  waitingOnDeps: number;
+  claimable: number;
+  completed: number;
+  backlogged: number;
+  cancelled: number;
+  nextClaimable: Task | null;
+}
+
 export class TaskService {
   constructor(private store: TaskStore) {}
 
@@ -72,6 +85,61 @@ export class TaskService {
     } else {
       this.store.mark(id, status);
     }
+  }
+
+  getQueueSummary(projectName: string): QueueSummary {
+    const tasks = this.store.getAll(projectName);
+    const summary: QueueSummary = {
+      total: tasks.length,
+      pending: 0,
+      inProgress: 0,
+      blocked: 0,
+      waitingOnDeps: 0,
+      claimable: 0,
+      completed: 0,
+      backlogged: 0,
+      cancelled: 0,
+      nextClaimable: null,
+    };
+
+    // Collect claimable tasks to sort by priority/creation
+    const claimableTasks: Task[] = [];
+
+    for (const task of tasks) {
+      switch (task.status) {
+        case 'in_progress': summary.inProgress++; break;
+        case 'blocked': summary.blocked++; break;
+        case 'completed': summary.completed++; break;
+        case 'backlogged': summary.backlogged++; break;
+        case 'cancelled': summary.cancelled++; break;
+        case 'pending': {
+          summary.pending++;
+          const deps = this.store.getDependencies(task.id);
+          const hasUnmetDeps = deps.some(depId => {
+            const dep = this.store.get(depId);
+            return dep && dep.status !== 'completed';
+          });
+          if (hasUnmetDeps) {
+            summary.waitingOnDeps++;
+          } else {
+            summary.claimable++;
+            claimableTasks.push(task);
+          }
+          break;
+        }
+      }
+    }
+
+    // Match claim() ordering: priority DESC, createdAt ASC
+    if (claimableTasks.length > 0) {
+      claimableTasks.sort((a, b) => {
+        if (b.priority !== a.priority) return b.priority - a.priority;
+        return a.createdAt.localeCompare(b.createdAt);
+      });
+      summary.nextClaimable = claimableTasks[0];
+    }
+
+    return summary;
   }
 
   getDependencies(taskId: string): string[] {
