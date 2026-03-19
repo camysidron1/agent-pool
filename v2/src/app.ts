@@ -23,6 +23,7 @@ import { registerReviewCommand } from './commands/review.js';
 import { registerLogsCommand } from './commands/logs.js';
 import { registerDaemonCommand } from './commands/daemon.js';
 import { registerIntegrationCommand } from './commands/integration.js';
+import { registerNextCommand } from './commands/next.js';
 import { registerRunAgentCommand } from './commands/run-agent.js';
 
 export function createApp(ctx: AppContext): Command {
@@ -39,6 +40,7 @@ export function createApp(ctx: AppContext): Command {
   registerBacklogCommand(program, ctx);
   registerActivateCommand(program, ctx);
   registerSetStatusCommand(program, ctx);
+  registerNextCommand(program, ctx);
 
   // Project commands
   registerProjectCommand(program, ctx);

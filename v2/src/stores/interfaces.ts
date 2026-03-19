@@ -106,6 +106,8 @@ export interface TaskStore {
   getAll(projectName: string): Task[];
   get(id: string): Task | null;
   add(task: TaskInput): Task;
+  /** Read-only peek: return the next claimable task without mutating state. Same selection rules as claim. */
+  peek(projectName: string): Task | null;
   /** Atomic claim: find first eligible pending task, mark in_progress. Priority DESC, then created_at ASC. */
   claim(projectName: string, agentId: string): Task | null;
   mark(id: string, status: TaskStatus, fields?: Partial<Task>): void;
