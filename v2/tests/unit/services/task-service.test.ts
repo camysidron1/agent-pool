@@ -272,6 +272,95 @@ describe('TaskService', () => {
     });
   });
 
+  describe('getQueueSummary', () => {
+    test('returns zeroes for empty project', () => {
+      const summary = service.getQueueSummary('proj');
+      expect(summary.total).toBe(0);
+      expect(summary.claimable).toBe(0);
+      expect(summary.nextClaimable).toBeNull();
+    });
+
+    test('counts statuses correctly', () => {
+      service.add({ projectName: 'proj', prompt: 'a' }); // pending, no deps → claimable
+      service.add({ projectName: 'proj', prompt: 'b' }); // pending → claimable
+      const t3 = service.add({ projectName: 'proj', prompt: 'c' });
+      store.mark(t3.id, 'in_progress');
+      const t4 = service.add({ projectName: 'proj', prompt: 'd' });
+      store.mark(t4.id, 'blocked');
+      const t5 = service.add({ projectName: 'proj', prompt: 'e' });
+      store.mark(t5.id, 'completed');
+
+      const summary = service.getQueueSummary('proj');
+      expect(summary.total).toBe(5);
+      expect(summary.pending).toBe(2);
+      expect(summary.claimable).toBe(2);
+      expect(summary.inProgress).toBe(1);
+      expect(summary.blocked).toBe(1);
+      expect(summary.completed).toBe(1);
+      expect(summary.waitingOnDeps).toBe(0);
+    });
+
+    test('identifies waiting-on-deps tasks', () => {
+      service.add({ projectName: 'proj', prompt: 'dep task' }); // t-1, pending
+      service.add({ projectName: 'proj', prompt: 'waiting task', dependsOn: ['t-1'] }); // t-2
+
+      const summary = service.getQueueSummary('proj');
+      expect(summary.pending).toBe(2);
+      expect(summary.claimable).toBe(1);
+      expect(summary.waitingOnDeps).toBe(1);
+      expect(summary.nextClaimable?.id).toBe('t-1');
+    });
+
+    test('waiting task becomes claimable when dep completes', () => {
+      service.add({ projectName: 'proj', prompt: 'dep task' }); // t-1
+      service.add({ projectName: 'proj', prompt: 'waiting task', dependsOn: ['t-1'] }); // t-2
+      store.mark('t-1', 'completed');
+
+      const summary = service.getQueueSummary('proj');
+      expect(summary.claimable).toBe(1);
+      expect(summary.waitingOnDeps).toBe(0);
+      expect(summary.nextClaimable?.id).toBe('t-2');
+    });
+
+    test('nextClaimable picks highest priority first', () => {
+      service.add({ projectName: 'proj', prompt: 'low prio', priority: 1 }); // t-1
+      service.add({ projectName: 'proj', prompt: 'high prio', priority: 5 }); // t-2
+
+      const summary = service.getQueueSummary('proj');
+      expect(summary.nextClaimable?.id).toBe('t-2');
+    });
+
+    test('nextClaimable picks oldest when same priority', () => {
+      service.add({ projectName: 'proj', prompt: 'first' }); // t-1
+      service.add({ projectName: 'proj', prompt: 'second' }); // t-2
+
+      const summary = service.getQueueSummary('proj');
+      expect(summary.nextClaimable?.id).toBe('t-1');
+    });
+
+    test('returns null nextClaimable when all pending have unmet deps', () => {
+      const t1 = service.add({ projectName: 'proj', prompt: 'blocker' });
+      store.mark(t1.id, 'in_progress');
+      service.add({ projectName: 'proj', prompt: 'waiting', dependsOn: ['t-1'] });
+
+      const summary = service.getQueueSummary('proj');
+      expect(summary.claimable).toBe(0);
+      expect(summary.waitingOnDeps).toBe(1);
+      expect(summary.nextClaimable).toBeNull();
+    });
+
+    test('counts backlogged and cancelled', () => {
+      const t1 = service.add({ projectName: 'proj', prompt: 'a' });
+      store.mark(t1.id, 'backlogged');
+      const t2 = service.add({ projectName: 'proj', prompt: 'b' });
+      store.mark(t2.id, 'cancelled');
+
+      const summary = service.getQueueSummary('proj');
+      expect(summary.backlogged).toBe(1);
+      expect(summary.cancelled).toBe(1);
+    });
+  });
+
   describe('getDependencies', () => {
     test('returns dependencies for a task', () => {
       service.add({ projectName: 'proj', prompt: 'a' });

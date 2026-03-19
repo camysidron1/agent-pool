@@ -3,6 +3,7 @@ import type { AppContext } from '../container.js';
 import { ProjectService } from '../services/project-service.js';
 import { TaskService } from '../services/task-service.js';
 import { statusColor, dim, yellow } from '../util/colors.js';
+import { formatQueueSummary } from '../util/queue-summary.js';
 
 export function registerTasksCommand(program: Command, ctx: AppContext): void {
   program
@@ -20,6 +21,11 @@ export function registerTasksCommand(program: Command, ctx: AppContext): void {
         console.log('No tasks.');
         return;
       }
+
+      // Queue summary
+      const summary = taskService.getQueueSummary(project.name);
+      console.log(formatQueueSummary(summary));
+      console.log('');
 
       // Build display rows
       for (const task of tasks) {
