@@ -40,7 +40,7 @@ export function registerProjectCommand(program: Command, ctx: AppContext): void 
         return;
       }
 
-      const nameW = 16, prefixW = 12, branchW = 12, trackW = 16, workflowW = 16, agentW = 10;
+      const nameW = 16, prefixW = 12, branchW = 12, trackW = 16, workflowW = 16, agentW = 10, envW = 6;
       const header = [
         'Name'.padEnd(nameW),
         'Prefix'.padEnd(prefixW),
@@ -48,6 +48,7 @@ export function registerProjectCommand(program: Command, ctx: AppContext): void 
         'Tracking'.padEnd(trackW),
         'Workflow'.padEnd(workflowW),
         'Agent'.padEnd(agentW),
+        'Env'.padEnd(envW),
         'Source',
       ].join(' ');
       const sep = [
@@ -57,6 +58,7 @@ export function registerProjectCommand(program: Command, ctx: AppContext): void 
         '--------'.padEnd(trackW),
         '--------'.padEnd(workflowW),
         '-----'.padEnd(agentW),
+        '---'.padEnd(envW),
         '------',
       ].join(' ');
       console.log(header);
@@ -69,6 +71,7 @@ export function registerProjectCommand(program: Command, ctx: AppContext): void 
           : '-';
         const workflow = p.workflowType || '-';
         const agent = p.agentType || 'claude';
+        const envCount = p.envVars ? String(Object.keys(p.envVars).length) : '-';
         const row = [
           name.padEnd(nameW),
           (p.prefix || '-').padEnd(prefixW),
@@ -76,6 +79,7 @@ export function registerProjectCommand(program: Command, ctx: AppContext): void 
           tracking.padEnd(trackW),
           workflow.padEnd(workflowW),
           agent.padEnd(agentW),
+          envCount.padEnd(envW),
           p.source,
         ].join(' ');
         console.log(row);
@@ -163,7 +167,7 @@ export function registerProjectCommand(program: Command, ctx: AppContext): void 
   projectCmd
     .command('set-agent')
     .description('Set agent type for a project')
-    .requiredOption('--type <type>', 'Agent type (claude or codex)')
+    .requiredOption('--type <type>', 'Agent type (claude, codex, or pi)')
     .argument('<name>', 'Project name')
     .action((name: string, opts: { type: string }) => {
       const projectService = new ProjectService(ctx.stores.projects);
@@ -179,5 +183,32 @@ export function registerProjectCommand(program: Command, ctx: AppContext): void 
       const projectService = new ProjectService(ctx.stores.projects);
       projectService.clearAgent(name);
       console.log(`Agent type cleared for '${name}'`);
+    });
+
+  projectCmd
+    .command('set-env')
+    .description('Set an environment variable for a project')
+    .argument('<name>', 'Project name')
+    .argument('<key>', 'Environment variable name')
+    .argument('<value>', 'Environment variable value')
+    .action((name: string, key: string, value: string) => {
+      const projectService = new ProjectService(ctx.stores.projects);
+      projectService.setEnv(name, key, value);
+      console.log(`Set ${key} for '${name}'`);
+    });
+
+  projectCmd
+    .command('clear-env')
+    .description('Clear environment variables for a project')
+    .argument('<name>', 'Project name')
+    .argument('[key]', 'Environment variable name (omit to clear all)')
+    .action((name: string, key?: string) => {
+      const projectService = new ProjectService(ctx.stores.projects);
+      projectService.clearEnv(name, key);
+      if (key) {
+        console.log(`Cleared ${key} for '${name}'`);
+      } else {
+        console.log(`Cleared all env vars for '${name}'`);
+      }
     });
 }

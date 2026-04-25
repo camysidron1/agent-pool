@@ -7,7 +7,7 @@ let dataDir: string;
 
 async function run(...args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const proc = Bun.spawn(['bun', 'run', join(__dirname, '../../src/index.ts'), ...args], {
-    env: { ...process.env, AGENT_POOL_DATA_DIR: dataDir, NO_COLOR: '1' },
+    env: { ...process.env, AGENT_POOL_DATA_DIR: dataDir, NO_COLOR: '1', CMUX_WORKSPACE_ID: '' },
     stdout: 'pipe',
     stderr: 'pipe',
   });
@@ -34,11 +34,11 @@ describe('Task lifecycle', () => {
 
     // Add phase 1 task
     const r1 = await run('add', 'Phase 1: extract interfaces');
-    const t1 = r1.stdout.match(/t-\d+-\d+/)?.[0]!;
+    const t1 = r1.stdout.match(/Added task (\S+)/)?.[1]!;
 
     // Add phase 2 that depends on phase 1
     const r2 = await run('add', '--depends-on', t1, 'Phase 2: implement');
-    const t2 = r2.stdout.match(/t-\d+-\d+/)?.[0]!;
+    const t2 = r2.stdout.match(/Added task (\S+)/)?.[1]!;
     expect(r2.stdout).toContain(`[deps: ${t1}]`);
 
     // Tasks listing should show waiting for t2
@@ -63,9 +63,9 @@ describe('Task lifecycle', () => {
     await run('project', 'add', 'multidep', '--source', source);
 
     const r1 = await run('add', 'Task A');
-    const tA = r1.stdout.match(/t-\d+-\d+/)?.[0]!;
+    const tA = r1.stdout.match(/Added task (\S+)/)?.[1]!;
     const r2 = await run('add', 'Task B');
-    const tB = r2.stdout.match(/t-\d+-\d+/)?.[0]!;
+    const tB = r2.stdout.match(/Added task (\S+)/)?.[1]!;
 
     const r3 = await run('add', '--depends-on', `${tA},${tB}`, 'Task C depends on A and B');
     expect(r3.exitCode).toBe(0);
@@ -95,7 +95,7 @@ describe('Task lifecycle', () => {
     await run('project', 'add', 'lifecycle', '--source', source);
 
     const r1 = await run('add', 'Lifecycle task');
-    const taskId = r1.stdout.match(/t-\d+-\d+/)?.[0]!;
+    const taskId = r1.stdout.match(/Added task (\S+)/)?.[1]!;
 
     // pending → in_progress
     await run('set-status', taskId, 'in_progress');
@@ -125,7 +125,7 @@ describe('Task lifecycle', () => {
     await run('project', 'add', 'bklife', '--source', source);
 
     const r1 = await run('add', 'Backlog lifecycle');
-    const taskId = r1.stdout.match(/t-\d+-\d+/)?.[0]!;
+    const taskId = r1.stdout.match(/Added task (\S+)/)?.[1]!;
 
     await run('backlog', taskId);
     let tasks = await run('tasks');
@@ -143,7 +143,7 @@ describe('Task lifecycle', () => {
     await run('project', 'add', 'badstat', '--source', source);
 
     const r1 = await run('add', 'Bad status');
-    const taskId = r1.stdout.match(/t-\d+-\d+/)?.[0]!;
+    const taskId = r1.stdout.match(/Added task (\S+)/)?.[1]!;
 
     const r = await run('set-status', taskId, 'invalid_status');
     expect(r.exitCode).toBe(1);
@@ -157,7 +157,7 @@ describe('Task lifecycle', () => {
     await run('project', 'add', 'ubfail', '--source', source);
 
     const r1 = await run('add', 'Not blocked');
-    const taskId = r1.stdout.match(/t-\d+-\d+/)?.[0]!;
+    const taskId = r1.stdout.match(/Added task (\S+)/)?.[1]!;
 
     const r = await run('unblock', taskId);
     expect(r.exitCode).toBe(1);
@@ -181,7 +181,7 @@ describe('Task lifecycle', () => {
     await run('project', 'add', 'resetproj', '--source', source);
 
     const r1 = await run('add', 'Reset me');
-    const taskId = r1.stdout.match(/t-\d+-\d+/)?.[0]!;
+    const taskId = r1.stdout.match(/Added task (\S+)/)?.[1]!;
 
     // Complete the task
     const r2 = await run('set-status', taskId, 'completed');

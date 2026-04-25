@@ -11,8 +11,10 @@ export interface AgentContext {
   toolDir: string;
   skipPermissions: boolean;
   envName?: string;
+  envVars?: Record<string, string>;
   trackingContext?: string;
   workflowContext?: string;
+  taskBranch?: string | null;
 }
 
 export interface AgentAdapter {

@@ -13,10 +13,12 @@ export interface RunnerOptions {
   cloneIndex: number;
   projectName?: string;
   envName?: string;
+  mode?: 'poll' | 'push'; // default: poll
   skipPermissions: boolean;
   pollInterval?: number; // ms, default 3000
   nonInteractive?: boolean; // skip interactive prompts (for CI/testing)
   daemonSocketPath?: string; // path to daemon socket; auto-detected from dataDir if omitted
+  workspaceRef?: string; // workspace ref for isolation
 }
 
 export class AgentRunner {
@@ -28,6 +30,7 @@ export class AgentRunner {
   private daemonClient: DaemonClient | null = null;
   private pushMode = false;
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  private executingTask = false;
 
   constructor(
     private ctx: AppContext,
@@ -51,32 +54,51 @@ export class AgentRunner {
     this.projectName = project.name;
     const prefix = project.prefix;
     const clonePath = `${this.ctx.config.dataDir}/${prefix}-${String(this.options.cloneIndex).padStart(2, '0')}`;
+    const mode = this.options.mode ?? 'poll';
 
     this.setupSignalHandlers();
 
-    // Try push mode via daemon first
-    const connected = await this.tryConnectDaemon();
-    if (connected) {
-      console.log(
-        `${this.agentId} ready — push mode via daemon (project: ${project.name})`,
-      );
-      await this.renamePaneQuiet(`${this.agentId}: idle`);
-      await this.runPushLoop(project, clonePath);
-    }
-
-    // Fall back to polling if push mode wasn't used or daemon disconnected
-    if (this.running) {
+    if (mode === 'poll') {
       console.log(
         `${this.agentId} ready — polling for tasks (project: ${project.name})...`,
       );
       await this.renamePaneQuiet(`${this.agentId}: idle`);
       await this.runPollLoop(project, clonePath);
+      this.cleanup();
+      return;
+    }
+
+    // Main loop: try push mode, fall back to polling, retry push periodically
+    while (this.running) {
+      const connected = await this.tryConnectDaemon(true);
+      if (connected) {
+        console.log(
+          `${this.agentId} ready — push mode via daemon (project: ${project.name})`,
+        );
+        await this.renamePaneQuiet(`${this.agentId}: idle`);
+        await this.runPushLoop(project, clonePath);
+        // Push loop exited (daemon disconnected) — retry after brief delay
+        if (this.running) {
+          console.log(`${this.agentId} daemon disconnected, will retry connection...`);
+          await this.sleep(2000);
+          continue;
+        }
+      }
+
+      // Fall back to polling with periodic daemon reconnect attempts
+      if (this.running) {
+        console.log(
+          `${this.agentId} ready — polling for tasks (project: ${project.name})...`,
+        );
+        await this.renamePaneQuiet(`${this.agentId}: idle`);
+        await this.runPollLoopWithReconnect(project, clonePath);
+      }
     }
 
     this.cleanup();
   }
 
-  private async tryConnectDaemon(): Promise<boolean> {
+  private async tryConnectDaemon(logOnFailure = false): Promise<boolean> {
     const socketPath = this.options.daemonSocketPath
       ?? join(this.ctx.config.dataDir, 'apd.sock');
 
@@ -97,7 +119,9 @@ export class AgentRunner {
       this.pushMode = true;
       return true;
     }
-    console.log(`${this.agentId} daemon not available, using polling mode`);
+    if (logOnFailure) {
+      console.log(`${this.agentId} daemon not available, using polling mode`);
+    }
     return false;
   }
 
@@ -112,15 +136,17 @@ export class AgentRunner {
         this.pushResolve = null;
       }
     } else if (msg.result?.type === 'task.available') {
-      // Nudge — re-send runner.ready to request a task
-      this.sendRunnerReady().catch(() => {});
+      // Nudge — re-send runner.ready to request a task (only if idle)
+      if (!this.executingTask) {
+        this.sendRunnerReady().catch(() => {});
+      }
     }
   }
 
   private async sendRunnerReady(): Promise<void> {
     if (!this.daemonClient?.connected) return;
     try {
-      await this.daemonClient.request('runner.ready', { agentId: this.agentId });
+      await this.daemonClient.request('runner.ready', { agentId: this.agentId, projectName: this.projectName, workspaceRef: this.options.workspaceRef });
     } catch {
       // daemon may have disconnected
     }
@@ -183,44 +209,85 @@ export class AgentRunner {
     }
   }
 
-  private async executeTask(task: Task, project: Project, clonePath: string): Promise<void> {
-    console.log(`${this.agentId} claimed task ${task.id}`);
-    await this.renamePaneQuiet(this.generatePaneTitle(task));
+  /**
+   * Poll loop that periodically tries to reconnect to the daemon.
+   * Exits (returns) when daemon connection is re-established so the
+   * outer loop in start() can switch back to push mode.
+   */
+  private async runPollLoopWithReconnect(project: Project, clonePath: string): Promise<void> {
+    const reconnectInterval = 10_000; // try daemon every 10s
+    let pollsSinceReconnectAttempt = 0;
+    const pollInterval = this.options.pollInterval ?? 3000;
+    const pollsPerReconnect = Math.ceil(reconnectInterval / pollInterval);
 
-    const agentCtx = this.buildAgentContext(task, project, clonePath);
-    const startedAt = new Date().toISOString();
+    while (this.running) {
+      const task = this.ctx.stores.tasks.claim(project.name, this.agentId);
 
-    await this.adapter.setup(agentCtx);
+      if (!task) {
+        await this.sleep(pollInterval);
+        pollsSinceReconnectAttempt++;
+        // Periodically try to reconnect to daemon
+        if (pollsSinceReconnectAttempt >= pollsPerReconnect) {
+          pollsSinceReconnectAttempt = 0;
+          const reconnected = await this.tryConnectDaemon(false);
+          if (reconnected) {
+            return; // exit poll loop, outer loop will enter push mode
+          }
+        }
+        continue;
+      }
 
-    // Write initial heartbeat and start periodic updates
-    await Watchdog.writeHeartbeat(this.ctx.config.dataDir, this.agentId, task.id, 'setup');
-    this.heartbeatInterval = setInterval(() => {
-      Watchdog.writeHeartbeat(this.ctx.config.dataDir, this.agentId, task.id, 'running').catch(() => {});
-    }, 30_000);
+      await this.executeTask(task, project, clonePath);
+      pollsSinceReconnectAttempt = 0;
 
-    // Set up timeout if configured
-    this.setupTimeouts(task, agentCtx);
-
-    const exitCode = await this.adapter.run(agentCtx);
-
-    // Clear timeouts and heartbeat
-    this.clearTimeouts();
-    if (this.heartbeatInterval) { clearInterval(this.heartbeatInterval); this.heartbeatInterval = null; }
-    await Watchdog.clearHeartbeat(this.ctx.config.dataDir, this.agentId).catch(() => {});
-
-    const completedAt = new Date().toISOString();
-
-    // Write task log
-    this.writeTaskLog(agentCtx, startedAt, completedAt, exitCode);
-
-    if (exitCode === 0) {
-      this.ctx.stores.tasks.mark(task.id, 'completed');
-      console.log(`${this.agentId} completed task ${task.id}`);
-    } else {
-      await this.handleNonZeroExit(task, exitCode);
+      console.log(`${this.agentId} polling for next task...`);
+      await this.renamePaneQuiet(`${this.agentId}: idle`);
     }
+  }
 
-    await this.resetClone(clonePath, project.branch);
+  private async executeTask(task: Task, project: Project, clonePath: string): Promise<void> {
+    this.executingTask = true;
+    try {
+      console.log(`${this.agentId} claimed task ${task.id}`);
+      await this.renamePaneQuiet(this.generatePaneTitle(task));
+
+      const agentCtx = this.buildAgentContext(task, project, clonePath);
+      const startedAt = new Date().toISOString();
+
+      await this.adapter.setup(agentCtx);
+
+      // Write initial heartbeat and start periodic updates
+      await Watchdog.writeHeartbeat(this.ctx.config.dataDir, this.agentId, task.id, 'setup');
+      this.heartbeatInterval = setInterval(() => {
+        Watchdog.writeHeartbeat(this.ctx.config.dataDir, this.agentId, task.id, 'running').catch(() => {});
+      }, 30_000);
+
+      // Set up timeout if configured
+      this.setupTimeouts(task, agentCtx);
+
+      const exitCode = await this.adapter.run(agentCtx);
+
+      // Clear timeouts and heartbeat
+      this.clearTimeouts();
+      if (this.heartbeatInterval) { clearInterval(this.heartbeatInterval); this.heartbeatInterval = null; }
+      await Watchdog.clearHeartbeat(this.ctx.config.dataDir, this.agentId).catch(() => {});
+
+      const completedAt = new Date().toISOString();
+
+      // Write task log
+      this.writeTaskLog(agentCtx, startedAt, completedAt, exitCode);
+
+      if (exitCode === 0) {
+        this.ctx.stores.tasks.mark(task.id, 'completed');
+        console.log(`${this.agentId} completed task ${task.id}`);
+      } else {
+        await this.handleNonZeroExit(task, exitCode);
+      }
+
+      await this.resetClone(clonePath, project.branch);
+    } finally {
+      this.executingTask = false;
+    }
   }
 
   stop(): void {
@@ -317,6 +384,19 @@ export class AgentRunner {
   private setupSignalHandlers(): void {
     const handler = (signal: string) => {
       console.log(`${this.agentId} received ${signal}, cleaning up...`);
+
+      // Abort the running agent subprocess if mid-task
+      if (this.executingTask && this.adapter.abort) {
+        try { this.adapter.abort(); } catch { /* best-effort */ }
+      }
+
+      // Release in_progress task back to pending so it can be retried
+      if (this.executingTask && this.projectName) {
+        try {
+          this.ctx.stores.tasks.releaseAgent(this.projectName, this.agentId);
+        } catch { /* best-effort */ }
+      }
+
       this.cleanup();
       this.running = false;
       process.exit(signal === 'SIGINT' ? 130 : 143);
@@ -324,6 +404,7 @@ export class AgentRunner {
 
     process.on('SIGINT', () => handler('SIGINT'));
     process.on('SIGTERM', () => handler('SIGTERM'));
+    process.on('SIGHUP', () => handler('SIGHUP'));
   }
 
   private resolveProject(): Project {
@@ -381,8 +462,10 @@ export class AgentRunner {
       toolDir: this.ctx.config.toolDir,
       skipPermissions: this.options.skipPermissions,
       envName: this.options.envName,
+      envVars: project.envVars ?? undefined,
       trackingContext: this.buildTrackingContext(project),
       workflowContext: this.buildWorkflowContext(project),
+      taskBranch: task.branch,
     };
   }
 

@@ -2,6 +2,7 @@ import type { Command } from 'commander';
 import type { AppContext } from '../container.js';
 import type { TaskStatus } from '../stores/interfaces.js';
 import { TaskService } from '../services/task-service.js';
+import { notifyDaemon } from '../util/notify-daemon.js';
 
 const VALID_STATUSES: TaskStatus[] = ['pending', 'in_progress', 'completed', 'blocked', 'backlogged', 'cancelled'];
 
@@ -21,6 +22,7 @@ export function registerSetStatusCommand(program: Command, ctx: AppContext): voi
       try {
         taskService.setStatus(taskId, status as TaskStatus);
         console.log(`Set task ${taskId} to ${status}`);
+        if (status === 'pending') notifyDaemon(ctx.config.dataDir);
       } catch (err: any) {
         console.error(`Error: ${err.message}`);
         process.exit(1);

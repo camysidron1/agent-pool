@@ -53,11 +53,12 @@ export class CodexAdapter implements AgentAdapter {
   async run(ctx: AgentContext): Promise<number> {
     const prompt = this.buildPrompt(ctx);
     const codexArgs = ctx.skipPermissions
-      ? ['codex', 'exec', '--full-auto', prompt]
-      : ['codex', 'exec', prompt];
+      ? ['codex', '--full-auto', prompt]
+      : ['codex', prompt];
 
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
+      ...(ctx.envVars ?? {}),
       AGENT_POOL_TASK_ID: ctx.taskId,
       AGENT_POOL_PROJECT: ctx.projectName,
       AGENT_POOL_DATA_DIR: ctx.dataDir,

@@ -28,7 +28,7 @@ export class DaemonServer {
   private options: DaemonServerOptions;
   private server: Server | null = null;
   private clients = new Set<Socket>();
-  private readyRunners: Socket[] = [];
+  private readyRunners: { socket: Socket; agentId?: string; projectName?: string; workspaceRef?: string }[] = [];
   private watchdog: Watchdog;
   private eventBus: EventBus;
   private integrationManager: IntegrationManager | null = null;
@@ -165,13 +165,13 @@ export class DaemonServer {
 
     socket.on("close", () => {
       this.clients.delete(socket);
-      this.readyRunners = this.readyRunners.filter((s) => s !== socket);
+      this.readyRunners = this.readyRunners.filter((r) => r.socket !== socket);
       this.resetIdleTimer();
     });
 
     socket.on("error", () => {
       this.clients.delete(socket);
-      this.readyRunners = this.readyRunners.filter((s) => s !== socket);
+      this.readyRunners = this.readyRunners.filter((r) => r.socket !== socket);
     });
   }
 
@@ -199,11 +199,12 @@ export class DaemonServer {
       case "task.add": {
         const result = await taskStore.add(req.params);
         this.eventBus.emit({ type: "task.created", timestamp: new Date().toISOString(), payload: { taskId: result.id } });
+        await this.notifyRunners(); // notify ALL idle runners across all workspaces
         return result;
       }
 
       case "task.claim": {
-        const result = await taskStore.claim(req.params?.agentId);
+        const result = await taskStore.claim(req.params?.projectName, req.params?.agentId);
         if (result) {
           this.eventBus.emit({ type: "task.claimed", timestamp: new Date().toISOString(), payload: { taskId: result.id, agentId: req.params?.agentId } });
         }
@@ -220,11 +221,19 @@ export class DaemonServer {
         return { ok: true };
       }
 
+      case "task.notify":
+        await this.notifyRunners(req.params?.workspaceRef);
+        return { ok: true };
+
       case "runner.ready":
-        this.readyRunners.push(socket);
+        // Deduplicate: remove any stale entry for this socket or agent
+        this.readyRunners = this.readyRunners.filter(
+          (r) => r.socket !== socket && r.agentId !== req.params?.agentId
+        );
+        this.readyRunners.push({ socket, agentId: req.params?.agentId, projectName: req.params?.projectName, workspaceRef: req.params?.workspaceRef });
         this.eventBus.emit({ type: "agent.ready", timestamp: new Date().toISOString(), payload: { agentId: req.params?.agentId } });
         // Try to push a task immediately
-        await this.pushTaskToRunner(socket, req.params?.agentId);
+        await this.pushTaskToRunner(socket, req.params?.agentId, req.params?.projectName, req.params?.workspaceRef);
         return { ok: true };
 
       case "status":
@@ -250,11 +259,13 @@ export class DaemonServer {
    */
   private async pushTaskToRunner(
     socket: Socket,
-    agentId?: string
+    agentId?: string,
+    projectName?: string,
+    workspaceRef?: string,
   ): Promise<void> {
-    if (!agentId) return;
+    if (!agentId || !projectName) return;
 
-    const task = await this.options.taskStore.claim(agentId);
+    const task = this.options.taskStore.claim(projectName, agentId);
     if (task) {
       // Send pushed task assignment as a response-like notification
       socket.write(
@@ -264,19 +275,20 @@ export class DaemonServer {
         })
       );
       // Remove from ready queue since they now have work
-      this.readyRunners = this.readyRunners.filter((s) => s !== socket);
+      this.readyRunners = this.readyRunners.filter((r) => r.socket !== socket);
     }
   }
 
   /**
-   * Notify all ready runners that new tasks may be available.
-   * Called when a task is added.
+   * Notify ready runners that new tasks may be available.
+   * When workspaceRef is provided, only notify runners in that workspace.
    */
-  async notifyRunners(): Promise<void> {
-    const runners = [...this.readyRunners];
-    for (const socket of runners) {
-      // We don't have the agentId here, so just send a nudge
-      socket.write(
+  async notifyRunners(workspaceRef?: string): Promise<void> {
+    const runners = workspaceRef
+      ? this.readyRunners.filter(r => r.workspaceRef === workspaceRef)
+      : [...this.readyRunners];
+    for (const runner of runners) {
+      runner.socket.write(
         serializeMessage({
           id: "push",
           result: { type: "task.available" },

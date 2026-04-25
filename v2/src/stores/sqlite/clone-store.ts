@@ -7,6 +7,7 @@ interface CloneRow {
   clone_index: number;
   locked: number;
   workspace_id: string;
+  workspace_ref: string;
   locked_at: string | null;
   branch: string;
 }
@@ -18,6 +19,7 @@ function rowToClone(row: CloneRow): Clone {
     cloneIndex: row.clone_index,
     locked: row.locked === 1,
     workspaceId: row.workspace_id,
+    workspaceRef: row.workspace_ref,
     lockedAt: row.locked_at,
     branch: row.branch,
   };
@@ -43,6 +45,13 @@ export class SqliteCloneStore implements CloneStore {
     return rows.map(rowToClone);
   }
 
+  getByWorkspace(projectName: string, workspaceRef: string): Clone[] {
+    const rows = this.db.query(
+      'SELECT * FROM clones WHERE project_name = ? AND workspace_ref = ? ORDER BY clone_index'
+    ).all(projectName, workspaceRef) as CloneRow[];
+    return rows.map(rowToClone);
+  }
+
   get(projectName: string, index: number): Clone | null {
     const row = this.db.query(
       'SELECT * FROM clones WHERE project_name = ? AND clone_index = ?'
@@ -50,11 +59,11 @@ export class SqliteCloneStore implements CloneStore {
     return row ? rowToClone(row) : null;
   }
 
-  lock(projectName: string, index: number, workspaceId: string): void {
+  lock(projectName: string, index: number, workspaceId: string, workspaceRef?: string): void {
     this.db.query(
-      `UPDATE clones SET locked = 1, workspace_id = ?, locked_at = ?
+      `UPDATE clones SET locked = 1, workspace_id = ?, workspace_ref = ?, locked_at = ?
        WHERE project_name = ? AND clone_index = ?`
-    ).run(workspaceId, new Date().toISOString(), projectName, index);
+    ).run(workspaceId, workspaceRef ?? '', new Date().toISOString(), projectName, index);
   }
 
   unlock(projectName: string, index: number): void {

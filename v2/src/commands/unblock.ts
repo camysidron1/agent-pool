@@ -1,6 +1,7 @@
 import type { Command } from 'commander';
 import type { AppContext } from '../container.js';
 import { TaskService } from '../services/task-service.js';
+import { notifyDaemon } from '../util/notify-daemon.js';
 
 export function registerUnblockCommand(program: Command, ctx: AppContext): void {
   program
@@ -12,6 +13,7 @@ export function registerUnblockCommand(program: Command, ctx: AppContext): void 
       try {
         taskService.unblock(taskId);
         console.log(`Unblocked task ${taskId}`);
+        notifyDaemon(ctx.config.dataDir);
       } catch (err: any) {
         console.error(`Error: ${err.message}`);
         process.exit(1);

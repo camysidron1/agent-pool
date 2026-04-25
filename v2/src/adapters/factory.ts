@@ -2,20 +2,32 @@
 
 import type { AgentAdapter } from './agent.js';
 import type { GitClient } from '../git/interfaces.js';
+import type { TaskStore } from '../stores/interfaces.js';
 import { ClaudeAdapter } from './claude.js';
 import { CodexAdapter } from './codex.js';
+import { PiAdapter } from './pi/index.js';
 
-export type AgentType = 'claude' | 'codex';
+export type AgentType = 'claude' | 'codex' | 'pi';
 
-const VALID_TYPES: Set<string> = new Set(['claude', 'codex']);
+/** Optional dependencies for adapters that need more than GitClient. */
+export interface AdapterDeps {
+  taskStore?: TaskStore;
+}
+
+const VALID_TYPES: Set<string> = new Set(['claude', 'codex', 'pi']);
 
 /** Create an adapter instance for the given agent type. */
-export function createAdapter(type: AgentType, git: GitClient): AgentAdapter {
+export function createAdapter(type: AgentType, git: GitClient, deps?: AdapterDeps): AgentAdapter {
   switch (type) {
     case 'claude':
       return new ClaudeAdapter(git);
     case 'codex':
       return new CodexAdapter(git);
+    case 'pi':
+      if (!deps?.taskStore) {
+        throw new Error("PiAdapter requires 'taskStore' in adapter deps");
+      }
+      return new PiAdapter(git, deps.taskStore);
   }
 }
 

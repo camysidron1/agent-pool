@@ -132,32 +132,6 @@ describe('ClaudeAdapter', () => {
       expect(setUrlCalls).toHaveLength(0);
     });
 
-    test('installs hooks with approval when not skipPermissions', async () => {
-      const ctx = tracked(makeContext({ skipPermissions: false }));
-      await adapter.setup(ctx);
-
-      const settingsPath = join(ctx.clonePath, '.claude', 'settings.json');
-      expect(existsSync(settingsPath)).toBe(true);
-
-      const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
-      expect(settings.hooks.PreToolUse).toHaveLength(1);
-      const hooks = settings.hooks.PreToolUse[0].hooks;
-      expect(hooks).toHaveLength(2);
-      expect(hooks[0].command).toContain('mailbox-hook.sh');
-      expect(hooks[1].command).toContain('approval-hook.sh');
-    });
-
-    test('installs only mailbox hook when skipPermissions', async () => {
-      const ctx = tracked(makeContext({ skipPermissions: true }));
-      await adapter.setup(ctx);
-
-      const settingsPath = join(ctx.clonePath, '.claude', 'settings.json');
-      const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
-      const hooks = settings.hooks.PreToolUse[0].hooks;
-      expect(hooks).toHaveLength(1);
-      expect(hooks[0].command).toContain('mailbox-hook.sh');
-    });
-
     test('creates docs symlinks', async () => {
       const ctx = tracked(makeContext());
       await adapter.setup(ctx);
@@ -243,19 +217,6 @@ describe('ClaudeAdapter', () => {
       expect(lines).toHaveLength(1);
     });
 
-    test('uses toolDir in hook paths', async () => {
-      const ctx = tracked(
-        makeContext({ toolDir: '/custom/tool/dir' }),
-      );
-      await adapter.setup(ctx);
-
-      const settingsPath = join(ctx.clonePath, '.claude', 'settings.json');
-      const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
-      const hooks = settings.hooks.PreToolUse[0].hooks;
-      expect(hooks[0].command).toBe(
-        '/custom/tool/dir/hooks/mailbox-hook.sh',
-      );
-    });
   });
 
   describe('buildScriptArgs', () => {

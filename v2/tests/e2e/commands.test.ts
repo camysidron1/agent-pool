@@ -8,7 +8,7 @@ let dataDir: string;
 
 async function run(...args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const proc = Bun.spawn(['bun', 'run', join(__dirname, '../../src/index.ts'), ...args], {
-    env: { ...process.env, AGENT_POOL_DATA_DIR: dataDir, NO_COLOR: '1' },
+    env: { ...process.env, AGENT_POOL_DATA_DIR: dataDir, NO_COLOR: '1', CMUX_WORKSPACE_ID: '' },
     stdout: 'pipe',
     stderr: 'pipe',
   });

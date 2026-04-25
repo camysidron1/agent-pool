@@ -5,11 +5,12 @@ import type { Command } from 'commander';
 import type { AppContext } from '../container.js';
 import { ProjectService } from '../services/project-service.js';
 import { PoolService } from '../services/pool-service.js';
+import { teardownProject } from '../services/teardown.js';
 import { bold, green, yellow, dim } from '../util/colors.js';
 import type { Project } from '../stores/interfaces.js';
 import { buildRunnerCommand } from '../util/runner-command.js';
-import { startDaemon } from '../daemon/index.js';
 import { DaemonClient } from '../daemon/client.js';
+import { ensureDaemonRunning } from '../util/ensure-daemon.js';
 
 export function registerStartCommand(program: Command, ctx: AppContext): void {
   program
@@ -32,21 +33,16 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
       }
 
       let project: Project;
-      if (projects.length === 1) {
-        project = projects[0];
-        console.log(`Using project: ${project.name}`);
-      } else {
-        console.log('Available projects:');
-        projects.forEach((p, i) => console.log(`  ${i + 1}) ${p.name}`));
-        const choice = ask('Select project [1]: ', '1');
-        const idx = parseInt(choice, 10);
-        if (isNaN(idx) || idx < 1 || idx > projects.length) {
-          console.error('Invalid selection.');
-          process.exit(1);
-        }
-        project = projects[idx - 1];
-        console.log(`Selected: ${project.name}`);
+      console.log('Available projects:');
+      projects.forEach((p, i) => console.log(`  ${i + 1}) ${p.name}`));
+      const choice = ask('Select project [1]: ', '1');
+      const idx = parseInt(choice, 10);
+      if (isNaN(idx) || idx < 1 || idx > projects.length) {
+        console.error('Invalid selection.');
+        process.exit(1);
       }
+      project = projects[idx - 1];
+      console.log(`Selected: ${project.name}`);
 
       // --- 2. Agent count ---
       const countStr = ask('Number of agents [4]: ', '4');
@@ -61,71 +57,29 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
       const skipPermissions = /^[yY]/.test(skipAnswer);
 
       // --- 3b. Agent type ---
-      const agentAnswer = (await prompt('Agent type [claude]: ')) || 'claude';
-      const agent = agentAnswer.trim() || 'claude';
+      const defaultAgent = project.agentType || 'claude';
+      const agentAnswer = (await prompt(`Agent type (claude/codex) [${defaultAgent}]: `)) || defaultAgent;
+      const agent = agentAnswer.trim() || defaultAgent;
 
-      // --- 4. Teardown existing sessions ---
-      const lockedClones = poolService.list(project.name).filter(c => c.locked);
+      // Workspace scoping: when running inside cmux, only tear down/reset
+      // clones belonging to THIS workspace so other pools stay intact.
+      const workspaceRef = process.env.CMUX_WORKSPACE_ID || undefined;
 
+      // --- 4. Teardown existing sessions (scoped to current workspace) ---
+      const scopedClones = workspaceRef
+        ? poolService.listByWorkspace(project.name, workspaceRef)
+        : poolService.list(project.name);
+      const lockedClones = scopedClones.filter(c => c.locked);
       if (lockedClones.length > 0) {
         console.log('Tearing down existing sessions...');
-
-        // Group by workspace
-        const byWorkspace = new Map<string, number[]>();
-        for (const clone of lockedClones) {
-          const ws = clone.workspaceId;
-          if (!byWorkspace.has(ws)) byWorkspace.set(ws, []);
-          byWorkspace.get(ws)!.push(clone.cloneIndex);
-        }
-
-        for (const [ws, indexes] of byWorkspace) {
-          if (ws.startsWith('surface:')) {
-            // Direct surface ref from --here launch
-            const surfaceRef = ws.slice('surface:'.length);
-            try {
-              await ctx.cmux.sendKeys(surfaceRef, '\x03');
-              await sleep(200);
-              await ctx.cmux.sendKeys(surfaceRef, '\x03');
-              await sleep(300);
-              await ctx.cmux.closeSurface(surfaceRef);
-            } catch {
-              // Surface may already be gone
-            }
-          } else if (!ws.startsWith('here:') && !ws.startsWith('here-')) {
-            // Real workspace ref — list and close all surfaces
-            try {
-              const panes = await ctx.cmux.listPanes(ws);
-              for (const pane of panes) {
-                await ctx.cmux.sendKeys(pane.id, '\x03');
-                await sleep(200);
-                await ctx.cmux.sendKeys(pane.id, '\x03');
-              }
-              await sleep(500);
-              for (const pane of panes) {
-                await ctx.cmux.closeSurface(pane.id);
-              }
-            } catch {
-              // Workspace may already be gone
-            }
-          }
-          // else: here-* legacy IDs — can't close; just release locks
-
-          // Release all locks in this group
-          for (const cloneIdx of indexes) {
-            poolService.unlock(project.name, cloneIdx);
-            console.log(`  Released agent-${String(cloneIdx).padStart(2, '0')}`);
-          }
-        }
-
-        await sleep(500);
+        await teardownProject(ctx, project.name, poolService, workspaceRef);
         console.log('Teardown complete.');
       }
 
-      // --- 5. Clean stale locks ---
-      await poolService.cleanupStaleLocks(project.name);
-
-      // --- 6. Reset pool — remove old clone dirs, clear DB entries ---
-      const existingClones = poolService.list(project.name);
+      // --- 6. Reset pool — remove old clone dirs, clear DB entries (workspace-scoped) ---
+      const existingClones = workspaceRef
+        ? poolService.listByWorkspace(project.name, workspaceRef)
+        : poolService.list(project.name);
       for (const clone of existingClones) {
         const clonePath = poolService.getClonePath(project.prefix, clone.cloneIndex, ctx.config.dataDir);
         try { rmSync(clonePath, { recursive: true, force: true }); } catch {}
@@ -133,19 +87,21 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
       }
 
       // Also remove any clone dirs on disk not tracked in DB (leftover from
-      // a crashed or interrupted previous run). Each rmSync is individually
-      // wrapped so one failure doesn't skip the rest.
-      const prefix = project.prefix + '-';
-      let entries: ReturnType<typeof readdirSync> = [];
-      try { entries = readdirSync(ctx.config.dataDir, { withFileTypes: true }); } catch {}
-      for (const entry of entries) {
-        if (entry.isDirectory() && entry.name.startsWith(prefix)) {
-          const dirPath = join(ctx.config.dataDir, entry.name);
-          try {
-            rmSync(dirPath, { recursive: true, force: true });
-            console.log(`  Removed orphan dir ${entry.name}`);
-          } catch (e: any) {
-            console.warn(`  Warning: could not remove ${dirPath}: ${e.message}`);
+      // a crashed or interrupted previous run). Skip when workspace-scoped
+      // since orphan dirs may belong to other pools.
+      if (!workspaceRef) {
+        const prefix = project.prefix + '-';
+        let entries: ReturnType<typeof readdirSync> = [];
+        try { entries = readdirSync(ctx.config.dataDir, { withFileTypes: true }); } catch {}
+        for (const entry of entries) {
+          if (entry.isDirectory() && entry.name.startsWith(prefix)) {
+            const dirPath = join(ctx.config.dataDir, entry.name);
+            try {
+              rmSync(dirPath, { recursive: true, force: true });
+              console.log(`  Removed orphan dir ${entry.name}`);
+            } catch (e: any) {
+              console.warn(`  Warning: could not remove ${dirPath}: ${e.message}`);
+            }
           }
         }
       }
@@ -160,19 +116,30 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
         }
       }
 
-      // --- 8. Start daemon (stop existing first) ---
+      // --- 8. Ensure daemon is running (reuse existing if another pool started it) ---
       const socketPath = join(ctx.config.dataDir, 'apd.sock');
       const existingClient = new DaemonClient({ socketPath, timeoutMs: 2000 });
-      if (await existingClient.connect()) {
-        try { await existingClient.request('shutdown'); } catch {}
+      const daemonAlreadyRunning = await existingClient.connect();
+      if (daemonAlreadyRunning) {
         existingClient.close();
-        await sleep(300);
+        console.log(green('Daemon already running.'));
+      } else {
+        const daemonOk = await ensureDaemonRunning(ctx.config.dataDir, ctx.config.toolDir);
+        if (daemonOk) {
+          console.log(green('Daemon started.'));
+        } else {
+          console.warn('Warning: daemon did not start; agents will use polling mode.');
+        }
       }
-      const daemonServer = await startDaemon({
-        dataDir: ctx.config.dataDir,
-        taskStore: ctx.stores.tasks,
-      });
-      console.log(green('Daemon started.'));
+
+      // --- 8b. If codex + OPENAI_API_KEY, register it with codex's auth system ---
+      if (agent === 'codex' && project.envVars?.OPENAI_API_KEY) {
+        spawnSync('codex', ['login', '--with-api-key'], {
+          input: project.envVars.OPENAI_API_KEY,
+          stdio: ['pipe', 'inherit', 'inherit'],
+        });
+        console.log(green('Codex API key configured.'));
+      }
 
       // --- 9. Init clones ---
       console.log(bold(`\nLaunching ${count} agents for '${project.name}'...`));
@@ -194,6 +161,7 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
       console.log(`${count} clones ready.`);
 
       // --- 10. Launch agents in current workspace as splits ---
+      const runnerOpts = { skipPermissions, agent, workspaceRef };
       console.log(`Launching ${count} agents in current workspace...`);
 
       const surfaces: string[] = [];
@@ -203,9 +171,9 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
         const { surfaceRef } = await ctx.cmux.newSplit('right', {});
         surfaces.push(surfaceRef);
         const clonePath = poolService.getClonePath(project.prefix, cloneIndexes[0], ctx.config.dataDir);
-        const cmd = buildRunnerCommand(clonePath, cloneIndexes[0], project, ctx.config.toolDir, { skipPermissions, agent });
+        const cmd = buildRunnerCommand(clonePath, cloneIndexes[0], project, ctx.config.toolDir, runnerOpts);
         await ctx.cmux.send({ surface: surfaceRef }, cmd);
-        poolService.lock(project.name, cloneIndexes[0], `surface:${surfaceRef}`);
+        poolService.lock(project.name, cloneIndexes[0], `surface:${surfaceRef}`, workspaceRef);
         console.log(dim(`  Agent ${String(cloneIndexes[0]).padStart(2, '0')} (top-left)`));
       }
 
@@ -214,9 +182,9 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
         const { surfaceRef } = await ctx.cmux.newSplit('right', { surface: surfaces[0] });
         surfaces.push(surfaceRef);
         const clonePath = poolService.getClonePath(project.prefix, cloneIndexes[1], ctx.config.dataDir);
-        const cmd = buildRunnerCommand(clonePath, cloneIndexes[1], project, ctx.config.toolDir, { skipPermissions, agent });
+        const cmd = buildRunnerCommand(clonePath, cloneIndexes[1], project, ctx.config.toolDir, runnerOpts);
         await ctx.cmux.send({ surface: surfaceRef }, cmd);
-        poolService.lock(project.name, cloneIndexes[1], `surface:${surfaceRef}`);
+        poolService.lock(project.name, cloneIndexes[1], `surface:${surfaceRef}`, workspaceRef);
         console.log(dim(`  Agent ${String(cloneIndexes[1]).padStart(2, '0')} (top-right)`));
       }
 
@@ -225,9 +193,9 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
         const { surfaceRef } = await ctx.cmux.newSplit('down', { surface: surfaces[0] });
         surfaces.push(surfaceRef);
         const clonePath = poolService.getClonePath(project.prefix, cloneIndexes[2], ctx.config.dataDir);
-        const cmd = buildRunnerCommand(clonePath, cloneIndexes[2], project, ctx.config.toolDir, { skipPermissions, agent });
+        const cmd = buildRunnerCommand(clonePath, cloneIndexes[2], project, ctx.config.toolDir, runnerOpts);
         await ctx.cmux.send({ surface: surfaceRef }, cmd);
-        poolService.lock(project.name, cloneIndexes[2], `surface:${surfaceRef}`);
+        poolService.lock(project.name, cloneIndexes[2], `surface:${surfaceRef}`, workspaceRef);
         console.log(dim(`  Agent ${String(cloneIndexes[2]).padStart(2, '0')} (bottom-left)`));
       }
 
@@ -236,9 +204,9 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
         const { surfaceRef } = await ctx.cmux.newSplit('down', { surface: surfaces[1] });
         surfaces.push(surfaceRef);
         const clonePath = poolService.getClonePath(project.prefix, cloneIndexes[3], ctx.config.dataDir);
-        const cmd = buildRunnerCommand(clonePath, cloneIndexes[3], project, ctx.config.toolDir, { skipPermissions, agent });
+        const cmd = buildRunnerCommand(clonePath, cloneIndexes[3], project, ctx.config.toolDir, runnerOpts);
         await ctx.cmux.send({ surface: surfaceRef }, cmd);
-        poolService.lock(project.name, cloneIndexes[3], `surface:${surfaceRef}`);
+        poolService.lock(project.name, cloneIndexes[3], `surface:${surfaceRef}`, workspaceRef);
         console.log(dim(`  Agent ${String(cloneIndexes[3]).padStart(2, '0')} (bottom-right)`));
       }
 
@@ -248,9 +216,9 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
         const { surfaceRef } = await ctx.cmux.newSplit('down', { surface: surfaces[parentIdx] });
         surfaces.push(surfaceRef);
         const clonePath = poolService.getClonePath(project.prefix, cloneIndexes[i], ctx.config.dataDir);
-        const cmd = buildRunnerCommand(clonePath, cloneIndexes[i], project, ctx.config.toolDir, { skipPermissions, agent });
+        const cmd = buildRunnerCommand(clonePath, cloneIndexes[i], project, ctx.config.toolDir, runnerOpts);
         await ctx.cmux.send({ surface: surfaceRef }, cmd);
-        poolService.lock(project.name, cloneIndexes[i], `surface:${surfaceRef}`);
+        poolService.lock(project.name, cloneIndexes[i], `surface:${surfaceRef}`, workspaceRef);
         console.log(dim(`  Agent ${String(cloneIndexes[i]).padStart(2, '0')} (extra-${i + 1})`));
       }
 
@@ -290,26 +258,32 @@ Key commands:
 Run /dispatch for the full orchestrator protocol with prompt-writing guidelines.
 Ready to receive tasks.`;
 
-      const claudeArgs = ['claude'];
-      if (skipPermissions) claudeArgs.push('--dangerously-skip-permissions');
-      claudeArgs.push(startupMsg);
+      const driverBin = agent === 'claude' ? 'ccc' : agent;
+      const driverArgs = [driverBin];
+      if (agent === 'claude') {
+        if (skipPermissions) driverArgs.push('--dangerously-skip-permissions');
+        driverArgs.push(startupMsg);
+      } else if (agent === 'codex') {
+        // Interactive mode for the driver (not exec, which is one-shot)
+        if (skipPermissions) driverArgs.push('--full-auto');
+        driverArgs.push(startupMsg);
+      }
 
       console.log(yellow(`\nStarting driver in ${project.source}...`));
 
       // Use spawnSync to block the event loop — prevents Bun's async
       // internals from consuming stdin bytes meant for Claude
-      const result = spawnSync(claudeArgs[0], claudeArgs.slice(1), {
+      const driverEnv = { ...process.env, ...(project.envVars ?? {}) };
+      const result = spawnSync(driverArgs[0], driverArgs.slice(1), {
         cwd: project.source,
         stdio: 'inherit',
+        env: driverEnv,
       });
 
       // Clean up installed commands from source repo
       for (const dest of installedCommands) {
         try { rmSync(dest); } catch { /* best-effort */ }
       }
-
-      // Stop daemon on exit
-      daemonServer.stop();
 
       process.exit(result.status ?? 0);
     });

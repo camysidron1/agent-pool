@@ -30,7 +30,7 @@ describe('buildRunnerCommand', () => {
 
   test('queue mode produces agent-pool run-agent command', () => {
     const cmd = buildRunnerCommand(clonePath, 1, project, toolDir, {});
-    expect(cmd).toBe(`cd ${clonePath} && agent-pool run-agent 1 myproj`);
+    expect(cmd).toBe(`cd ${clonePath} && agent-pool -p myproj run-agent 1 --push`);
   });
 
   test('queue mode with env and skipPermissions', () => {
@@ -47,14 +47,14 @@ describe('buildRunnerCommand', () => {
       agent: 'codex',
     });
     expect(cmd).toContain('--agent codex');
-    expect(cmd).toContain('agent-pool run-agent');
+    expect(cmd).toContain('agent-pool -p myproj run-agent');
   });
 
   test('no-queue mode without agent produces claude command', () => {
     const cmd = buildRunnerCommand(clonePath, 1, project, toolDir, {
       queue: false,
     });
-    expect(cmd).toBe(`cd ${clonePath} && claude`);
+    expect(cmd).toBe(`cd ${clonePath} && ccc`);
   });
 
   test('no-queue mode with skipPermissions adds flag', () => {
@@ -62,7 +62,7 @@ describe('buildRunnerCommand', () => {
       queue: false,
       skipPermissions: true,
     });
-    expect(cmd).toBe(`cd ${clonePath} && claude --dangerously-skip-permissions`);
+    expect(cmd).toBe(`cd ${clonePath} && ccc --dangerously-skip-permissions`);
   });
 
   test('no-queue mode with agent codex produces codex exec --full-auto', () => {
@@ -78,7 +78,7 @@ describe('buildRunnerCommand', () => {
       queue: false,
       agent: 'claude',
     });
-    expect(cmd).toBe(`cd ${clonePath} && claude`);
+    expect(cmd).toBe(`cd ${clonePath} && ccc`);
   });
 
   test('no-queue mode with agent claude and skipPermissions', () => {
@@ -87,7 +87,7 @@ describe('buildRunnerCommand', () => {
       agent: 'claude',
       skipPermissions: true,
     });
-    expect(cmd).toBe(`cd ${clonePath} && claude --dangerously-skip-permissions`);
+    expect(cmd).toBe(`cd ${clonePath} && ccc --dangerously-skip-permissions`);
   });
 
   test('queue mode without agent omits --agent flag', () => {
@@ -100,8 +100,13 @@ describe('buildRunnerCommand', () => {
     expect(cmd).toContain('--push');
   });
 
-  test('omits --push flag when not set', () => {
+  test('includes --push by default in queue mode', () => {
     const cmd = buildRunnerCommand(clonePath, 1, project, toolDir, {});
+    expect(cmd).toContain('--push');
+  });
+
+  test('omits --push when push is explicitly false', () => {
+    const cmd = buildRunnerCommand(clonePath, 1, project, toolDir, { push: false });
     expect(cmd).not.toContain('--push');
   });
 
@@ -116,6 +121,6 @@ describe('buildRunnerCommand', () => {
     expect(cmd).toContain('--env production');
     expect(cmd).toContain('--agent codex');
     expect(cmd).toContain('--push');
-    expect(cmd).toContain('agent-pool run-agent');
+    expect(cmd).toContain('agent-pool -p myproj run-agent');
   });
 });

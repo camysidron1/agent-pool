@@ -17,6 +17,7 @@ interface ProjectRow {
   workflow_auto_merge: number | null;
   workflow_merge_method: string | null;
   agent_type: string | null;
+  env_vars: string | null;
 }
 
 function rowToProject(row: ProjectRow): Project {
@@ -36,6 +37,7 @@ function rowToProject(row: ProjectRow): Project {
     workflowAutoMerge: row.workflow_auto_merge === null ? null : row.workflow_auto_merge === 1,
     workflowMergeMethod: row.workflow_merge_method,
     agentType: row.agent_type,
+    envVars: row.env_vars ? JSON.parse(row.env_vars) : null,
   };
 }
 
@@ -103,6 +105,7 @@ export class SqliteProjectStore implements ProjectStore {
       workflowAutoMerge: 'workflow_auto_merge',
       workflowMergeMethod: 'workflow_merge_method',
       agentType: 'agent_type',
+      envVars: 'env_vars',
     };
 
     const sets: string[] = [];
@@ -116,6 +119,8 @@ export class SqliteProjectStore implements ProjectStore {
         values.push(value ? 1 : 0);
       } else if (key === 'workflowAutoMerge') {
         values.push(value === null ? null : value ? 1 : 0);
+      } else if (key === 'envVars') {
+        values.push(value === null ? null : JSON.stringify(value));
       } else {
         values.push(value);
       }

@@ -1,15 +1,27 @@
 import type { CmuxClient, CmuxPane } from './interfaces.js';
 
+const CMUX_TIMEOUT_MS = 10_000;
+
 async function run(args: string[]): Promise<string> {
   const proc = Bun.spawn(args, {
     stdout: 'pipe',
     stderr: 'pipe',
   });
-  const [stdout, stderr] = await Promise.all([
+
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => {
+      proc.kill('SIGKILL');
+      reject(new Error(`cmux command timed out after ${CMUX_TIMEOUT_MS}ms: ${args.join(' ')}`));
+    }, CMUX_TIMEOUT_MS),
+  );
+
+  const result = Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
+    proc.exited,
   ]);
-  const exitCode = await proc.exited;
+
+  const [stdout, stderr, exitCode] = await Promise.race([result, timeout]);
   if (exitCode !== 0) {
     throw new Error(`cmux command failed (exit ${exitCode}): ${args.join(' ')}\n${stderr}`);
   }

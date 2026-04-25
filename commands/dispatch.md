@@ -209,39 +209,132 @@ Use `-p <project>` for non-default projects.
 
 ## Jira Integration
 
-**Substantive engineering work gets a Jira ticket.** Create tickets for real product/code changes. Do NOT create tickets for housekeeping (merge conflicts, PR comments, rebasing, CI fixes).
+**All feature work and tech debt gets a Jira ticket.** Agents own the full lifecycle: create, assign to sprint, update status, comment with PR link. The orchestrator should include Jira instructions in every task prompt for qualifying work.
 
-### Workflow
+### What gets a ticket vs. what doesn't
 
-1. **Search first** — check if a ticket exists:
-   ```bash
-   acli jira workitem search --jql 'project = EN AND summary ~ "keyword" AND status != Done' --limit 10
-   ```
-2. **If ticket exists** — use it. Transition to "In Progress" if not already.
-3. **If no ticket** — create one with detail, assign to @me, move to In Progress:
-   ```bash
-   acli jira workitem create --project "EN" --type "Task" --summary "Title" --description "..." --assignee "@me" --label "agent-pool"
-   acli jira workitem transition --key "EN-XXX" --status "In Progress" --yes
-   ```
-4. **Add to current sprint** — tickets being worked on MUST be in the active sprint:
-   ```bash
-   # Find the active sprint ID (ENG board = 67)
-   acli jira board list-sprints --id 67 --state active
-   # Add ticket to sprint via Jira REST API (Basic auth with Atlassian API token)
-   ATLASSIAN_TOKEN="ATATT3xFfGF01kqNYRxdafjhtL-StnryI-WC5UZR-ItnsTZ83Uc5X3nk8GIQ9GDp5W9zFmPnx_rqBoFy2IP-qiPfQeO25IL4lgptaheijMj99f0x6iKxA6csQrhlsdUc6A17YBFWuehe0pj4zw4Q735V1Av7RLoMK-BOo07ssXiVs7Pq9go0DZ4=01CA21C2"
-   curl -s -u "cam@nebari.ai:$ATLASSIAN_TOKEN" \
-     -X POST -H "Content-Type: application/json" \
-     "https://nebari-ai.atlassian.net/rest/agile/1.0/sprint/<SPRINT_ID>/issue" \
-     -d '{"issues":["ENG-XXX"]}'
-   ```
-5. **Include ticket key in prompt**: `agent-pool add "EN-123: Fix the login bug. ..."`
-6. **After completion**: transition to "Done" or add comment about PR
+| Gets a Jira ticket | Does NOT get a ticket |
+|---|---|
+| New features, capabilities | Merge conflict resolution |
+| Bug fixes | Rebasing / cherry-picking |
+| Tech debt / refactors | PR comment responses |
+| Schema / migration changes | CI fixes (lint, type errors) |
+| Security fixes | Research-only tasks |
+| Performance improvements | One-line config changes |
+
+### Orchestrator responsibility
+
+When dispatching a task that qualifies for a Jira ticket, the orchestrator MUST:
+
+1. **Search for an existing ticket** before creating a new one
+2. **Include Jira instructions in the agent prompt** — tell the agent the ticket key if one exists, or instruct them to create one
+3. **Prefix the task prompt** with the ticket key: `agent-pool add "ENG-XXX: Fix the login bug. ..."`
+
+### Agent Jira workflow
+
+Include these instructions in agent prompts for qualifying work. Agents should follow the `jira-extreme` skill patterns.
+
+#### 1. Search for existing ticket
+```bash
+acli jira workitem search --jql 'project = ENG AND summary ~ "keyword" AND status != Done' --limit 10
+```
+
+#### 2. Create ticket (if none exists)
+```bash
+acli jira workitem create \
+  --project ENG \
+  --type "Task|Bug|Story" \
+  --summary "Short imperative summary (under 80 chars)" \
+  --description "$(cat <<'EOF'
+## Goal
+<1-2 sentences: what this achieves and why>
+
+## Scope
+<bullet list of what is and isn't included>
+
+## Acceptance Criteria
+- [ ] <measurable outcome>
+EOF
+)" \
+  --assignee @me
+```
+
+Ticket types: `Bug` for bug fixes, `Task` for infra/tooling/tech debt, `Story` for features.
+
+#### 3. Assign to active sprint (MANDATORY)
+```bash
+# Get the active sprint (ENG board = 67)
+SPRINT_JSON=$(acli jira board list-sprints --id 67 --state active --json)
+ACTIVE_SPRINT_ID=$(echo "$SPRINT_JSON" | \
+  python3 -c "import sys,json; sprints=json.load(sys.stdin).get('sprints',[]); print(sprints[0]['id'] if sprints else '')")
+
+if [[ -n "$ACTIVE_SPRINT_ID" ]]; then
+  SPRINT_NAME=$(echo "$SPRINT_JSON" | \
+    python3 -c "import sys,json; sprints=json.load(sys.stdin).get('sprints',[]); print(sprints[0].get('name','') if sprints else '')")
+
+  # Get Jira credentials from 1Password
+  JIRA_EMAIL=$(op read "op://Employee/jira-extreme/jira/email" 2>/dev/null)
+  JIRA_API_TOKEN=$(op read "op://Employee/jira-extreme/jira/pat" 2>/dev/null)
+
+  if [[ -n "$JIRA_API_TOKEN" && -n "$JIRA_EMAIL" ]]; then
+    JIRA_AUTH=$(echo -n "${JIRA_EMAIL}:${JIRA_API_TOKEN}" | base64 -w 0)
+    curl -s -o /dev/null -w '%{http_code}' -X POST \
+      "https://nebari-ai.atlassian.net/rest/agile/1.0/sprint/${ACTIVE_SPRINT_ID}/issue" \
+      -H "Authorization: Basic ${JIRA_AUTH}" \
+      -H "Content-Type: application/json" \
+      -d "{\"issues\": [\"${TICKET_KEY}\"]}"
+  fi
+fi
+```
+
+#### 4. Transition status through lifecycle
+```bash
+# When starting work
+acli jira workitem transition --key ENG-XXX --status "In Progress" --yes
+
+# When PR is opened
+acli jira workitem transition --key ENG-XXX --status "WAITING-PR-REVIEW" --yes
+
+# After merge — automatic via GitHub integration, no action needed
+```
+
+#### 5. Comment on ticket with progress and PR link
+```bash
+# After pushing code
+acli jira workitem comment create --key ENG-XXX --body "$(cat <<'EOF'
+## Progress Update
+**What changed**
+- <bullet per logical change>
+**Why**
+<reasoning/context>
+EOF
+)"
+
+# When PR is opened
+acli jira workitem comment create --key ENG-XXX --body "PR open for review: {pr-url}"
+```
+
+### Prompt snippet for agents
+
+When dispatching qualifying tasks, append this to the agent prompt:
+
+```
+### Jira
+- Search for existing ticket: `acli jira workitem search --jql 'project = ENG AND summary ~ "KEYWORD"' --limit 5`
+- If none found, create one (type: Task/Bug/Story), assign to @me, and add to active sprint
+  (board 67, credentials from `op://Employee/jira-extreme/jira/*`)
+- Prefix all commits with the ticket key: `ENG-XXX: <type>(<scope>): <description>`
+- Transition to "In Progress" when starting, "WAITING-PR-REVIEW" when PR is opened
+- Comment on the ticket with PR link when done
+- See `agents/skills/jira-extreme/SKILL.md` for full workflow details
+```
 
 ### Defaults
-- **Project**: `EN` — override with user instruction
+- **Project**: `ENG`
 - **Type**: `Task` (use `Bug` for bug fixes, `Story` for features)
 - **Assignee**: `@me` (Cam)
-- **Label**: `agent-pool`
+- **Board ID**: `67` (Engineering)
+- **Credentials**: 1Password `op://Employee/jira-extreme/jira/email` and `op://Employee/jira-extreme/jira/pat`
 
 ---
 

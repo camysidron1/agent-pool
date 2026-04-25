@@ -1,7 +1,7 @@
 // Claude CLI adapter — implements AgentAdapter for the `claude` CLI
 
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
-import { join, dirname } from 'path';
+import { join } from 'path';
 import type { AgentAdapter, AgentContext } from './agent.js';
 import type { GitClient } from '../git/interfaces.js';
 import {
@@ -55,22 +55,19 @@ export class ClaudeAdapter implements AgentAdapter {
     // 1. Checkout fresh branch from origin/{branch}
     await checkoutTaskBranch(this.git, ctx);
 
-    // 2. Install hooks into .claude/settings.json
-    this.installHooks(ctx);
-
-    // 3. Setup docs directories
+    // 2. Setup docs directories
     setupDocs(ctx);
 
-    // 4. Install /finish command
+    // 3. Install /finish command
     this.installFinishCommand(ctx);
 
-    // 5. Install /update and /dispatch slash commands
+    // 4. Install /update and /dispatch slash commands
     this.installSlashCommands(ctx);
 
-    // 6. Append doc rules to CLAUDE.md
+    // 5. Append doc rules to CLAUDE.md
     this.appendDocRules(ctx);
 
-    // 7. Update .gitignore
+    // 6. Update .gitignore
     updateGitignore(ctx, ['agent-docs', 'shared-docs', 'CLAUDE.md', '.claude/commands/finish.md', '.claude/commands/update.md', '.claude/commands/dispatch.md']);
   }
 
@@ -78,13 +75,14 @@ export class ClaudeAdapter implements AgentAdapter {
 
   async run(ctx: AgentContext): Promise<number> {
     const prompt = this.buildPrompt(ctx);
-    const claudeArgs = ['claude', prompt];
+    const claudeArgs = ['ccc', prompt];
     if (ctx.skipPermissions) {
       claudeArgs.push('--dangerously-skip-permissions');
     }
 
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
+      ...(ctx.envVars ?? {}),
       AGENT_POOL_TASK_ID: ctx.taskId,
       AGENT_POOL_PROJECT: ctx.projectName,
       AGENT_POOL_DATA_DIR: ctx.dataDir,
@@ -137,63 +135,6 @@ export class ClaudeAdapter implements AgentAdapter {
 
   buildPrompt(ctx: AgentContext): string {
     return buildPromptWithContext(ctx);
-  }
-
-  private installHooks(ctx: AgentContext): void {
-    const settingsFile = join(ctx.clonePath, '.claude', 'settings.json');
-    mkdirSync(dirname(settingsFile), { recursive: true });
-
-    const mailboxHook = {
-      type: 'command',
-      command: `${ctx.toolDir}/hooks/mailbox-hook.sh`,
-      timeout: 5000,
-    };
-    const approvalHook = {
-      type: 'command',
-      command: `${ctx.toolDir}/hooks/approval-hook.sh`,
-      timeout: 310000,
-    };
-
-    const hooks = ctx.skipPermissions
-      ? [mailboxHook]
-      : [mailboxHook, approvalHook];
-
-    const hookEntry = { hooks };
-
-    let settings: Record<string, unknown> = {};
-    if (existsSync(settingsFile)) {
-      try {
-        settings = JSON.parse(readFileSync(settingsFile, 'utf-8'));
-      } catch {
-        // corrupted file, start fresh
-      }
-    }
-
-    // Ensure hooks structure exists
-    if (!settings.hooks || typeof settings.hooks !== 'object') {
-      settings.hooks = {};
-    }
-    const hooksObj = settings.hooks as Record<string, unknown[]>;
-    if (!Array.isArray(hooksObj.PreToolUse)) {
-      hooksObj.PreToolUse = [];
-    }
-
-    // Remove existing agent-pool hooks to avoid duplicates
-    hooksObj.PreToolUse = hooksObj.PreToolUse.filter((entry: unknown) => {
-      const e = entry as { hooks?: Array<{ command?: string }> };
-      if (!e.hooks) return true;
-      return !e.hooks.some(
-        (h) =>
-          h.command &&
-          (h.command.includes('approval-hook.sh') ||
-            h.command.includes('mailbox-hook.sh')),
-      );
-    });
-
-    // Add our hooks
-    hooksObj.PreToolUse.push(hookEntry);
-
-    writeFileSync(settingsFile, JSON.stringify(settings, null, 2));
   }
 
   private installFinishCommand(ctx: AgentContext): void {

@@ -20,6 +20,7 @@ export interface Project {
   workflowAutoMerge: boolean | null;
   workflowMergeMethod: string | null;
   agentType: string | null;
+  envVars: Record<string, string> | null;
 }
 
 export interface ProjectInput {
@@ -36,6 +37,7 @@ export interface Clone {
   cloneIndex: number;
   locked: boolean;
   workspaceId: string;
+  workspaceRef: string;
   lockedAt: string | null;
   branch: string;
 }
@@ -57,6 +59,8 @@ export interface Task {
   result: string | null;
   pipelineId: string | null;
   pipelineStepId: string | null;
+  workspaceRef: string;
+  branch: string | null;
 }
 
 export interface TaskInput {
@@ -70,6 +74,8 @@ export interface TaskInput {
   retryStrategy?: RetryStrategy;
   pipelineId?: string;
   pipelineStepId?: string;
+  workspaceRef?: string;
+  branch?: string;
 }
 
 export type PipelineStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled';
@@ -109,10 +115,11 @@ export interface ProjectStore {
 
 export interface CloneStore {
   getAll(projectName: string): Clone[];
+  getByWorkspace(projectName: string, workspaceRef: string): Clone[];
   get(projectName: string, index: number): Clone | null;
   add(projectName: string, index: number, branch: string): void;
   remove(projectName: string, index: number): void;
-  lock(projectName: string, index: number, workspaceId: string): void;
+  lock(projectName: string, index: number, workspaceId: string, workspaceRef?: string): void;
   unlock(projectName: string, index: number): void;
   findFree(projectName: string): Clone | null;
   nextIndex(projectName: string): number;
@@ -134,7 +141,7 @@ export interface TaskStore {
   /** Read-only peek: return the next claimable task without mutating state. Same selection rules as claim. */
   peek(projectName: string): Task | null;
   /** Atomic claim: find first eligible pending task, mark in_progress. Priority DESC, then created_at ASC. */
-  claim(projectName: string, agentId: string): Task | null;
+  claim(projectName: string, agentId: string, workspaceRef?: string): Task | null;
   mark(id: string, status: TaskStatus, fields?: Partial<Task>): void;
   /** Update non-status fields on a task. */
   updateFields(id: string, fields: Partial<Pick<Task, 'priority' | 'timeoutMinutes' | 'retryMax' | 'retryStrategy' | 'result' | 'prompt' | 'retryCount'>>): void;

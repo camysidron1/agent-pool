@@ -16,40 +16,17 @@ Code comments and inline docs in source files are fine — this rule is about st
 
 ## CLI Entrypoint
 
-`agent-pool` now runs v2 (TypeScript/Bun). The v1 bash CLI is available as `agent-pool-v1`.
+`agent-pool` runs v2 (TypeScript/Bun), delegating to `v2/src/index.ts` via `bun`.
 
-- v2 uses SQLite at `~/.agent-pool/data/agent-pool.db`
-- Run `agent-pool migrate` to import v1 JSON data into SQLite
-- The v1 runner (`agent-runner.sh`) still uses v1 JSON files directly
+- SQLite database at `~/.agent-pool/data/agent-pool.db`
 
 ## Project Structure
 
 ```
 agent-pool              # v2 wrapper — delegates to v2/src/index.ts via bun
-agent-pool-v1           # v1 bash CLI (fallback)
-agent-runner.sh         # Task runner daemon (polls tasks, launches claude)
-finish-task.sh          # Marks task status from inside a Claude session
-lib/
-  project.sh            # Project config: resolve, read/write, field accessors, auto_migrate
-  pool.sh               # Clone pool: ensure, read/write, lock/unlock, create, stale cleanup
-  tasks.sh              # Task queue: ensure, read/write, lock/unlock
-  cmd/
-    approvals.sh        # cmd_approvals, cmd_approve, cmd_deny, cmd_watch
-    clone.sh            # cmd_refresh, cmd_release, cmd_destroy
-    docs.sh             # cmd_docs
-    help.sh             # cmd_help
-    launch.sh           # cmd_init, cmd_launch, launch_grid, launch_here_all
-    project.sh          # cmd_project (add/list/remove/default/tracking/workflow)
-    restart.sh          # cmd_restart
-    start.sh            # cmd_start (interactive guided setup)
-    status.sh           # cmd_status
-    tasks.sh            # cmd_add, cmd_tasks, cmd_unblock, cmd_backlog, cmd_activate, cmd_set_status
-hooks/
-  approval-hook.sh      # PreToolUse hook for permission approval queue
-tests/
-  helpers.sh            # Test infra: setup/teardown, assertions, run_test
-  test_*.sh             # Per-module test files
-  run-all.sh            # Test runner: ./tests/run-all.sh [test_foo.sh]
+v2/
+  src/                  # TypeScript source (commands, services, stores, adapters, runner)
+  tests/                # Unit and e2e tests — run with `cd v2 && bun test`
 ```
 
 ## Task Dependencies
@@ -91,27 +68,17 @@ Agents work on clones, not the main repo. **Every task that produces code change
 - For parallel tasks that may conflict, sequence the PRs or have the later agent rebase
 - The `/finish` command already includes PR + auto-merge guidance — agents just need to follow it
 
-## Key Conventions
-
-- **No shebang in lib/ files** — they are sourced, not executed directly
-- **Source order matters**: `lib/project.sh` → `lib/pool.sh` → `lib/tasks.sh` → then `lib/cmd/*.sh` (any order)
-- **Globals**: `TOOL_DIR`, `DATA_DIR`, `PROJECTS_JSON`, `RUNNER_SCRIPT`, `PROJECT` are set by the main `agent-pool` script before sourcing
-- **No top-level code in lib files** — each file only defines functions
-- **JSON handling**: embedded Python one-liners via `/usr/bin/python3`
-
 ## How to Add a New Command
 
-1. Create `lib/cmd/foo.sh` with a `cmd_foo()` function
-2. Add a `foo) cmd_foo "$@" ;;` case entry in the main `agent-pool` dispatch block
-3. Add the command to `cmd_help()` in `lib/cmd/help.sh`
-4. Add tests in `tests/test_foo.sh`
+1. Create `v2/src/commands/foo.ts` with a `registerFooCommand()` function
+2. Register it in `v2/src/app.ts`
+3. Add the command to `registerHelpCommand()` in `v2/src/commands/help.ts`
+4. Add tests in `v2/tests/`
 
 ## Running Tests
 
 ```bash
-./tests/run-all.sh                  # Run all tests (v1 bash)
-./tests/run-all.sh test_tasks.sh    # Run specific test file (v1)
-cd v2 && bun test                   # Run all v2 tests (236 tests)
+cd v2 && bun test                   # Run all v2 tests
 ```
 
 ## Project Memory & Documentation

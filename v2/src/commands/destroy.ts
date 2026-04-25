@@ -8,15 +8,20 @@ import { bold, red } from '../util/colors.js';
 export function registerDestroyCommand(program: Command, ctx: AppContext): void {
   program
     .command('destroy')
-    .description('Destroy all clones for a project')
-    .action(() => {
+    .description('Destroy clones (current workspace only, or --all)')
+    .option('--all', 'Destroy clones in all workspaces')
+    .action(async (opts: { all?: boolean }) => {
       const projectService = new ProjectService(ctx.stores.projects);
       const poolService = new PoolService(ctx.stores.clones, ctx.git, ctx.cmux);
 
       const globalOpts = program.opts();
       const project = projectService.resolve(globalOpts.project);
 
-      const clones = poolService.list(project.name);
+      const workspaceRef = opts.all ? undefined : (process.env.CMUX_WORKSPACE_ID || undefined);
+      const clones = workspaceRef
+        ? poolService.listByWorkspace(project.name, workspaceRef)
+        : poolService.list(project.name);
+
       if (clones.length === 0) {
         console.log('No clones to destroy.');
         return;

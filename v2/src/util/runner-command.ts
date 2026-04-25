@@ -8,6 +8,7 @@ export interface RunnerCommandOpts {
   queue?: boolean;
   agent?: string;
   push?: boolean;
+  workspaceRef?: string;
 }
 
 export function buildRunnerCommand(
@@ -23,11 +24,12 @@ export function buildRunnerCommand(
       return `cd ${clonePath} && codex exec --full-auto`;
     }
     const flags = opts.skipPermissions ? ' --dangerously-skip-permissions' : '';
-    return `cd ${clonePath} && claude${flags}`;
+    return `cd ${clonePath} && ccc${flags}`;
   }
   const envFlag = opts.env ? ` --env ${opts.env}` : '';
   const skipFlag = opts.skipPermissions ? ' --skip-permissions' : '';
   const agentFlag = opts.agent ? ` --agent ${opts.agent}` : '';
-  const pushFlag = opts.push ? ' --push' : '';
-  return `cd ${clonePath} && agent-pool run-agent ${index} ${project.name}${skipFlag}${envFlag}${agentFlag}${pushFlag}`;
+  const pushFlag = opts.push === false ? '' : ' --push';
+  const wsFlag = opts.workspaceRef ? ` --workspace-ref ${opts.workspaceRef}` : '';
+  return `cd ${clonePath} && agent-pool -p ${project.name} run-agent ${index}${skipFlag}${envFlag}${agentFlag}${pushFlag}${wsFlag}`;
 }

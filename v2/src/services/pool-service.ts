@@ -38,8 +38,12 @@ export class PoolService {
     return this.store.getAll(projectName);
   }
 
-  lock(projectName: string, index: number, workspaceId: string): void {
-    this.store.lock(projectName, index, workspaceId);
+  lock(projectName: string, index: number, workspaceId: string, workspaceRef?: string): void {
+    this.store.lock(projectName, index, workspaceId, workspaceRef);
+  }
+
+  listByWorkspace(projectName: string, workspaceRef: string): Clone[] {
+    return this.store.getByWorkspace(projectName, workspaceRef);
   }
 
   unlock(projectName: string, index: number): void {
@@ -56,7 +60,7 @@ export class PoolService {
     const activeSet = new Set(activeWorkspaces);
 
     for (const clone of clones) {
-      if (clone.locked && clone.workspaceId.startsWith('workspace:')) {
+      if (clone.locked && clone.workspaceId?.startsWith('workspace:')) {
         if (!activeSet.has(clone.workspaceId)) {
           this.store.unlock(projectName, clone.cloneIndex);
         }

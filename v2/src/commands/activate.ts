@@ -1,6 +1,7 @@
 import type { Command } from 'commander';
 import type { AppContext } from '../container.js';
 import { TaskService } from '../services/task-service.js';
+import { notifyDaemon } from '../util/notify-daemon.js';
 
 export function registerActivateCommand(program: Command, ctx: AppContext): void {
   program
@@ -12,6 +13,7 @@ export function registerActivateCommand(program: Command, ctx: AppContext): void
       try {
         taskService.activate(taskId);
         console.log(`Activated task ${taskId}`);
+        notifyDaemon(ctx.config.dataDir);
       } catch (err: any) {
         console.error(`Error: ${err.message}`);
         process.exit(1);

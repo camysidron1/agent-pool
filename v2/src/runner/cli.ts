@@ -40,7 +40,7 @@ if (!project) {
 }
 
 const agentType = resolveAgentType(values.agent, project.agentType);
-const adapter = createAdapter(agentType, ctx.git);
+const adapter = createAdapter(agentType, ctx.git, { taskStore: ctx.stores.tasks });
 
 const runner = new AgentRunner(ctx, adapter, {
   cloneIndex: index,

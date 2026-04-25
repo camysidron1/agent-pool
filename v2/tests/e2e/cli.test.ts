@@ -2,13 +2,17 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { createV1Fixtures } from '../fixtures/v1-data.js';
 
 let dataDir: string;
 
+/** Extract task ID from "Added task <id> (...)" output */
+function extractTaskId(stdout: string): string | undefined {
+  return stdout.match(/Added task (\S+)/)?.[1];
+}
+
 async function run(...args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const proc = Bun.spawn(['bun', 'run', join(__dirname, '../../src/index.ts'), ...args], {
-    env: { ...process.env, AGENT_POOL_DATA_DIR: dataDir, NO_COLOR: '1' },
+    env: { ...process.env, AGENT_POOL_DATA_DIR: dataDir, NO_COLOR: '1', CMUX_WORKSPACE_ID: '' },
     stdout: 'pipe',
     stderr: 'pipe',
   });
@@ -79,7 +83,7 @@ describe('CLI e2e', () => {
 
     const r1 = await run('add', 'Build the widget');
     expect(r1.exitCode).toBe(0);
-    expect(r1.stdout).toMatch(/Added task t-\d+-\d+ \(pending\)/);
+    expect(r1.stdout).toMatch(/Added task [a-z]+-[a-z]+-[a-z]+\S* \(pending\)/);
 
     const r2 = await run('tasks');
     expect(r2.exitCode).toBe(0);
@@ -93,7 +97,7 @@ describe('CLI e2e', () => {
     await run('project', 'add', 'depproj', '--source', source);
 
     const r1 = await run('add', 'First task');
-    const taskId = r1.stdout.match(/t-\d+-\d+/)?.[0];
+    const taskId = extractTaskId(r1.stdout);
     expect(taskId).toBeDefined();
 
     const r2 = await run('add', '--depends-on', taskId!, 'Second task');
@@ -120,7 +124,7 @@ describe('CLI e2e', () => {
     await run('project', 'add', 'ubproj', '--source', source);
 
     const r1 = await run('add', 'Block me');
-    const taskId = r1.stdout.match(/t-\d+-\d+/)?.[0]!;
+    const taskId = extractTaskId(r1.stdout)!;
 
     await run('set-status', taskId, 'blocked');
     const r2 = await run('unblock', taskId);
@@ -137,7 +141,7 @@ describe('CLI e2e', () => {
     await run('project', 'add', 'blproj', '--source', source);
 
     const r1 = await run('add', 'Backlog me');
-    const taskId = r1.stdout.match(/t-\d+-\d+/)?.[0]!;
+    const taskId = extractTaskId(r1.stdout)!;
 
     await run('backlog', taskId);
     let r = await run('tasks');
@@ -154,7 +158,7 @@ describe('CLI e2e', () => {
     await run('project', 'add', 'ssproj', '--source', source);
 
     const r1 = await run('add', 'Status task');
-    const taskId = r1.stdout.match(/t-\d+-\d+/)?.[0]!;
+    const taskId = extractTaskId(r1.stdout)!;
 
     await run('set-status', taskId, 'completed');
     const r = await run('tasks');
@@ -309,27 +313,6 @@ describe('CLI e2e', () => {
     expect(r.stdout).toContain('Important lesson here');
   });
 
-  test('migrate imports v1 fixture data', async () => {
-    createV1Fixtures(dataDir, {
-      projectCount: 1,
-      tasksPerProject: 2,
-      clonesPerProject: 2,
-    });
-
-    const r = await run('migrate');
-    expect(r.exitCode).toBe(0);
-    expect(r.stdout).toContain('Migration complete');
-    expect(r.stdout).toContain('Projects:     1');
-    expect(r.stdout).toContain('Tasks:        2');
-    expect(r.stdout).toContain('Clones:       2');
-
-    // Verify migrated tasks show up in tasks list
-    const r2 = await run('tasks');
-    expect(r2.exitCode).toBe(0);
-    expect(r2.stdout).toContain('Task 0 for myproject');
-    expect(r2.stdout).toContain('Task 1 for myproject');
-  });
-
   test('help shows key command names', async () => {
     const r = await run('help');
     expect(r.exitCode).toBe(0);
@@ -338,7 +321,6 @@ describe('CLI e2e', () => {
     expect(r.stdout).toContain('tasks');
     expect(r.stdout).toContain('status');
     expect(r.stdout).toContain('project');
-    expect(r.stdout).toContain('migrate');
     expect(r.stdout).toContain('docs');
     expect(r.stdout).toContain('init');
     expect(r.stdout).toContain('launch');
@@ -360,7 +342,7 @@ describe('CLI e2e', () => {
     expect(r2.exitCode).toBe(0);
     expect(r2.stdout).toContain('pending');
     // The task should contain review-related prompt text
-    expect(r2.stdout).toMatch(/t-\d+-\d+/);
+    expect(r2.stdout).toMatch(/[a-z]+-[a-z]+-[a-z]+/);
 
     rmSync(source, { recursive: true, force: true });
   });

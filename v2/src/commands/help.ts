@@ -20,15 +20,17 @@ export function registerHelpCommand(program: Command, _ctx: AppContext): void {
       console.log('  set-status <id> <status> Set task status directly');
       console.log('  status                   Show project status overview');
       console.log('  project <subcommand>     Manage projects');
-      console.log('  migrate                  Migrate from v1 data');
       console.log('  docs                     Open documentation');
       console.log('  init                     Initialize clone pool');
       console.log('  launch                   Launch agents');
       console.log('  start                    Interactive guided setup');
+      console.log('  initiate                 Bootstrap a new project from scratch');
+      console.log('  stop                     Gracefully stop all agents');
       console.log('  refresh [index]          Refresh clone(s)');
       console.log('  release [index]          Release clone(s)');
       console.log('  destroy [index]          Destroy clone(s)');
       console.log('  restart [index]          Restart agent(s)');
+      console.log('  scale up|down [N]        Add or remove agents');
       console.log('  logs [task-id]            View task execution logs');
       console.log('  review [options]          Dispatch a review agent');
       console.log('  daemon <subcommand>      Manage the daemon');

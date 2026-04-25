@@ -14,6 +14,7 @@ export function registerInitCommand(program: Command, ctx: AppContext): void {
     .option('--env <name>', 'Environment name')
     .option('--skip-permissions', 'Skip permission prompts')
     .option('--no-queue', 'Run without task queue')
+    .option('--no-push', 'Disable daemon push mode (use polling)')
     .option('--no-driver', 'Skip driver pane')
     .action(async (opts: {
       count: string;
@@ -22,6 +23,7 @@ export function registerInitCommand(program: Command, ctx: AppContext): void {
       env?: string;
       skipPermissions?: boolean;
       queue?: boolean;
+      push?: boolean;
       driver?: boolean;
     }) => {
       const projectService = new ProjectService(ctx.stores.projects);
@@ -67,6 +69,7 @@ export function registerInitCommand(program: Command, ctx: AppContext): void {
           env: opts.env,
           skipPermissions: opts.skipPermissions,
           queue: opts.queue,
+          push: opts.push,
           driver: opts.driver,
         });
       }

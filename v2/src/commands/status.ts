@@ -79,9 +79,15 @@ export function registerStatusCommand(program: Command, ctx: AppContext): void {
       if (clones.length === 0) {
         console.log('(no clones — run agent-pool init)');
       } else {
+        const hasMultipleWorkspaces = new Set(clones.map(c => c.workspaceRef).filter(Boolean)).size > 1;
         console.log('');
-        console.log('Agent     Status            Task');
-        console.log('-----     ------            ----');
+        if (hasMultipleWorkspaces) {
+          console.log('Agent     Status            Pool        Task');
+          console.log('-----     ------            ----        ----');
+        } else {
+          console.log('Agent     Status            Task');
+          console.log('-----     ------            ----');
+        }
         for (const clone of clones) {
           const agentId = `agent-${String(clone.cloneIndex).padStart(2, '0')}`;
           const taskId = busyAgents.get(agentId);
@@ -94,7 +100,12 @@ export function registerStatusCommand(program: Command, ctx: AppContext): void {
             status = dim('offline');
           }
           const taskStr = taskId || (clone.locked ? 'waiting for tasks' : '-');
-          console.log(`${agentId}   ${status.padEnd(25)}${taskStr}`);
+          if (hasMultipleWorkspaces) {
+            const pool = clone.workspaceRef ? clone.workspaceRef.slice(0, 8) : dim('global');
+            console.log(`${agentId}   ${status.padEnd(25)}${pool.padEnd(12)}${taskStr}`);
+          } else {
+            console.log(`${agentId}   ${status.padEnd(25)}${taskStr}`);
+          }
         }
       }
 

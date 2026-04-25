@@ -6,6 +6,7 @@ import { PoolService } from '../services/pool-service.js';
 import { bold, green, yellow } from '../util/colors.js';
 import type { Clone, Project } from '../stores/interfaces.js';
 import { buildRunnerCommand } from '../util/runner-command.js';
+import { ensureDaemonRunning } from '../util/ensure-daemon.js';
 
 export async function launchAgents(
   ctx: AppContext,
@@ -20,6 +21,7 @@ export async function launchAgents(
     env?: string;
     skipPermissions?: boolean;
     queue?: boolean;
+    push?: boolean;
     driver?: boolean;
     agent?: string;
   },
@@ -29,6 +31,13 @@ export async function launchAgents(
 
   const globalOpts = program.opts();
   const project = projectService.resolve(globalOpts.project);
+
+  if (opts.queue !== false && opts.push !== false) {
+    const ok = await ensureDaemonRunning(ctx.config.dataDir, ctx.config.toolDir);
+    if (!ok) {
+      console.warn('Warning: daemon did not start; agents will fall back to polling mode.');
+    }
+  }
 
   // Clean up stale locks first
   await poolService.cleanupStaleLocks(project.name);
@@ -98,52 +107,52 @@ async function launchGrid(
 
   console.log(bold(`Launching ${clones.length} agents in grid for '${project.name}'...`));
 
-  // Create workspace with first agent command
-  const firstClone = clones[0];
-  const firstPath = poolService.getClonePath(project.prefix, firstClone.cloneIndex, ctx.config.dataDir);
-  const firstCmd = buildRunnerCommand(firstPath, firstClone.cloneIndex, project, ctx.config.toolDir, opts);
-
-  const { workspaceRef, surfaceRef: firstSurface } = await ctx.cmux.newWorkspace({ command: firstCmd });
-  poolService.lock(project.name, firstClone.cloneIndex, workspaceRef);
-
-  // Rename workspace
+  // Create workspace first, then send commands with workspace ref
+  const { workspaceRef, surfaceRef: firstSurface } = await ctx.cmux.newWorkspace({});
   await ctx.cmux.renameWorkspace(workspaceRef, `${project.name}-pool`);
 
+  const optsWithWs = { ...opts, workspaceRef };
   const surfaces = [firstSurface];
+
+  // First agent in the initial surface
+  const firstClone = clones[0];
+  const firstPath = poolService.getClonePath(project.prefix, firstClone.cloneIndex, ctx.config.dataDir);
+  const firstCmd = buildRunnerCommand(firstPath, firstClone.cloneIndex, project, ctx.config.toolDir, optsWithWs);
+  await ctx.cmux.send({ surface: firstSurface }, firstCmd);
+  poolService.lock(project.name, firstClone.cloneIndex, workspaceRef, workspaceRef);
 
   // Create remaining panes in 2x2 grid: right split, then two down splits
   if (clones.length >= 2) {
     const { surfaceRef } = await ctx.cmux.newSplit('right', { workspace: workspaceRef, surface: firstSurface });
     surfaces.push(surfaceRef);
     const path = poolService.getClonePath(project.prefix, clones[1].cloneIndex, ctx.config.dataDir);
-    const cmd = buildRunnerCommand(path, clones[1].cloneIndex, project, ctx.config.toolDir, opts);
+    const cmd = buildRunnerCommand(path, clones[1].cloneIndex, project, ctx.config.toolDir, optsWithWs);
     await ctx.cmux.send({ surface: surfaceRef }, cmd);
-    poolService.lock(project.name, clones[1].cloneIndex, workspaceRef);
+    poolService.lock(project.name, clones[1].cloneIndex, workspaceRef, workspaceRef);
   }
 
   if (clones.length >= 3) {
     const { surfaceRef } = await ctx.cmux.newSplit('down', { workspace: workspaceRef, surface: firstSurface });
     surfaces.push(surfaceRef);
     const path = poolService.getClonePath(project.prefix, clones[2].cloneIndex, ctx.config.dataDir);
-    const cmd = buildRunnerCommand(path, clones[2].cloneIndex, project, ctx.config.toolDir, opts);
+    const cmd = buildRunnerCommand(path, clones[2].cloneIndex, project, ctx.config.toolDir, optsWithWs);
     await ctx.cmux.send({ surface: surfaceRef }, cmd);
-    poolService.lock(project.name, clones[2].cloneIndex, workspaceRef);
+    poolService.lock(project.name, clones[2].cloneIndex, workspaceRef, workspaceRef);
   }
 
   if (clones.length >= 4) {
     const { surfaceRef } = await ctx.cmux.newSplit('down', { workspace: workspaceRef, surface: surfaces[1] });
     surfaces.push(surfaceRef);
     const path = poolService.getClonePath(project.prefix, clones[3].cloneIndex, ctx.config.dataDir);
-    const cmd = buildRunnerCommand(path, clones[3].cloneIndex, project, ctx.config.toolDir, opts);
+    const cmd = buildRunnerCommand(path, clones[3].cloneIndex, project, ctx.config.toolDir, optsWithWs);
     await ctx.cmux.send({ surface: surfaceRef }, cmd);
-    poolService.lock(project.name, clones[3].cloneIndex, workspaceRef);
+    poolService.lock(project.name, clones[3].cloneIndex, workspaceRef, workspaceRef);
   }
 
   // Optional driver pane
   if (opts.driver !== false && clones.length >= 2) {
-    // Driver pane at top for monitoring
     const { surfaceRef: driverSurface } = await ctx.cmux.newSplit('right', { workspace: workspaceRef });
-    await ctx.cmux.send({ surface: driverSurface }, `cd ${project.source} && claude`);
+    await ctx.cmux.send({ surface: driverSurface }, `cd ${project.source} && ccc`);
   }
 
   console.log(green(`Launched ${clones.length} agents in workspace '${project.name}-pool'`));
@@ -161,17 +170,16 @@ async function launchPanel(
     process.exit(1);
   }
 
+  const wsRef = process.env.CMUX_WORKSPACE_ID || undefined;
   const clonePath = poolService.getClonePath(project.prefix, clone.cloneIndex, ctx.config.dataDir);
-  const cmd = buildRunnerCommand(clonePath, clone.cloneIndex, project, ctx.config.toolDir, opts);
+  const cmd = buildRunnerCommand(clonePath, clone.cloneIndex, project, ctx.config.toolDir, { ...opts, workspaceRef: wsRef });
 
-  const tabRef = await ctx.cmux.identifyTab();
-  const wsRef = tabRef || undefined;
   const direction = opts.down ? 'down' : 'right';
   const { surfaceRef } = await ctx.cmux.newSplit(direction, { workspace: wsRef });
   await ctx.cmux.send({ surface: surfaceRef }, cmd);
 
   const lockId = wsRef || `panel:${clone.cloneIndex}`;
-  poolService.lock(project.name, clone.cloneIndex, lockId);
+  poolService.lock(project.name, clone.cloneIndex, lockId, wsRef);
 
   console.log(green(`Launched agent ${clone.cloneIndex} in panel`));
 }
@@ -188,12 +196,17 @@ async function launchWorkspace(
     process.exit(1);
   }
 
-  const clonePath = poolService.getClonePath(project.prefix, clone.cloneIndex, ctx.config.dataDir);
-  const cmd = buildRunnerCommand(clonePath, clone.cloneIndex, project, ctx.config.toolDir, opts);
-
-  const { workspaceRef } = await ctx.cmux.newWorkspace({ command: cmd });
+  const { workspaceRef } = await ctx.cmux.newWorkspace({});
   await ctx.cmux.renameWorkspace(workspaceRef, `${project.name}-${clone.cloneIndex}`);
-  poolService.lock(project.name, clone.cloneIndex, workspaceRef);
+
+  const clonePath = poolService.getClonePath(project.prefix, clone.cloneIndex, ctx.config.dataDir);
+  const cmd = buildRunnerCommand(clonePath, clone.cloneIndex, project, ctx.config.toolDir, { ...opts, workspaceRef });
+  // cmux newWorkspace already has a surface — identify it and send the command
+  const surfaces = await ctx.cmux.listPaneSurfaces(workspaceRef);
+  if (surfaces.length > 0) {
+    await ctx.cmux.send({ surface: surfaces[0] }, cmd);
+  }
+  poolService.lock(project.name, clone.cloneIndex, workspaceRef, workspaceRef);
 
   console.log(green(`Launched agent ${clone.cloneIndex} in workspace '${project.name}-${clone.cloneIndex}'`));
 }
@@ -210,10 +223,11 @@ async function launchHere(
     process.exit(1);
   }
 
+  const hereWsRef = process.env.CMUX_WORKSPACE_ID || undefined;
   const clonePath = poolService.getClonePath(project.prefix, clone.cloneIndex, ctx.config.dataDir);
-  const cmd = buildRunnerCommand(clonePath, clone.cloneIndex, project, ctx.config.toolDir, opts);
+  const cmd = buildRunnerCommand(clonePath, clone.cloneIndex, project, ctx.config.toolDir, { ...opts, workspaceRef: hereWsRef });
 
-  poolService.lock(project.name, clone.cloneIndex, `here:${clone.cloneIndex}`);
+  poolService.lock(project.name, clone.cloneIndex, `here:${clone.cloneIndex}`, hereWsRef);
   console.log(green(`Running agent ${clone.cloneIndex} in current terminal`));
   console.log(`  ${cmd}`);
 
@@ -239,8 +253,9 @@ export function registerLaunchCommand(program: Command, ctx: AppContext): void {
     .option('--env <name>', 'Environment name')
     .option('--skip-permissions', 'Skip permission prompts')
     .option('--no-queue', 'Run without task queue')
+    .option('--no-push', 'Disable daemon push mode (use polling)')
     .option('--no-driver', 'Skip driver pane')
-    .option('--agent <type>', 'Agent type (claude or codex)')
+    .option('--agent <type>', 'Agent type (claude, codex, or pi)')
     .action(async (opts: {
       grid?: boolean;
       panel?: boolean;
@@ -251,6 +266,7 @@ export function registerLaunchCommand(program: Command, ctx: AppContext): void {
       env?: string;
       skipPermissions?: boolean;
       queue?: boolean;
+      push?: boolean;
       driver?: boolean;
       agent?: string;
     }) => {

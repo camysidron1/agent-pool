@@ -15,7 +15,7 @@ describe('SqliteTaskStore', () => {
 
   test('add task and verify generated ID format', () => {
     const task = ctx.stores.tasks.add({ projectName: 'proj', prompt: 'do something' });
-    expect(task.id).toMatch(/^t-\d+/);
+    expect(task.id).toMatch(/^[a-z]+-[a-z]+-[a-z]+/);
     expect(task.projectName).toBe('proj');
     expect(task.prompt).toBe('do something');
     expect(task.status).toBe('pending');
@@ -108,6 +108,19 @@ describe('SqliteTaskStore', () => {
     ctx.stores.tasks.add({ projectName: 'proj', prompt: 'busy' });
     ctx.stores.tasks.claim('proj', 'agent-1');
     expect(ctx.stores.tasks.claim('proj', 'agent-2')).toBeNull();
+  });
+
+  test('claim returns null when agent already has an in_progress task', () => {
+    ctx.stores.tasks.add({ projectName: 'proj', prompt: 'first' });
+    ctx.stores.tasks.add({ projectName: 'proj', prompt: 'second' });
+    ctx.stores.tasks.claim('proj', 'agent-1');
+    // Same agent should not be able to claim another task
+    const second = ctx.stores.tasks.claim('proj', 'agent-1');
+    expect(second).toBeNull();
+    // But a different agent can still claim
+    const other = ctx.stores.tasks.claim('proj', 'agent-2');
+    expect(other).not.toBeNull();
+    expect(other!.prompt).toBe('second');
   });
 
   test('mark sets status and completed_at for completed', () => {
@@ -375,7 +388,8 @@ describe('SqliteTaskStore', () => {
     const t1 = ctx.stores.tasks.add({ projectName: 'proj', prompt: 'pending' });
     const t2 = ctx.stores.tasks.add({ projectName: 'proj', prompt: 'completed' });
     ctx.stores.tasks.claim('proj', 'agent-01'); // claims t1
-    ctx.stores.tasks.claim('proj', 'agent-01'); // claims t2
+    // Mark t2 directly as completed (claim guard prevents double in_progress)
+    ctx.stores.tasks.mark(t2.id, 'in_progress', { claimedBy: 'agent-01' });
     ctx.stores.tasks.mark(t2.id, 'completed');
 
     const t3 = ctx.stores.tasks.add({ projectName: 'proj', prompt: 'blocked' });

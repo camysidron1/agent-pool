@@ -32,8 +32,8 @@ export class TaskService {
     return this.store.peek(projectName);
   }
 
-  claim(projectName: string, agentId: string): Task | null {
-    return this.store.claim(projectName, agentId);
+  claim(projectName: string, agentId: string, workspaceRef?: string): Task | null {
+    return this.store.claim(projectName, agentId, workspaceRef);
   }
 
   mark(id: string, status: TaskStatus): void {

@@ -3,6 +3,7 @@ import type { AppContext } from '../container.js';
 import type { RetryStrategy } from '../stores/interfaces.js';
 import { ProjectService } from '../services/project-service.js';
 import { TaskService } from '../services/task-service.js';
+import { notifyDaemon } from '../util/notify-daemon.js';
 
 export function registerAddCommand(program: Command, ctx: AppContext): void {
   program
@@ -14,6 +15,8 @@ export function registerAddCommand(program: Command, ctx: AppContext): void {
     .option('--timeout <minutes>', 'Timeout in minutes', parseInt)
     .option('--retry <n>', 'Max attempts (default 1 = no retry)', parseInt)
     .option('--retry-strategy <strategy>', 'Retry strategy: same, augmented, escalate')
+    .option('-q, --quiet', 'Print only the task ID (for scripting)')
+    .option('--branch <name>', 'Checkout existing branch instead of creating a new one (enables session resume via ccc)')
     .argument('<prompt>', 'Task prompt')
     .action((prompt: string, opts: {
       backlog?: boolean;
@@ -22,6 +25,8 @@ export function registerAddCommand(program: Command, ctx: AppContext): void {
       timeout?: number;
       retry?: number;
       retryStrategy?: string;
+      quiet?: boolean;
+      branch?: string;
     }) => {
       const projectService = new ProjectService(ctx.stores.projects);
       const taskService = new TaskService(ctx.stores.tasks);
@@ -51,6 +56,9 @@ export function registerAddCommand(program: Command, ctx: AppContext): void {
         process.exit(1);
       }
 
+      // Detect workspace for isolation (from cmux env var — fast, no subprocess)
+      const workspaceRef = process.env.CMUX_WORKSPACE_ID || undefined;
+
       const task = taskService.add({
         projectName: project.name,
         prompt,
@@ -60,12 +68,22 @@ export function registerAddCommand(program: Command, ctx: AppContext): void {
         timeoutMinutes: opts.timeout,
         retryMax: opts.retry,
         retryStrategy: opts.retryStrategy as RetryStrategy | undefined,
+        workspaceRef,
+        branch: opts.branch,
       });
 
-      const depInfo = dependsOn?.length ? ` [deps: ${dependsOn.join(',')}]` : '';
-      const prioInfo = task.priority ? ` [priority: ${task.priority}]` : '';
-      const retryInfo = task.retryMax > 1 ? ` [retry: ${task.retryMax}x ${task.retryStrategy}]` : '';
-      const timeoutInfo = task.timeoutMinutes ? ` [timeout: ${task.timeoutMinutes}m]` : '';
-      console.log(`Added task ${task.id} (${task.status})${prioInfo}${retryInfo}${timeoutInfo}${depInfo}`);
+      if (opts.quiet) {
+        console.log(task.id);
+      } else {
+        const depInfo = dependsOn?.length ? ` [deps: ${dependsOn.join(',')}]` : '';
+        const prioInfo = task.priority ? ` [priority: ${task.priority}]` : '';
+        const retryInfo = task.retryMax > 1 ? ` [retry: ${task.retryMax}x ${task.retryStrategy}]` : '';
+        const timeoutInfo = task.timeoutMinutes ? ` [timeout: ${task.timeoutMinutes}m]` : '';
+        const branchInfo = task.branch ? ` [branch: ${task.branch}]` : '';
+        console.log(`Added task ${task.id} (${task.status})${prioInfo}${retryInfo}${timeoutInfo}${depInfo}${branchInfo}`);
+      }
+
+      // Notify daemon so it can nudge idle runners
+      notifyDaemon(ctx.config.dataDir, workspaceRef);
     });
 }

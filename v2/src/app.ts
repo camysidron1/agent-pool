@@ -1,4 +1,5 @@
 import { Command } from 'commander';
+import { join } from 'path';
 import type { AppContext } from './container.js';
 import { registerAddCommand } from './commands/add.js';
 import { registerTasksCommand } from './commands/tasks.js';
@@ -8,12 +9,12 @@ import { registerUnblockCommand } from './commands/unblock.js';
 import { registerBacklogCommand } from './commands/backlog.js';
 import { registerActivateCommand } from './commands/activate.js';
 import { registerSetStatusCommand } from './commands/set-status.js';
-import { registerMigrateCommand } from './commands/migrate.js';
 import { registerHelpCommand } from './commands/help.js';
 import { registerDocsCommand } from './commands/docs.js';
 import { registerInitCommand } from './commands/init.js';
 import { registerLaunchCommand } from './commands/launch.js';
 import { registerStartCommand } from './commands/start.js';
+import { registerStopCommand } from './commands/stop.js';
 import { registerRefreshCommand } from './commands/refresh.js';
 import { registerReleaseCommand } from './commands/release.js';
 import { registerDestroyCommand } from './commands/destroy.js';
@@ -25,6 +26,9 @@ import { registerDaemonCommand } from './commands/daemon.js';
 import { registerIntegrationCommand } from './commands/integration.js';
 import { registerNextCommand } from './commands/next.js';
 import { registerRunAgentCommand } from './commands/run-agent.js';
+import { registerRunCommand } from './commands/run.js';
+import { registerScaleCommand } from './commands/scale.js';
+import { registerInitiateCommand } from './commands/initiate.js';
 
 export function createApp(ctx: AppContext): Command {
   const program = new Command();
@@ -49,16 +53,17 @@ export function createApp(ctx: AppContext): Command {
   registerStatusCommand(program, ctx);
   registerDocsCommand(program, ctx);
   registerHelpCommand(program, ctx);
-  registerMigrateCommand(program, ctx);
-
   // WP5 stubs
   registerInitCommand(program, ctx);
   registerLaunchCommand(program, ctx);
   registerStartCommand(program, ctx);
+  registerStopCommand(program, ctx);
   registerRefreshCommand(program, ctx);
   registerReleaseCommand(program, ctx);
   registerDestroyCommand(program, ctx);
   registerRestartCommand(program, ctx);
+  registerScaleCommand(program, ctx);
+  registerInitiateCommand(program, ctx);
 
   // Review
   registerReviewCommand(program, ctx);
@@ -75,8 +80,26 @@ export function createApp(ctx: AppContext): Command {
   // Run agent
   registerRunAgentCommand(program, ctx);
 
+  // Ephemeral run (for loops)
+  registerRunCommand(program, ctx);
+
   // Approvals
   registerApprovalsCommands(program, ctx);
+
+  // Dashboard TUI (self-contained, spawns its own DB connection)
+  program
+    .command('dashboard')
+    .alias('dash')
+    .description('Live TUI dashboard for loop monitoring')
+    .action(async () => {
+      const dashPath = join(import.meta.dir, 'commands', 'dashboard.ts');
+      const proc = Bun.spawn(['bun', 'run', dashPath], {
+        stdin: 'inherit',
+        stdout: 'inherit',
+        stderr: 'inherit',
+      });
+      await proc.exited;
+    });
 
   return program;
 }

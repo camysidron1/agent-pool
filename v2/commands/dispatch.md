@@ -11,18 +11,15 @@ You are the **orchestrator** of a multi-agent system. You decompose user goals i
 ## System Model
 
 **agent-pool** (`~/.agent-pool/agent-pool`) manages:
-- **Projects**: registered repos with source path, branch, prefix (`projects.json`)
-- **Clones**: warm git clones (`<prefix>-01`, `<prefix>-02`, ...) tracked in `pool-<project>.json`
-- **Tasks**: a JSON queue (`tasks-<project>.json`) with statuses: `pending` → `in_progress` → `completed` | `blocked` | `backlogged`
-- **Runners**: each clone runs `agent-runner.sh`, which polls the queue, claims a pending task, checks out a fresh branch (`agent-0X-t-<id>`), runs `claude <prompt>`, and marks the result
+- **Projects**: registered repos with source path, branch, prefix (SQLite)
+- **Clones**: warm git clones (`<prefix>-01`, `<prefix>-02`, ...) tracked in SQLite
+- **Tasks**: a queue with statuses: `pending` → `in_progress` → `completed` | `blocked` | `backlogged`
+- **Runners**: each clone runs `agent-pool run-agent <index>`, which polls the queue, claims a pending task, checks out a fresh branch (`agent-0X-t-<id>`), runs `claude <prompt>`, and marks the result
 
 Key paths:
 ```
-~/.agent-pool/agent-pool          # CLI
-~/.agent-pool/agent-runner.sh     # Per-clone task runner
-~/.agent-pool/projects.json       # Project registry
-~/.agent-pool/pool-<project>.json # Clone states (locked/free)
-~/.agent-pool/tasks-<project>.json # Task queue
+~/.agent-pool/agent-pool              # CLI (delegates to v2 TypeScript)
+~/.agent-pool/data/agent-pool.db      # SQLite database
 ```
 
 ---
@@ -365,28 +362,28 @@ When reporting to the user:
 When you hit a friction point:
 
 1. **Assess scope**: Is it a quick fix (< 50 lines) or a larger feature?
-2. **Quick fix**: Edit `~/.agent-pool/agent-pool` directly from the driver pane
+2. **Quick fix**: Edit the relevant file in `~/.agent-pool/v2/src/` directly from the driver pane
 3. **Larger feature**: Dispatch it as a task:
    ```bash
-   agent-pool add "Add <feature> to the agent-pool CLI at ~/.agent-pool/agent-pool. The CLI is a bash script. <detailed spec of what to add, where in the script, expected behavior, and how to test it>. Run the test suite at ~/.agent-pool/test-agent-pool.sh to verify."
+   agent-pool add "Add <feature> to agent-pool. The CLI is TypeScript/Bun at ~/.agent-pool/v2/src/. <detailed spec of what to add, expected behavior, and how to test it>. Run tests with 'cd v2 && bun test' to verify."
    ```
 4. **Track it**: Mention to the user that you're improving the system alongside their work
 
 ### Self-improvement prompt template
 
 ```
-Improve the agent-pool CLI at ~/.agent-pool/agent-pool (a bash script, ~1400 lines).
+Improve agent-pool (TypeScript/Bun at ~/.agent-pool/v2/src/).
 
 Add: <feature name>
 Why: <what friction this solves>
 Spec:
 - <detailed behavior>
 - <command syntax>
-- <where in the script to add it>
+- <where to add it>
 
-The script follows a pattern of cmd_<name>() functions dispatched from a case statement at the bottom.
+Commands are registered in v2/src/app.ts. Each command is a separate file in v2/src/commands/.
 
-Test: Run ~/.agent-pool/test-agent-pool.sh to verify nothing breaks.
+Test: Run `cd v2 && bun test` to verify nothing breaks.
 Commit with a descriptive message.
 ```
 

@@ -24,15 +24,22 @@ Do NOT write .md files to paths like documentation/, docs/, design/, state/, etc
 Code comments and inline docs in source files are fine — this rule is about standalone documentation files.
 `;
 
-/** Fetch origin and create a task branch from origin/{branch}. Fix local origin URLs. */
+/** Fetch origin and create/checkout a task branch. Fix local origin URLs. */
 export async function checkoutTaskBranch(git: GitClient, ctx: AgentContext): Promise<void> {
   // Clean working directory from previous task before switching branches
   await git.resetHard(ctx.clonePath, 'HEAD');
   await git.clean(ctx.clonePath);
 
   await git.fetch(ctx.clonePath);
-  const localBranch = `${ctx.agentId}-${ctx.taskId}`;
-  await git.createBranch(ctx.clonePath, localBranch, `origin/${ctx.branch}`);
+
+  if (ctx.taskBranch) {
+    // Continue work on an existing branch — check it out directly
+    await git.checkout(ctx.clonePath, ctx.taskBranch);
+  } else {
+    // Create a fresh task branch from origin/{base branch}
+    const localBranch = `${ctx.agentId}-${ctx.taskId}`;
+    await git.createBranch(ctx.clonePath, localBranch, `origin/${ctx.branch}`);
+  }
 
   // Fix origin remote if it's a local path
   const originUrl = await git.getRemoteUrl(ctx.clonePath);

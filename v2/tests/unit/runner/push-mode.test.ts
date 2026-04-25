@@ -146,6 +146,7 @@ describe('AgentRunner push-mode', () => {
     const runner = new AgentRunner(ctx, adapter, {
       cloneIndex: 1,
       projectName: 'test-proj',
+      mode: 'push',
       skipPermissions: true,
       nonInteractive: true,
       daemonSocketPath: join(tempDir, 'nonexistent.sock'),
@@ -207,6 +208,7 @@ describe('AgentRunner push-mode', () => {
     const runner = new AgentRunner(ctx, adapter, {
       cloneIndex: 1,
       projectName: 'test-proj',
+      mode: 'push',
       skipPermissions: true,
       nonInteractive: true,
       daemonSocketPath: sockPath,
@@ -271,6 +273,7 @@ describe('AgentRunner push-mode', () => {
     const runner = new AgentRunner(ctx, adapter, {
       cloneIndex: 1,
       projectName: 'test-proj',
+      mode: 'push',
       skipPermissions: true,
       nonInteractive: true,
       daemonSocketPath: sockPath,

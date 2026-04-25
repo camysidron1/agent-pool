@@ -12,6 +12,8 @@
     "test:e2e": "bun test tests/e2e"
   },
   "dependencies": {
+    "@mariozechner/pi-coding-agent": "^0.64.0",
+    "@sinclair/typebox": "^0.34.0",
     "commander": "^12.1.0",
     "yaml": "^2.8.2"
   },

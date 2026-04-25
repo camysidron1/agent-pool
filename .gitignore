@@ -53,3 +53,12 @@ CLAUDE.md
 v2/node_modules/
 v2/dist/
 v2/bun.lock
+
+# Runtime artifacts (daemon state, event log, SQLite)
+apd.pid
+data.db
+events.jsonl
+loops/*.log
+
+# Personal one-off bootstrap scripts
+.initiate-driver-*.sh

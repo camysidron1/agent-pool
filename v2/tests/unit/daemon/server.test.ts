@@ -38,7 +38,7 @@ function createMockTaskStore(): TaskStore & { tasks: Task[] } {
       tasks.push(t);
       return t;
     },
-    async claim(agentId: string) {
+    async claim(projectName: string, agentId: string) {
       const task = tasks.find((t) => t.status === "pending");
       if (task) {
         task.status = "active";
@@ -158,7 +158,7 @@ describe("DaemonServer", () => {
     await store.add({ description: "claimable", status: "pending" });
 
     const sock = await connectToSocket(server.socketPath);
-    const resp = await sendRequest(sock, "task.claim", { agentId: "a1" });
+    const resp = await sendRequest(sock, "task.claim", { projectName: "test", agentId: "a1" });
     expect(resp.error).toBeUndefined();
     expect(resp.result.id).toBe("t-1");
     expect(resp.result.agent_id).toBe("a1");

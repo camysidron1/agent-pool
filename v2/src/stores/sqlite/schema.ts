@@ -140,17 +140,31 @@ const MIGRATIONS: string[] = [
   ALTER TABLE tasks ADD COLUMN pipeline_step_id TEXT;
   CREATE INDEX idx_tasks_pipeline ON tasks(pipeline_id);
   `,
+
+  // v6: Per-project environment variables
+  `
+  ALTER TABLE projects ADD COLUMN env_vars TEXT;
+  `,
+
+  // v7: Workspace isolation — scope clones and tasks by workspace
+  `
+  ALTER TABLE clones ADD COLUMN workspace_ref TEXT DEFAULT '';
+  ALTER TABLE tasks ADD COLUMN workspace_ref TEXT DEFAULT '';
+  CREATE INDEX idx_clones_workspace ON clones(project_name, workspace_ref);
+  CREATE INDEX idx_tasks_workspace ON tasks(project_name, workspace_ref, status);
+  `,
+
+  // v8: Task-level branch override for continuing work on existing branches
+  `
+  ALTER TABLE tasks ADD COLUMN branch TEXT;
+  `,
 ];
 
 /**
  * Apply all pending migrations. Idempotent — safe to call on every startup.
  */
 export function applyMigrations(db: Database): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS schema_version (
-      version INTEGER PRIMARY KEY
-    );
-  `);
+  db.run('CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)');
 
   const row = db.query('SELECT MAX(version) as v FROM schema_version').get() as { v: number | null } | null;
   const currentVersion = row?.v ?? 0;

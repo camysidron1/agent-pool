@@ -1,5 +1,6 @@
 import { Database } from 'bun:sqlite';
 import type { Task, TaskInput, TaskLog, TaskStatus, TaskStore } from '../interfaces.js';
+import { generateUniqueWordId } from '../../util/word-id.js';
 
 interface TaskRow {
   id: string;
@@ -18,6 +19,8 @@ interface TaskRow {
   result: string | null;
   pipeline_id: string | null;
   pipeline_step_id: string | null;
+  workspace_ref: string;
+  branch: string | null;
 }
 
 interface TaskLogRow {
@@ -49,6 +52,8 @@ function rowToTask(row: TaskRow): Task {
     result: row.result,
     pipelineId: row.pipeline_id,
     pipelineStepId: row.pipeline_step_id,
+    workspaceRef: row.workspace_ref,
+    branch: row.branch,
   };
 }
 
@@ -75,7 +80,7 @@ export class SqliteTaskStore implements TaskStore {
   }
 
   add(input: TaskInput): Task {
-    const id = `t-${Date.now()}-${idCounter++}`;
+    const id = generateUniqueWordId((candidate) => this.get(candidate) !== null);
     const now = new Date().toISOString();
     const status = input.status ?? 'pending';
     const priority = input.priority ?? 0;
@@ -84,12 +89,14 @@ export class SqliteTaskStore implements TaskStore {
     const retryStrategy = input.retryStrategy ?? 'same';
     const pipelineId = input.pipelineId ?? null;
     const pipelineStepId = input.pipelineStepId ?? null;
+    const workspaceRef = input.workspaceRef ?? '';
+    const branch = input.branch ?? null;
 
     this.db.transaction(() => {
       this.db.query(
-        `INSERT INTO tasks (id, project_name, prompt, status, created_at, priority, timeout_minutes, retry_max, retry_strategy, pipeline_id, pipeline_step_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(id, input.projectName, input.prompt, status, now, priority, timeoutMinutes, retryMax, retryStrategy, pipelineId, pipelineStepId);
+        `INSERT INTO tasks (id, project_name, prompt, status, created_at, priority, timeout_minutes, retry_max, retry_strategy, pipeline_id, pipeline_step_id, workspace_ref, branch)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(id, input.projectName, input.prompt, status, now, priority, timeoutMinutes, retryMax, retryStrategy, pipelineId, pipelineStepId, workspaceRef, branch);
 
       if (input.dependsOn && input.dependsOn.length > 0) {
         for (const depId of input.dependsOn) {
@@ -120,10 +127,15 @@ export class SqliteTaskStore implements TaskStore {
     return row ? rowToTask(row) : null;
   }
 
-  private findNextClaimable(projectName: string): TaskRow | null {
+  private findNextClaimable(projectName: string, workspaceRef?: string): TaskRow | null {
+    // When workspaceRef is provided, only consider tasks matching that workspace.
+    const wsFilter = workspaceRef !== undefined ? ' AND t.workspace_ref = ?' : '';
+    const params: unknown[] = [projectName];
+    if (workspaceRef !== undefined) params.push(workspaceRef);
+
     return this.db.query(`
       SELECT t.* FROM tasks t
-      WHERE t.project_name = ? AND t.status = 'pending'
+      WHERE t.project_name = ? AND t.status = 'pending'${wsFilter}
         AND NOT EXISTS (
           SELECT 1 FROM task_dependencies td
           JOIN tasks dep ON dep.id = td.depends_on
@@ -131,7 +143,7 @@ export class SqliteTaskStore implements TaskStore {
         )
       ORDER BY t.priority DESC, t.created_at ASC
       LIMIT 1
-    `).get(projectName) as TaskRow | null;
+    `).get(...params) as TaskRow | null;
   }
 
   peek(projectName: string): Task | null {
@@ -139,11 +151,17 @@ export class SqliteTaskStore implements TaskStore {
     return row ? rowToTask(row) : null;
   }
 
-  claim(projectName: string, agentId: string): Task | null {
+  claim(projectName: string, agentId: string, workspaceRef?: string): Task | null {
     let claimed: Task | null = null;
 
     this.db.transaction(() => {
-      const row = this.findNextClaimable(projectName);
+      // Guard: don't claim if this agent already has an in_progress task in this project
+      const busy = this.db.query(
+        `SELECT 1 FROM tasks WHERE project_name = ? AND claimed_by = ? AND status = 'in_progress' LIMIT 1`
+      ).get(projectName, agentId);
+      if (busy) return;
+
+      const row = this.findNextClaimable(projectName, workspaceRef);
 
       if (!row) return;
 

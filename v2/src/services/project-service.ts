@@ -105,7 +105,7 @@ export class ProjectService {
   }
 
   setAgent(name: string, type: string): void {
-    const valid = ['claude', 'codex'];
+    const valid = ['claude', 'codex', 'pi'];
     if (!valid.includes(type)) {
       throw new Error(`Invalid agent type '${type}'. Must be one of: ${valid.join(', ')}`);
     }
@@ -118,5 +118,28 @@ export class ProjectService {
 
   clearAgent(name: string): void {
     this.store.update(name, { agentType: null });
+  }
+
+  setEnv(name: string, key: string, value: string): void {
+    const project = this.store.get(name);
+    if (!project) {
+      throw new Error(`Project '${name}' not found`);
+    }
+    const envVars = { ...(project.envVars ?? {}), [key]: value };
+    this.store.update(name, { envVars });
+  }
+
+  clearEnv(name: string, key?: string): void {
+    const project = this.store.get(name);
+    if (!project) {
+      throw new Error(`Project '${name}' not found`);
+    }
+    if (!key) {
+      this.store.update(name, { envVars: null });
+      return;
+    }
+    const envVars = { ...(project.envVars ?? {}) };
+    delete envVars[key];
+    this.store.update(name, { envVars: Object.keys(envVars).length > 0 ? envVars : null });
   }
 }
