@@ -9,4 +9,19 @@ export interface GitClient {
   clean(repoPath: string): Promise<void>;
   deleteBranches(repoPath: string, pattern: RegExp): Promise<void>;
   createBranch(repoPath: string, branch: string, startPoint?: string): Promise<void>;
+
+  /**
+   * Add (or reset) a worktree at `worktreePath` checked out on `branch`,
+   * created from `startPoint`. Idempotent — if the worktree already exists
+   * at that path it is reset to startPoint on the same branch.
+   */
+  worktreeAdd(
+    repoPath: string,
+    worktreePath: string,
+    branch: string,
+    startPoint: string,
+  ): Promise<void>;
+
+  /** Remove a worktree at `worktreePath`. No-op if it doesn't exist. */
+  worktreeRemove(repoPath: string, worktreePath: string): Promise<void>;
 }

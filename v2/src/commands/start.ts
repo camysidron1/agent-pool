@@ -11,6 +11,11 @@ import type { Project } from '../stores/interfaces.js';
 import { buildRunnerCommand } from '../util/runner-command.js';
 import { DaemonClient } from '../daemon/client.js';
 import { ensureDaemonRunning } from '../util/ensure-daemon.js';
+import {
+  deriveDriverShortId,
+  driverBranchName,
+  driverWorktreePath as buildDriverWorktreePath,
+} from '../util/driver-worktree.js';
 
 export function registerStartCommand(program: Command, ctx: AppContext): void {
   program
@@ -64,6 +69,18 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
       // Workspace scoping: when running inside cmux, only tear down/reset
       // clones belonging to THIS workspace so other pools stay intact.
       const workspaceRef = process.env.CMUX_WORKSPACE_ID || undefined;
+
+      // Each driver runs in its own git worktree so cmux gives it a distinct
+      // session (cmux pins one Claude session per branch). The workspace id
+      // — or the pid as a fallback — is what makes the worktree/branch unique
+      // across concurrent drivers.
+      const driverShortId = deriveDriverShortId(workspaceRef);
+      const driverWorktreePath = buildDriverWorktreePath(
+        ctx.config.dataDir,
+        project.prefix,
+        driverShortId,
+      );
+      const driverBranch = driverBranchName(driverShortId);
 
       // --- 4. Teardown existing sessions (scoped to current workspace) ---
       const scopedClones = workspaceRef
@@ -224,14 +241,31 @@ export function registerStartCommand(program: Command, ctx: AppContext): void {
 
       console.log(green(`Done. ${count} agents launched in current workspace.`));
 
-      // --- 11. Install dispatch/update commands into source repo for the driver ---
-      const sourceCommandsDir = join(project.source, '.claude', 'commands');
-      mkdirSync(sourceCommandsDir, { recursive: true });
+      // --- 10b. Provision the driver's git worktree on a dedicated dispatch
+      // branch. cmux pins one Claude session per branch — putting the driver
+      // on its own branch keeps it from colliding with whatever Claude session
+      // the user already has open on the source repo's current branch.
+      console.log(`Provisioning driver worktree at ${driverWorktreePath}...`);
+      try {
+        await ctx.git.worktreeAdd(
+          project.source,
+          driverWorktreePath,
+          driverBranch,
+          project.branch,
+        );
+      } catch (err: any) {
+        console.error(`Failed to create driver worktree: ${err.message}`);
+        process.exit(1);
+      }
+
+      // --- 11. Install dispatch/update commands into the driver worktree ---
+      const driverCommandsDir = join(driverWorktreePath, '.claude', 'commands');
+      mkdirSync(driverCommandsDir, { recursive: true });
       const installedCommands: string[] = [];
       for (const name of ['dispatch.md', 'update.md']) {
         const src = join(ctx.config.toolDir, 'commands', name);
         if (existsSync(src)) {
-          const dest = join(sourceCommandsDir, name);
+          const dest = join(driverCommandsDir, name);
           writeFileSync(dest, readFileSync(src, 'utf-8'));
           installedCommands.push(dest);
         }
@@ -269,13 +303,13 @@ Ready to receive tasks.`;
         driverArgs.push(startupMsg);
       }
 
-      console.log(yellow(`\nStarting driver in ${project.source}...`));
+      console.log(yellow(`\nStarting driver in ${driverWorktreePath} on ${driverBranch}...`));
 
       // Use spawnSync to block the event loop — prevents Bun's async
       // internals from consuming stdin bytes meant for Claude
       const driverEnv = { ...process.env, ...(project.envVars ?? {}) };
       const result = spawnSync(driverArgs[0], driverArgs.slice(1), {
-        cwd: project.source,
+        cwd: driverWorktreePath,
         stdio: 'inherit',
         env: driverEnv,
       });

@@ -1,6 +1,10 @@
 import type { AppContext } from '../container.js';
 import { PoolService } from './pool-service.js';
 import { killRunnerByHeartbeat, sleep } from '../util/kill-runner.js';
+import {
+  deriveDriverShortId,
+  driverWorktreePath,
+} from '../util/driver-worktree.js';
 
 export interface TeardownResult {
   agentsKilled: number;
@@ -76,6 +80,23 @@ export async function teardownProject(
 
   // Clean stale locks
   await poolService.cleanupStaleLocks(projectName);
+
+  // Remove the driver worktree for this scope so the next start doesn't
+  // collide with it. When workspaceRef is undefined (--all), we'd need to
+  // walk every workspace to enumerate every driver — out of scope here, so
+  // worktree cleanup runs only on per-workspace teardowns.
+  if (workspaceRef) {
+    const project = ctx.stores.projects.get(projectName);
+    if (project) {
+      const shortId = deriveDriverShortId(workspaceRef);
+      const path = driverWorktreePath(ctx.config.dataDir, project.prefix, shortId);
+      try {
+        await ctx.git.worktreeRemove(project.source, path);
+      } catch {
+        // Best-effort — the worktree may not exist (driver never started).
+      }
+    }
+  }
 
   // Release stuck in_progress tasks (only for agents we tore down)
   let tasksReleased = 0;

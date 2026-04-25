@@ -79,4 +79,53 @@ export class RealGitClient implements GitClient {
     if (startPoint) args.push(startPoint);
     await run(args);
   }
+
+  async worktreeAdd(
+    repoPath: string,
+    worktreePath: string,
+    branch: string,
+    startPoint: string,
+  ): Promise<void> {
+    // If a worktree already exists at this path, reset it to startPoint
+    // on the same branch — keeps `agent-pool start` cheap to re-run.
+    const existingList = await run(['git', '-C', repoPath, 'worktree', 'list', '--porcelain']);
+    const alreadyAtPath = existingList.split('\n\n').some((entry) =>
+      entry.split('\n').some((line) => line === `worktree ${worktreePath}`),
+    );
+
+    if (alreadyAtPath) {
+      // Reuse: ensure on the right branch, hard reset to startPoint, clean.
+      try {
+        await run(['git', '-C', worktreePath, 'checkout', '-B', branch, startPoint, '-q']);
+      } catch {
+        // Fall through to recreate if checkout fails (e.g. corrupted state).
+        await this.worktreeRemove(repoPath, worktreePath);
+      }
+      try {
+        await run(['git', '-C', worktreePath, 'reset', '--hard', startPoint, '-q']);
+        await run(['git', '-C', worktreePath, 'clean', '-fd', '-q']);
+        return;
+      } catch {
+        await this.worktreeRemove(repoPath, worktreePath);
+      }
+    }
+
+    // -B creates or resets <branch> at <startPoint>; --force lets us reuse
+    // a branch that may already exist from a prior run.
+    await run([
+      'git', '-C', repoPath, 'worktree', 'add',
+      '--force', '-B', branch, worktreePath, startPoint,
+    ]);
+  }
+
+  async worktreeRemove(repoPath: string, worktreePath: string): Promise<void> {
+    try {
+      await run(['git', '-C', repoPath, 'worktree', 'remove', '--force', worktreePath]);
+    } catch {
+      // Worktree may already be gone; prune metadata so the next add succeeds.
+      try {
+        await run(['git', '-C', repoPath, 'worktree', 'prune']);
+      } catch { /* best-effort */ }
+    }
+  }
 }

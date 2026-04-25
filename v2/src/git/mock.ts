@@ -54,4 +54,19 @@ export class MockGitClient implements GitClient {
     this.calls.push({ method: 'createBranch', args: [repoPath, branch, startPoint] });
     this.branches.set(repoPath, branch);
   }
+
+  async worktreeAdd(
+    repoPath: string,
+    worktreePath: string,
+    branch: string,
+    startPoint: string,
+  ): Promise<void> {
+    this.calls.push({ method: 'worktreeAdd', args: [repoPath, worktreePath, branch, startPoint] });
+    this.branches.set(worktreePath, branch);
+  }
+
+  async worktreeRemove(repoPath: string, worktreePath: string): Promise<void> {
+    this.calls.push({ method: 'worktreeRemove', args: [repoPath, worktreePath] });
+    this.branches.delete(worktreePath);
+  }
 }
