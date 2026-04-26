@@ -10,8 +10,15 @@ describe('restart command', () => {
   let program: Command;
   let output: string[];
   let origLog: typeof console.log;
+  let origCmuxWorkspaceId: string | undefined;
 
   beforeEach(() => {
+    // Tests are hermetic w.r.t. cmux: restart filters by CMUX_WORKSPACE_ID
+    // when set, and the fixture locks clones without a matching workspaceRef.
+    // Clear it so list() returns the fixture clones.
+    origCmuxWorkspaceId = process.env.CMUX_WORKSPACE_ID;
+    delete process.env.CMUX_WORKSPACE_ID;
+
     ctx = createTestContext();
     ctx.stores.projects.add({ name: 'proj', source: '/tmp/src', prefix: 'p', branch: 'main' });
     ctx.stores.clones.add('proj', 0, 'main');
@@ -32,6 +39,9 @@ describe('restart command', () => {
   afterEach(() => {
     console.log = origLog;
     ctx.cleanup();
+    if (origCmuxWorkspaceId !== undefined) {
+      process.env.CMUX_WORKSPACE_ID = origCmuxWorkspaceId;
+    }
   });
 
   test('soft restart reuses the existing pane', async () => {

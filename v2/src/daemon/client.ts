@@ -26,14 +26,24 @@ export class DaemonClient {
     string,
     { resolve: (r: DaemonResponse) => void; reject: (e: Error) => void }
   >();
-  private onPush: ((msg: DaemonResponse) => void) | null;
-  private onDisconnect: (() => void) | null;
+  private pushHandler: ((msg: DaemonResponse) => void) | null;
+  private disconnectHandler: (() => void) | null;
 
   constructor(options: DaemonClientOptions) {
     this.socketPath = options.socketPath;
     this.timeoutMs = options.timeoutMs ?? 5000;
-    this.onPush = options.onPush ?? null;
-    this.onDisconnect = options.onDisconnect ?? null;
+    this.pushHandler = options.onPush ?? null;
+    this.disconnectHandler = options.onDisconnect ?? null;
+  }
+
+  /** Register a handler for unsolicited push messages from the daemon. */
+  onPush(handler: (msg: DaemonResponse) => void): void {
+    this.pushHandler = handler;
+  }
+
+  /** Register a handler that fires when the socket closes. */
+  onDisconnect(handler: () => void): void {
+    this.disconnectHandler = handler;
   }
 
   /**
@@ -78,8 +88,8 @@ export class DaemonClient {
           if (pending) {
             this.pendingRequests.delete(resp.id);
             pending.resolve(resp);
-          } else if (this.onPush) {
-            this.onPush(resp);
+          } else if (this.pushHandler) {
+            this.pushHandler(resp);
           }
         }
       }
@@ -92,7 +102,7 @@ export class DaemonClient {
     this.socket.on("close", () => {
       this.rejectAll("Socket closed");
       this.socket = null;
-      if (this.onDisconnect) this.onDisconnect();
+      if (this.disconnectHandler) this.disconnectHandler();
     });
   }
 

@@ -70,6 +70,7 @@ describe('Task lifecycle', () => {
     const r3 = await run('add', '--depends-on', `${tA},${tB}`, 'Task C depends on A and B');
     expect(r3.exitCode).toBe(0);
     expect(r3.stdout).toContain(`[deps: ${tA},${tB}]`);
+    const tC = r3.stdout.match(/Added task (\S+)/)?.[1]!;
 
     // Should show waiting (2)
     let tasks = await run('tasks');
@@ -83,7 +84,7 @@ describe('Task lifecycle', () => {
     // Complete B, should show pending (no waiting)
     await run('set-status', tB, 'completed');
     tasks = await run('tasks');
-    const tCLine = tasks.stdout.split('\n').find(l => l.startsWith('t-') && l.includes('Task C'));
+    const tCLine = tasks.stdout.split('\n').find(l => l.startsWith(tC));
     expect(tCLine).toContain('pending');
     expect(tCLine).not.toContain('waiting');
 
