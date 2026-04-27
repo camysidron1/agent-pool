@@ -75,7 +75,7 @@ export class ClaudeAdapter implements AgentAdapter {
 
   async run(ctx: AgentContext): Promise<number> {
     const prompt = this.buildPrompt(ctx);
-    const claudeArgs = ['ccc', prompt];
+    const claudeArgs = ['claude', prompt];
     if (ctx.skipPermissions) {
       claudeArgs.push('--dangerously-skip-permissions');
     }

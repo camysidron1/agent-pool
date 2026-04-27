@@ -152,7 +152,7 @@ async function launchGrid(
   // Optional driver pane
   if (opts.driver !== false && clones.length >= 2) {
     const { surfaceRef: driverSurface } = await ctx.cmux.newSplit('right', { workspace: workspaceRef });
-    await ctx.cmux.send({ surface: driverSurface }, `cd ${project.source} && ccc`);
+    await ctx.cmux.send({ surface: driverSurface }, `cd ${project.source} && claude`);
   }
 
   console.log(green(`Launched ${clones.length} agents in workspace '${project.name}-pool'`));

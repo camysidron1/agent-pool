@@ -24,7 +24,7 @@ export function buildRunnerCommand(
       return `cd ${clonePath} && codex exec --full-auto`;
     }
     const flags = opts.skipPermissions ? ' --dangerously-skip-permissions' : '';
-    return `cd ${clonePath} && ccc${flags}`;
+    return `cd ${clonePath} && claude${flags}`;
   }
   const envFlag = opts.env ? ` --env ${opts.env}` : '';
   const skipFlag = opts.skipPermissions ? ' --skip-permissions' : '';

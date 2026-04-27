@@ -258,7 +258,7 @@ Key commands:
 Run /dispatch for the full orchestrator protocol with prompt-writing guidelines.
 Ready to receive tasks.`;
 
-      const driverBin = agent === 'claude' ? 'ccc' : agent;
+      const driverBin = agent;
       const driverArgs = [driverBin];
       if (agent === 'claude') {
         if (skipPermissions) driverArgs.push('--dangerously-skip-permissions');
