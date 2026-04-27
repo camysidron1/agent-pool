@@ -305,7 +305,7 @@ export function registerInitiateCommand(program: Command, ctx: AppContext): void
 
       // --- Launch driver with greenfield prompt ---
       const startupMsg = buildGreenfieldPrompt(projectName, description, techStack, count);
-      const driverBin = agent === 'claude' ? 'ccc' : agent;
+      const driverBin = agent;
 
       // Build the driver shell command and write to a launch script
       // (avoids shell-escaping the multi-line prompt)

@@ -54,7 +54,7 @@ describe('buildRunnerCommand', () => {
     const cmd = buildRunnerCommand(clonePath, 1, project, toolDir, {
       queue: false,
     });
-    expect(cmd).toBe(`cd ${clonePath} && ccc`);
+    expect(cmd).toBe(`cd ${clonePath} && claude`);
   });
 
   test('no-queue mode with skipPermissions adds flag', () => {
@@ -62,7 +62,7 @@ describe('buildRunnerCommand', () => {
       queue: false,
       skipPermissions: true,
     });
-    expect(cmd).toBe(`cd ${clonePath} && ccc --dangerously-skip-permissions`);
+    expect(cmd).toBe(`cd ${clonePath} && claude --dangerously-skip-permissions`);
   });
 
   test('no-queue mode with agent codex produces codex exec --full-auto', () => {
@@ -78,7 +78,7 @@ describe('buildRunnerCommand', () => {
       queue: false,
       agent: 'claude',
     });
-    expect(cmd).toBe(`cd ${clonePath} && ccc`);
+    expect(cmd).toBe(`cd ${clonePath} && claude`);
   });
 
   test('no-queue mode with agent claude and skipPermissions', () => {
@@ -87,7 +87,7 @@ describe('buildRunnerCommand', () => {
       agent: 'claude',
       skipPermissions: true,
     });
-    expect(cmd).toBe(`cd ${clonePath} && ccc --dangerously-skip-permissions`);
+    expect(cmd).toBe(`cd ${clonePath} && claude --dangerously-skip-permissions`);
   });
 
   test('queue mode without agent omits --agent flag', () => {

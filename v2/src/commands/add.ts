@@ -16,7 +16,7 @@ export function registerAddCommand(program: Command, ctx: AppContext): void {
     .option('--retry <n>', 'Max attempts (default 1 = no retry)', parseInt)
     .option('--retry-strategy <strategy>', 'Retry strategy: same, augmented, escalate')
     .option('-q, --quiet', 'Print only the task ID (for scripting)')
-    .option('--branch <name>', 'Checkout existing branch instead of creating a new one (enables session resume via ccc)')
+    .option('--branch <name>', 'Checkout existing branch instead of creating a new one (enables session resume via claude)')
     .argument('<prompt>', 'Task prompt')
     .action((prompt: string, opts: {
       backlog?: boolean;
