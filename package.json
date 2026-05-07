@@ -1,0 +1,10 @@
+{
+  "name": "agent-pool-workspace",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.2.23",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ]
+}
