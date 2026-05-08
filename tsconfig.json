@@ -12,8 +12,13 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "baseUrl": ".",
     "paths": {
+      "@agent-pool/auth": ["packages/auth/src/index.ts"],
       "@agent-pool/config": ["packages/config/src/index.ts"],
-      "@agent-pool/shared": ["packages/shared/src/index.ts"]
+      "@agent-pool/db": ["packages/db/src/index.ts"],
+      "@agent-pool/queue": ["packages/queue/src/index.ts"],
+      "@agent-pool/runtime": ["packages/runtime/src/index.ts"],
+      "@agent-pool/shared": ["packages/shared/src/index.ts"],
+      "@agent-pool/storage": ["packages/storage/src/index.ts"]
     }
   },
   "include": [
@@ -22,7 +27,12 @@
     "apps/web/src/**/*.ts",
     "apps/web/src/**/*.tsx",
     "apps/web/vite.config.ts",
+    "packages/auth/src/**/*.ts",
     "packages/config/src/**/*.ts",
-    "packages/shared/src/**/*.ts"
+    "packages/db/src/**/*.ts",
+    "packages/queue/src/**/*.ts",
+    "packages/runtime/src/**/*.ts",
+    "packages/shared/src/**/*.ts",
+    "packages/storage/src/**/*.ts"
   ]
 }
