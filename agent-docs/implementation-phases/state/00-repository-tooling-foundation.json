@@ -3,7 +3,7 @@
   "phaseTitle": "Repository And Tooling Foundation",
   "phaseFile": "agent-docs/implementation-phases/phases/00-repository-tooling-foundation.md",
   "status": "pending",
-  "currentTaskId": "p0-006",
+  "currentTaskId": "p0-007",
   "tasks": [
     {
       "id": "p0-001",
@@ -162,7 +162,7 @@
     {
       "id": "p0-006",
       "title": "Add React/Vite web shell",
-      "status": "pending",
+      "status": "completed",
       "dependsOn": [
         "p0-002"
       ],
