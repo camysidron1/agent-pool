@@ -6,5 +6,8 @@
   "workspaces": [
     "apps/*",
     "packages/*"
-  ]
+  ],
+  "scripts": {
+    "typecheck": "bunx --package typescript tsc -p tsconfig.json --noEmit --pretty false"
+  }
 }

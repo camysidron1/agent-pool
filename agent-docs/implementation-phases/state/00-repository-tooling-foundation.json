@@ -1,0 +1,343 @@
+{
+  "phaseId": "00",
+  "phaseTitle": "Repository And Tooling Foundation",
+  "phaseFile": "agent-docs/implementation-phases/phases/00-repository-tooling-foundation.md",
+  "status": "pending",
+  "currentTaskId": "p0-003",
+  "tasks": [
+    {
+      "id": "p0-001",
+      "title": "Create root Bun workspace skeleton",
+      "status": "completed",
+      "dependsOn": [],
+      "allowedPaths": [
+        "package.json",
+        "bun.lockb",
+        "bun.lock",
+        "apps/",
+        "packages/",
+        "test-fixtures/",
+        "deploy/compose/",
+        "agent-docs/implementation-notes/",
+        "agent-docs/implementation-phases/state/"
+      ],
+      "acceptance": [
+        "Root package.json exists and declares Bun workspaces for apps/* and packages/*.",
+        "Workspace directories exist for apps and packages.",
+        "No existing v2/TUI source or existing TUI database path is modified."
+      ],
+      "checks": [
+        "bun install"
+      ],
+      "forbiddenPaths": [
+        "v2/",
+        "agent-pool",
+        "~/.agent-pool/data/agent-pool.db"
+      ]
+    },
+    {
+      "id": "p0-002",
+      "title": "Add shared package skeleton",
+      "status": "completed",
+      "dependsOn": [
+        "p0-001"
+      ],
+      "allowedPaths": [
+        "packages/shared/",
+        "package.json",
+        "tsconfig.json",
+        "agent-docs/implementation-notes/",
+        "agent-docs/implementation-phases/state/"
+      ],
+      "acceptance": [
+        "packages/shared exists with package metadata and TypeScript source entrypoint.",
+        "Shared package can export placeholder domain constants/types without importing backend-only code.",
+        "Root typecheck includes shared package or documented equivalent."
+      ],
+      "checks": [
+        "bun run typecheck"
+      ],
+      "forbiddenPaths": [
+        "v2/",
+        "agent-pool",
+        "~/.agent-pool/data/agent-pool.db"
+      ]
+    },
+    {
+      "id": "p0-003",
+      "title": "Add config package with env validation and AUTH_MODE=test",
+      "status": "pending",
+      "dependsOn": [
+        "p0-001",
+        "p0-002"
+      ],
+      "allowedPaths": [
+        "packages/config/",
+        "packages/shared/",
+        "package.json",
+        "tsconfig.json",
+        "agent-docs/implementation-notes/",
+        "agent-docs/implementation-phases/state/"
+      ],
+      "acceptance": [
+        "packages/config exposes typed env/config loading.",
+        "AUTH_MODE=test is supported for deterministic test identity setup.",
+        "Config validation rejects missing required env in non-test mode.",
+        "Config package does not import db, queue, runtime provider, or web code."
+      ],
+      "checks": [
+        "bun run typecheck",
+        "bun run test"
+      ],
+      "forbiddenPaths": [
+        "v2/",
+        "agent-pool",
+        "~/.agent-pool/data/agent-pool.db"
+      ]
+    },
+    {
+      "id": "p0-004",
+      "title": "Add backend API service skeleton",
+      "status": "pending",
+      "dependsOn": [
+        "p0-003"
+      ],
+      "allowedPaths": [
+        "apps/api/",
+        "packages/config/",
+        "packages/shared/",
+        "package.json",
+        "tsconfig.json",
+        "agent-docs/implementation-notes/",
+        "agent-docs/implementation-phases/state/"
+      ],
+      "acceptance": [
+        "apps/api exists with Bun/Express service entrypoint.",
+        "API exposes basic health endpoint.",
+        "API exposes placeholder metrics endpoint or documented stub.",
+        "API imports config/shared but does not implement public product APIs yet."
+      ],
+      "checks": [
+        "bun run typecheck",
+        "bun run test"
+      ],
+      "forbiddenPaths": [
+        "v2/",
+        "agent-pool",
+        "~/.agent-pool/data/agent-pool.db"
+      ]
+    },
+    {
+      "id": "p0-005",
+      "title": "Add orchestrator service skeleton",
+      "status": "pending",
+      "dependsOn": [
+        "p0-003"
+      ],
+      "allowedPaths": [
+        "apps/orchestrator/",
+        "packages/config/",
+        "packages/shared/",
+        "package.json",
+        "tsconfig.json",
+        "agent-docs/implementation-notes/",
+        "agent-docs/implementation-phases/state/"
+      ],
+      "acceptance": [
+        "apps/orchestrator exists with Bun service entrypoint.",
+        "Orchestrator exposes health/metrics endpoint or documented stubs.",
+        "Orchestrator imports config/shared only at this phase.",
+        "Orchestrator does not import packages/db or open SQLite."
+      ],
+      "checks": [
+        "bun run typecheck",
+        "bun run test"
+      ],
+      "forbiddenPaths": [
+        "v2/",
+        "agent-pool",
+        "~/.agent-pool/data/agent-pool.db"
+      ]
+    },
+    {
+      "id": "p0-006",
+      "title": "Add React/Vite web shell",
+      "status": "pending",
+      "dependsOn": [
+        "p0-002"
+      ],
+      "allowedPaths": [
+        "apps/web/",
+        "packages/shared/",
+        "package.json",
+        "tsconfig.json",
+        "agent-docs/implementation-notes/",
+        "agent-docs/implementation-phases/state/"
+      ],
+      "acceptance": [
+        "apps/web exists with a minimal React/Vite shell.",
+        "Web shell can import browser-safe shared types/constants.",
+        "Web shell does not import db, queue, runtime providers, or backend-only auth code."
+      ],
+      "checks": [
+        "bun run typecheck"
+      ],
+      "forbiddenPaths": [
+        "v2/",
+        "agent-pool",
+        "~/.agent-pool/data/agent-pool.db"
+      ]
+    },
+    {
+      "id": "p0-007",
+      "title": "Add db, queue, storage, auth, and runtime package skeletons",
+      "status": "pending",
+      "dependsOn": [
+        "p0-002",
+        "p0-003"
+      ],
+      "allowedPaths": [
+        "packages/db/",
+        "packages/queue/",
+        "packages/storage/",
+        "packages/auth/",
+        "packages/runtime/",
+        "package.json",
+        "tsconfig.json",
+        "agent-docs/implementation-notes/",
+        "agent-docs/implementation-phases/state/"
+      ],
+      "acceptance": [
+        "Package skeletons exist for db, queue, storage, auth, and runtime.",
+        "packages/db is clearly backend-owned and not imported by web/orchestrator.",
+        "packages/runtime contains provider interface placeholder only, not real E2B logic.",
+        "Package entrypoints typecheck."
+      ],
+      "checks": [
+        "bun run typecheck",
+        "bun run test"
+      ],
+      "forbiddenPaths": [
+        "v2/",
+        "agent-pool",
+        "~/.agent-pool/data/agent-pool.db"
+      ]
+    },
+    {
+      "id": "p0-008",
+      "title": "Add test runner smoke tests",
+      "status": "pending",
+      "dependsOn": [
+        "p0-003",
+        "p0-004",
+        "p0-005",
+        "p0-006",
+        "p0-007"
+      ],
+      "allowedPaths": [
+        "apps/",
+        "packages/",
+        "test-fixtures/",
+        "package.json",
+        "vitest.config.ts",
+        "agent-docs/implementation-notes/",
+        "agent-docs/implementation-phases/state/"
+      ],
+      "acceptance": [
+        "bun run test executes at least one deterministic smoke test.",
+        "Config/env test covers AUTH_MODE=test and non-test missing env rejection.",
+        "Tiny fixture repo path exists or test setup can create it."
+      ],
+      "checks": [
+        "bun run typecheck",
+        "bun run test"
+      ],
+      "forbiddenPaths": [
+        "v2/",
+        "agent-pool",
+        "~/.agent-pool/data/agent-pool.db"
+      ]
+    },
+    {
+      "id": "p0-009",
+      "title": "Add import-boundary proof",
+      "status": "pending",
+      "dependsOn": [
+        "p0-008"
+      ],
+      "allowedPaths": [
+        "apps/",
+        "packages/",
+        "package.json",
+        "tsconfig.json",
+        "agent-docs/implementation-notes/",
+        "agent-docs/implementation-phases/state/"
+      ],
+      "acceptance": [
+        "There is a lightweight check, test, or documented proof that web does not import db/queue/runtime providers.",
+        "There is a lightweight check, test, or documented proof that orchestrator does not import db.",
+        "Import-boundary mechanism runs in bun run test or an explicitly documented command."
+      ],
+      "checks": [
+        "bun run typecheck",
+        "bun run test"
+      ],
+      "forbiddenPaths": [
+        "v2/",
+        "agent-pool",
+        "~/.agent-pool/data/agent-pool.db"
+      ]
+    },
+    {
+      "id": "p0-010",
+      "title": "Add optional Docker Compose skeleton",
+      "status": "pending",
+      "dependsOn": [
+        "p0-004",
+        "p0-005"
+      ],
+      "allowedPaths": [
+        "deploy/compose/",
+        "package.json",
+        "agent-docs/implementation-notes/",
+        "agent-docs/implementation-phases/state/"
+      ],
+      "acceptance": [
+        "Compose skeleton exists for backend, orchestrator, RabbitMQ, blob/MinIO or local storage, and Prometheus if cheap.",
+        "If Compose is deferred, the reason is documented in the Phase 0 implementation note.",
+        "Compose skeleton does not require real E2B or paid providers."
+      ],
+      "checks": [
+        "bun run typecheck",
+        "bun run test"
+      ],
+      "forbiddenPaths": [
+        "v2/",
+        "agent-pool",
+        "~/.agent-pool/data/agent-pool.db"
+      ]
+    }
+  ],
+  "phaseAcceptance": [
+    "Empty app can typecheck.",
+    "Test runner can execute a trivial unit test.",
+    "AUTH_MODE=test creates deterministic test operator identity.",
+    "Config validation rejects missing required env in non-test mode.",
+    "Tiny fixture repo path exists or test setup can create it.",
+    "Workspace commands exist or deviations are documented.",
+    "Import boundaries are documented and obvious from package layout.",
+    "No runtime/provider work is required yet.",
+    "Current TUI workflow/database remains untouched."
+  ],
+  "requiredPhaseChecks": [
+    "bun run typecheck",
+    "bun run test"
+  ],
+  "notes": [],
+  "preflight": [
+    "Run git status --short before starting a task.",
+    "If modified/untracked files exist outside the task allowedPaths, stop and ask for operator approval.",
+    "Never modify v2/ or the existing TUI database during Phase 0.",
+    "Commit completed task changes before starting the next task so preflight can validate only the next task diff."
+  ]
+}
