@@ -14,5 +14,10 @@
       "@agent-pool/shared": ["packages/shared/src/index.ts"]
     }
   },
-  "include": ["apps/api/src/**/*.ts", "packages/config/src/**/*.ts", "packages/shared/src/**/*.ts"]
+  "include": [
+    "apps/api/src/**/*.ts",
+    "apps/orchestrator/src/**/*.ts",
+    "packages/config/src/**/*.ts",
+    "packages/shared/src/**/*.ts"
+  ]
 }
