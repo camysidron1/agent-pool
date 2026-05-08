@@ -2,7 +2,7 @@
   "phaseId": "00",
   "phaseTitle": "Repository And Tooling Foundation",
   "phaseFile": "agent-docs/implementation-phases/phases/00-repository-tooling-foundation.md",
-  "status": "pending",
+  "status": "completed",
   "currentTaskId": "p0-010",
   "tasks": [
     {
@@ -291,7 +291,7 @@
     {
       "id": "p0-010",
       "title": "Add optional Docker Compose skeleton",
-      "status": "pending",
+      "status": "completed",
       "dependsOn": [
         "p0-004",
         "p0-005"

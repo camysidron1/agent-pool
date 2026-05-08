@@ -1,0 +1,87 @@
+services:
+  api:
+    image: oven/bun:1.2.23
+    working_dir: /workspace
+    command: sh -lc "bun install --frozen-lockfile && cd apps/api && bun run start"
+    environment:
+      AUTH_MODE: test
+      API_PORT: "3000"
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      AGENT_POOL_STORAGE_ENDPOINT: http://minio:9000
+      AGENT_POOL_STORAGE_BUCKET: agent-pool-local
+    ports:
+      - "3000:3000"
+    volumes:
+      - ../..:/workspace
+      - bun-cache:/root/.bun
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  orchestrator:
+    image: oven/bun:1.2.23
+    working_dir: /workspace
+    command: sh -lc "bun install --frozen-lockfile && cd apps/orchestrator && bun run start"
+    environment:
+      AUTH_MODE: test
+      ORCHESTRATOR_PORT: "3001"
+      API_INTERNAL_URL: http://api:3000
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      RUNTIME_PROVIDER: stub
+    ports:
+      - "3001:3001"
+    volumes:
+      - ../..:/workspace
+      - bun-cache:/root/.bun
+    depends_on:
+      api:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - api
+      - orchestrator
+
+volumes:
+  bun-cache:
+  minio-data:
