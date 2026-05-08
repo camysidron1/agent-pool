@@ -6,7 +6,13 @@
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "verbatimModuleSyntax": true
+    "verbatimModuleSyntax": true,
+    "ignoreDeprecations": "6.0",
+    "baseUrl": ".",
+    "paths": {
+      "@agent-pool/config": ["packages/config/src/index.ts"],
+      "@agent-pool/shared": ["packages/shared/src/index.ts"]
+    }
   },
-  "include": ["packages/shared/src/**/*.ts"]
+  "include": ["packages/config/src/**/*.ts", "packages/shared/src/**/*.ts"]
 }

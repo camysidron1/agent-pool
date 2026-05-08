@@ -8,6 +8,7 @@
     "packages/*"
   ],
   "scripts": {
-    "typecheck": "bunx --package typescript tsc -p tsconfig.json --noEmit --pretty false"
+    "typecheck": "bunx --package typescript tsc -p tsconfig.json --noEmit --pretty false",
+    "test": "bun test packages"
   }
 }

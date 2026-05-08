@@ -3,7 +3,7 @@
   "phaseTitle": "Repository And Tooling Foundation",
   "phaseFile": "agent-docs/implementation-phases/phases/00-repository-tooling-foundation.md",
   "status": "pending",
-  "currentTaskId": "p0-003",
+  "currentTaskId": "p0-004",
   "tasks": [
     {
       "id": "p0-001",
@@ -66,7 +66,7 @@
     {
       "id": "p0-003",
       "title": "Add config package with env validation and AUTH_MODE=test",
-      "status": "pending",
+      "status": "completed",
       "dependsOn": [
         "p0-001",
         "p0-002"
