@@ -1,0 +1,15 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: agent-pool-api
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - api:3000
+
+  - job_name: agent-pool-orchestrator
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - orchestrator:3001

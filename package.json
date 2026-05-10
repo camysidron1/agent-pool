@@ -1,0 +1,14 @@
+{
+  "name": "agent-pool-workspace",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.2.23",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "bunx --package typescript tsc -p tsconfig.json --noEmit --pretty false",
+    "test": "bun test packages"
+  }
+}
