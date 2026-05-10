@@ -13,6 +13,10 @@
     "typecheck": "bunx --package typescript tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
-    "@agent-pool/shared": "workspace:*"
+    "@agent-pool/shared": "workspace:*",
+    "drizzle-orm": "^0.44.7"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.1"
   }
 }

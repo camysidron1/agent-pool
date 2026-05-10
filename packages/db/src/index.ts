@@ -1,19 +1,23 @@
-export type DatabaseOwner = "backend-api";
+export {
+  DB_PACKAGE_BOUNDARY,
+  createWebSandboxDatabaseConfig,
+  type DatabaseOwner,
+  type WebSandboxDatabaseConfig,
+} from "./ownership";
 
-export type WebSandboxDatabaseConfig = {
-  readonly owner: DatabaseOwner;
-  readonly path: string;
-};
-
-export const DB_PACKAGE_BOUNDARY = {
-  owner: "backend-api",
-  opensSqliteOnlyInBackendApi: true,
-  mustNotBeImportedByWebOrOrchestrator: true,
-} as const;
-
-export function createWebSandboxDatabaseConfig(path: string): WebSandboxDatabaseConfig {
-  return {
-    owner: "backend-api",
-    path,
-  };
-}
+export {
+  INITIAL_MIGRATION_ID,
+  MIGRATION_TABLE_NAME,
+  WEB_SANDBOX_MIGRATIONS,
+  createDrizzleDatabase,
+  initializeWebSandboxDatabase,
+  migrateWebSandboxDatabase,
+  openWebSandboxDatabase,
+  type AppliedMigration,
+  type InitializeWebSandboxDatabaseOptions,
+  type MigrationResult,
+  type OpenWebSandboxDatabaseOptions,
+  type SqlMigration,
+  type WebSandboxDrizzleDatabase,
+  type WebSandboxSqliteDatabase,
+} from "./migrations";
