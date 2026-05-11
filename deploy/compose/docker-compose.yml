@@ -6,6 +6,7 @@ services:
     environment:
       AUTH_MODE: test
       API_PORT: "3000"
+      AGENT_POOL_WEB_SANDBOX_DB_PATH: /data/web-sandbox.db
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
       AGENT_POOL_STORAGE_ENDPOINT: http://minio:9000
       AGENT_POOL_STORAGE_BUCKET: agent-pool-local
@@ -13,6 +14,7 @@ services:
       - "3000:3000"
     volumes:
       - ../..:/workspace
+      - api-data:/data
       - bun-cache:/root/.bun
     depends_on:
       rabbitmq:
@@ -83,5 +85,6 @@ services:
       - orchestrator
 
 volumes:
+  api-data:
   bun-cache:
   minio-data:

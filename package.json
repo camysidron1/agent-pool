@@ -9,6 +9,6 @@
   ],
   "scripts": {
     "typecheck": "bunx --package typescript tsc -p tsconfig.json --noEmit --pretty false",
-    "test": "bun test packages"
+    "test": "bun test apps packages"
   }
 }

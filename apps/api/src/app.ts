@@ -3,12 +3,16 @@ import express, { type Express } from "express";
 import { type AppConfig, loadConfig } from "@agent-pool/config";
 import { SHARED_PACKAGE_NAME } from "@agent-pool/shared";
 
+import type { ApiDatabaseConnection } from "./database";
+
 export type ApiAppOptions = {
   readonly config?: AppConfig;
+  readonly database?: ApiDatabaseConnection;
 };
 
 export function createApiApp(options: ApiAppOptions = {}): Express {
   const config = options.config ?? loadConfig();
+  const database = options.database;
   const app = express();
 
   app.get("/health", (_request, response) => {
@@ -16,6 +20,9 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
       ok: true,
       service: "agent-pool-api",
       authMode: config.authMode,
+      database: {
+        connected: Boolean(database),
+      },
     });
   });
 

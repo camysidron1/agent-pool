@@ -20,6 +20,9 @@ docs/
 # Temp files
 *.tmp
 
+# JavaScript dependencies
+node_modules/
+
 # Task-finished marker files
 .task-finished-*
 

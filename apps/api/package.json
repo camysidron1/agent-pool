@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@agent-pool/config": "workspace:*",
+    "@agent-pool/db": "workspace:*",
     "@agent-pool/shared": "workspace:*",
     "express": "^5.1.0"
   }
