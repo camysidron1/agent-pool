@@ -34,6 +34,28 @@ describe("API-owned web/sandbox database path", () => {
     ).toThrow("refusing to use existing agent-pool TUI database path");
   });
 
+  test("opens the default web/sandbox database without creating the legacy TUI database", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "agent-pool-api-default-db-"));
+    const home = join(tempDir, "home");
+    const expectedDefaultPath = join(home, DEFAULT_API_DATABASE_RELATIVE_PATH);
+    const legacyTuiPath = join(home, ".agent-pool", "data", "agent-pool.db");
+
+    try {
+      const database = openApiDatabase({ HOME: home });
+
+      try {
+        expect(database.path).toBe(expectedDefaultPath);
+      } finally {
+        database.close();
+      }
+
+      expect(await Bun.file(expectedDefaultPath).exists()).toBe(true);
+      expect(await Bun.file(legacyTuiPath).exists()).toBe(false);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test("opens and migrates only the configured API database path", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "agent-pool-api-db-"));
     const home = join(tempDir, "home");
