@@ -13,6 +13,7 @@
     "typecheck": "bunx --package typescript tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@agent-pool/config": "workspace:*",
     "@agent-pool/shared": "workspace:*"
   }
 }

@@ -66,6 +66,7 @@
       "name": "@agent-pool/queue",
       "version": "0.0.0",
       "dependencies": {
+        "@agent-pool/config": "workspace:*",
         "@agent-pool/shared": "workspace:*",
       },
     },
