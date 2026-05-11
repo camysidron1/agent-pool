@@ -1,11 +1,17 @@
+import { loadConfig } from "@agent-pool/config";
+
 import { createApiApp } from "./app";
+import { openApiDatabase } from "./database";
 
 export { createApiApp, type ApiAppOptions } from "./app";
 
 const DEFAULT_API_PORT = 3000;
 
 if (isDirectRun()) {
-  const app = createApiApp();
+  const env = readProcessEnv();
+  const config = loadConfig(env);
+  const database = openApiDatabase(env);
+  const app = createApiApp({ config, database });
   const port = readPort();
 
   app.listen(port, () => {

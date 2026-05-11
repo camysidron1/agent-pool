@@ -21,6 +21,20 @@ const RULES: readonly BoundaryRule[] = [
     roots: ["apps/orchestrator/src"],
     forbiddenImports: ["@agent-pool/db"],
   },
+  {
+    name: "non-api production source does not import backend-owned db package",
+    roots: [
+      "apps/orchestrator/src",
+      "apps/web/src",
+      "packages/auth/src",
+      "packages/config/src",
+      "packages/queue/src",
+      "packages/runtime/src",
+      "packages/shared/src",
+      "packages/storage/src",
+    ],
+    forbiddenImports: ["@agent-pool/db"],
+  },
 ];
 
 describe("import boundaries", () => {
