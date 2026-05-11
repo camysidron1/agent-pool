@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
 
 import {
+  CORE_PROJECT_TASK_SCHEMA_MIGRATION_ID,
   INITIAL_MIGRATION_ID,
   MIGRATION_TABLE_NAME,
   createDrizzleDatabase,
@@ -28,6 +29,10 @@ describe("web/sandbox database migration harness", () => {
           id: INITIAL_MIGRATION_ID,
           description: "Create web/sandbox migration metadata table",
         },
+        {
+          id: CORE_PROJECT_TASK_SCHEMA_MIGRATION_ID,
+          description: "Create projects, tasks, and task dependency schema",
+        },
       ]);
 
       const database = new Database(dbPath, { readonly: true, strict: true });
@@ -50,7 +55,10 @@ describe("web/sandbox database migration harness", () => {
       const first = migrateWebSandboxDatabase(database);
       const second = migrateWebSandboxDatabase(database);
 
-      expect(first.applied.map((migration) => migration.id)).toEqual([INITIAL_MIGRATION_ID]);
+      expect(first.applied.map((migration) => migration.id)).toEqual([
+        INITIAL_MIGRATION_ID,
+        CORE_PROJECT_TASK_SCHEMA_MIGRATION_ID,
+      ]);
       expect(second.applied).toEqual([]);
     } finally {
       database.close();
