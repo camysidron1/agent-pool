@@ -6,6 +6,7 @@ export {
 } from "./ownership";
 
 export {
+  CORE_PROJECT_TASK_SCHEMA_MIGRATION_ID,
   INITIAL_MIGRATION_ID,
   MIGRATION_TABLE_NAME,
   WEB_SANDBOX_MIGRATIONS,
@@ -21,3 +22,19 @@ export {
   type WebSandboxDrizzleDatabase,
   type WebSandboxSqliteDatabase,
 } from "./migrations";
+
+export {
+  projectStatusValues,
+  projects,
+  taskDependencies,
+  taskStatusValues,
+  tasks,
+  type DbTaskStatus,
+  type NewProjectRow,
+  type NewTaskDependencyRow,
+  type NewTaskRow,
+  type ProjectRow,
+  type ProjectStatus,
+  type TaskDependencyRow,
+  type TaskRow,
+} from "./schema";
