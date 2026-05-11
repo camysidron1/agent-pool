@@ -36,6 +36,33 @@ describe("API service skeleton", () => {
     }
   });
 
+  test("internal health requires service-token auth", async () => {
+    const { baseUrl, config, close } = await startTestApi();
+
+    try {
+      const missing = await fetch(`${baseUrl}/internal/health`);
+      const invalid = await fetch(`${baseUrl}/internal/health`, {
+        headers: {
+          [config.serviceToken.headerName]: "wrong",
+        },
+      });
+      const ok = await fetch(`${baseUrl}/internal/health`, {
+        headers: {
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+      });
+
+      expect(missing.status).toBe(401);
+      expect(await missing.json()).toMatchObject({ ok: false, reason: "missing" });
+      expect(invalid.status).toBe(403);
+      expect(await invalid.json()).toMatchObject({ ok: false, reason: "invalid" });
+      expect(ok.status).toBe(200);
+      expect(await ok.json()).toMatchObject({ ok: true, subject: "internal-service" });
+    } finally {
+      await close();
+    }
+  });
+
   test("metrics exposes service and database migration gauges", async () => {
     const { baseUrl, close } = await startTestApi();
 
@@ -53,7 +80,11 @@ describe("API service skeleton", () => {
   });
 });
 
-async function startTestApi(): Promise<{ readonly baseUrl: string; readonly close: () => Promise<void> }> {
+async function startTestApi(): Promise<{
+  readonly baseUrl: string;
+  readonly config: ReturnType<typeof loadConfig>;
+  readonly close: () => Promise<void>;
+}> {
   const tempDir = await mkdtemp(join(tmpdir(), "agent-pool-api-app-"));
   cleanupPaths.push(tempDir);
   const dbPath = join(tempDir, "db", "web-sandbox.db");
@@ -74,6 +105,7 @@ async function startTestApi(): Promise<{ readonly baseUrl: string; readonly clos
 
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
+    config,
     async close() {
       await new Promise<void>((resolve, reject) => {
         server.close((error?: Error) => {
