@@ -19,6 +19,7 @@
       "name": "@agent-pool/orchestrator",
       "version": "0.0.0",
       "dependencies": {
+        "@agent-pool/auth": "workspace:*",
         "@agent-pool/config": "workspace:*",
         "@agent-pool/shared": "workspace:*",
       },

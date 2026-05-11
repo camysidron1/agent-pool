@@ -1,5 +1,8 @@
+import { loadConfig } from "@agent-pool/config";
+
 import { startOrchestratorService } from "./server";
 
+export { checkBackendInternalHealth, type BackendHealthClientOptions, type BackendInternalHealthResult } from "./backend-client";
 export {
   createOrchestratorFetchHandler,
   startOrchestratorService,
@@ -7,25 +10,11 @@ export {
   type OrchestratorServerOptions,
 } from "./server";
 
-const DEFAULT_ORCHESTRATOR_PORT = 3001;
-
 if (isDirectRun()) {
-  const port = readPort();
+  const config = loadConfig(readProcessEnv());
 
-  startOrchestratorService({ port });
-  console.info(`agent-pool-orchestrator listening on ${port}`);
-}
-
-function readPort(): number {
-  const value = readProcessEnv().ORCHESTRATOR_PORT;
-
-  if (!value) {
-    return DEFAULT_ORCHESTRATOR_PORT;
-  }
-
-  const port = Number(value);
-
-  return Number.isInteger(port) && port > 0 ? port : DEFAULT_ORCHESTRATOR_PORT;
+  startOrchestratorService({ config, port: config.orchestrator.port });
+  console.info(`agent-pool-orchestrator listening on ${config.orchestrator.port}`);
 }
 
 function isDirectRun(): boolean {
