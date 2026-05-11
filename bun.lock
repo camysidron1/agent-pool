@@ -81,6 +81,9 @@
     "packages/storage": {
       "name": "@agent-pool/storage",
       "version": "0.0.0",
+      "dependencies": {
+        "@agent-pool/config": "workspace:*",
+      },
     },
   },
   "packages": {
