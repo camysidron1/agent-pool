@@ -124,6 +124,9 @@ export const sessions = sqliteTable(
     createdAt: text("created_at").notNull().default(timestampNow),
     startedAt: text("started_at"),
     endedAt: text("ended_at"),
+    finalResponseText: text("final_response_text"),
+    finalResponseMetadataJson: text("final_response_metadata_json"),
+    finalResponseRecordedAt: text("final_response_recorded_at"),
   },
   (table) => [
     uniqueIndex("sessions_project_task_attempt_unique").on(table.projectId, table.taskId, table.attemptNumber),
