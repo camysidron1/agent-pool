@@ -39,6 +39,12 @@ export type ChatMessageRole = (typeof chatMessageRoleValues)[number];
 export const steeringMessageStatusValues = ["queued", "delivered", "failed", "canceled"] as const;
 export type SteeringMessageStatus = (typeof steeringMessageStatusValues)[number];
 
+export const storageObjectKindValues = ["artifact", "log", "blob"] as const;
+export type StorageObjectKind = (typeof storageObjectKindValues)[number];
+
+export const logStreamKindValues = ["stdout", "stderr", "combined", "system"] as const;
+export type LogStreamKind = (typeof logStreamKindValues)[number];
+
 const timestampNow = sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`;
 
 export const projects = sqliteTable(
@@ -208,6 +214,7 @@ export const artifacts = sqliteTable(
     createdAt: text("created_at").notNull().default(timestampNow),
   },
   (table) => [
+    uniqueIndex("artifacts_project_id_unique").on(table.projectId, table.id),
     index("artifacts_project_kind_idx").on(table.projectId, table.kind),
     index("artifacts_task_idx").on(table.projectId, table.taskId),
     index("artifacts_session_idx").on(table.projectId, table.sessionId),
@@ -390,6 +397,71 @@ export const notes = sqliteTable(
   ],
 );
 
+export const storageObjects = sqliteTable(
+  "storage_objects",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    artifactId: text("artifact_id"),
+    kind: text("kind", { enum: storageObjectKindValues }).notNull(),
+    provider: text("provider").notNull().default("local"),
+    bucket: text("bucket"),
+    objectKey: text("object_key").notNull(),
+    contentType: text("content_type"),
+    sizeBytes: integer("size_bytes"),
+    metadataJson: text("metadata_json").notNull().default("{}"),
+    createdAt: text("created_at").notNull().default(timestampNow),
+  },
+  (table) => [
+    uniqueIndex("storage_objects_provider_key_unique").on(table.provider, table.bucket, table.objectKey),
+    index("storage_objects_project_kind_idx").on(table.projectId, table.kind),
+    foreignKey({
+      name: "storage_objects_artifact_fk",
+      columns: [table.projectId, table.artifactId],
+      foreignColumns: [artifacts.projectId, artifacts.id],
+    }).onDelete("set null").onUpdate("cascade"),
+  ],
+);
+
+export const logStreams = sqliteTable(
+  "log_streams",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    taskId: text("task_id"),
+    sessionId: text("session_id"),
+    storageObjectId: text("storage_object_id"),
+    kind: text("kind", { enum: logStreamKindValues }).notNull().default("combined"),
+    byteOffset: integer("byte_offset").notNull().default(0),
+    lineCount: integer("line_count").notNull().default(0),
+    createdAt: text("created_at").notNull().default(timestampNow),
+    updatedAt: text("updated_at").notNull().default(timestampNow),
+  },
+  (table) => [
+    index("log_streams_session_idx").on(table.projectId, table.sessionId),
+    index("log_streams_task_idx").on(table.projectId, table.taskId),
+    foreignKey({
+      name: "log_streams_task_fk",
+      columns: [table.projectId, table.taskId],
+      foreignColumns: [tasks.projectId, tasks.id],
+    }).onDelete("cascade").onUpdate("cascade"),
+    foreignKey({
+      name: "log_streams_session_fk",
+      columns: [table.projectId, table.sessionId],
+      foreignColumns: [sessions.projectId, sessions.id],
+    }).onDelete("cascade").onUpdate("cascade"),
+    foreignKey({
+      name: "log_streams_storage_object_fk",
+      columns: [table.storageObjectId],
+      foreignColumns: [storageObjects.id],
+    }).onDelete("set null").onUpdate("cascade"),
+  ],
+);
+
 export type ProjectRow = typeof projects.$inferSelect;
 export type NewProjectRow = typeof projects.$inferInsert;
 export type TaskRow = typeof tasks.$inferSelect;
@@ -414,3 +486,7 @@ export type SteeringMessageRow = typeof steeringMessages.$inferSelect;
 export type NewSteeringMessageRow = typeof steeringMessages.$inferInsert;
 export type NoteRow = typeof notes.$inferSelect;
 export type NewNoteRow = typeof notes.$inferInsert;
+export type StorageObjectRow = typeof storageObjects.$inferSelect;
+export type NewStorageObjectRow = typeof storageObjects.$inferInsert;
+export type LogStreamRow = typeof logStreams.$inferSelect;
+export type NewLogStreamRow = typeof logStreams.$inferInsert;
