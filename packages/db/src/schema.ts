@@ -33,6 +33,12 @@ export type ArtifactKind = (typeof artifactKindValues)[number];
 export const outboxStatusValues = ["queued", "published", "failed"] as const;
 export type OutboxStatus = (typeof outboxStatusValues)[number];
 
+export const chatMessageRoleValues = ["operator", "assistant", "system"] as const;
+export type ChatMessageRole = (typeof chatMessageRoleValues)[number];
+
+export const steeringMessageStatusValues = ["queued", "delivered", "failed", "canceled"] as const;
+export type SteeringMessageStatus = (typeof steeringMessageStatusValues)[number];
+
 const timestampNow = sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`;
 
 export const projects = sqliteTable(
@@ -284,6 +290,106 @@ export const outbox = sqliteTable(
   ],
 );
 
+export const chatMessages = sqliteTable(
+  "chat_messages",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    taskId: text("task_id"),
+    sessionId: text("session_id"),
+    role: text("role", { enum: chatMessageRoleValues }).notNull(),
+    body: text("body").notNull(),
+    metadataJson: text("metadata_json").notNull().default("{}"),
+    createdAt: text("created_at").notNull().default(timestampNow),
+  },
+  (table) => [
+    index("chat_messages_project_created_idx").on(table.projectId, table.createdAt),
+    index("chat_messages_task_idx").on(table.projectId, table.taskId),
+    index("chat_messages_session_idx").on(table.projectId, table.sessionId),
+    foreignKey({
+      name: "chat_messages_task_fk",
+      columns: [table.projectId, table.taskId],
+      foreignColumns: [tasks.projectId, tasks.id],
+    }).onDelete("cascade").onUpdate("cascade"),
+    foreignKey({
+      name: "chat_messages_session_fk",
+      columns: [table.projectId, table.sessionId],
+      foreignColumns: [sessions.projectId, sessions.id],
+    }).onDelete("cascade").onUpdate("cascade"),
+  ],
+);
+
+export const steeringMessages = sqliteTable(
+  "steering_messages",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    taskId: text("task_id"),
+    sessionId: text("session_id"),
+    commandId: text("command_id"),
+    body: text("body").notNull(),
+    status: text("status", { enum: steeringMessageStatusValues }).notNull().default("queued"),
+    errorMessage: text("error_message"),
+    createdAt: text("created_at").notNull().default(timestampNow),
+    deliveredAt: text("delivered_at"),
+  },
+  (table) => [
+    index("steering_messages_project_status_idx").on(table.projectId, table.status),
+    index("steering_messages_task_idx").on(table.projectId, table.taskId),
+    index("steering_messages_session_idx").on(table.projectId, table.sessionId),
+    foreignKey({
+      name: "steering_messages_task_fk",
+      columns: [table.projectId, table.taskId],
+      foreignColumns: [tasks.projectId, tasks.id],
+    }).onDelete("cascade").onUpdate("cascade"),
+    foreignKey({
+      name: "steering_messages_session_fk",
+      columns: [table.projectId, table.sessionId],
+      foreignColumns: [sessions.projectId, sessions.id],
+    }).onDelete("cascade").onUpdate("cascade"),
+    foreignKey({
+      name: "steering_messages_command_fk",
+      columns: [table.projectId, table.commandId],
+      foreignColumns: [orchestratorCommands.projectId, orchestratorCommands.id],
+    }).onDelete("set null").onUpdate("cascade"),
+  ],
+);
+
+export const notes = sqliteTable(
+  "notes",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    taskId: text("task_id"),
+    sessionId: text("session_id"),
+    authorId: text("author_id"),
+    body: text("body").notNull(),
+    createdAt: text("created_at").notNull().default(timestampNow),
+    updatedAt: text("updated_at").notNull().default(timestampNow),
+  },
+  (table) => [
+    index("notes_project_created_idx").on(table.projectId, table.createdAt),
+    index("notes_task_idx").on(table.projectId, table.taskId),
+    index("notes_session_idx").on(table.projectId, table.sessionId),
+    foreignKey({
+      name: "notes_task_fk",
+      columns: [table.projectId, table.taskId],
+      foreignColumns: [tasks.projectId, tasks.id],
+    }).onDelete("cascade").onUpdate("cascade"),
+    foreignKey({
+      name: "notes_session_fk",
+      columns: [table.projectId, table.sessionId],
+      foreignColumns: [sessions.projectId, sessions.id],
+    }).onDelete("cascade").onUpdate("cascade"),
+  ],
+);
+
 export type ProjectRow = typeof projects.$inferSelect;
 export type NewProjectRow = typeof projects.$inferInsert;
 export type TaskRow = typeof tasks.$inferSelect;
@@ -302,3 +408,9 @@ export type EventRow = typeof events.$inferSelect;
 export type NewEventRow = typeof events.$inferInsert;
 export type OutboxRow = typeof outbox.$inferSelect;
 export type NewOutboxRow = typeof outbox.$inferInsert;
+export type ChatMessageRow = typeof chatMessages.$inferSelect;
+export type NewChatMessageRow = typeof chatMessages.$inferInsert;
+export type SteeringMessageRow = typeof steeringMessages.$inferSelect;
+export type NewSteeringMessageRow = typeof steeringMessages.$inferInsert;
+export type NoteRow = typeof notes.$inferSelect;
+export type NewNoteRow = typeof notes.$inferInsert;

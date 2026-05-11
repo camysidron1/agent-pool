@@ -6,6 +6,7 @@ import { Database } from "bun:sqlite";
 
 import {
   ARTIFACT_EVENT_OUTBOX_SCHEMA_MIGRATION_ID,
+  CHAT_STEERING_NOTE_SCHEMA_MIGRATION_ID,
   CORE_PROJECT_TASK_SCHEMA_MIGRATION_ID,
   INITIAL_MIGRATION_ID,
   MIGRATION_TABLE_NAME,
@@ -48,6 +49,10 @@ describe("web/sandbox database migration harness", () => {
           id: ARTIFACT_EVENT_OUTBOX_SCHEMA_MIGRATION_ID,
           description: "Create artifact, event, and outbox schema",
         },
+        {
+          id: CHAT_STEERING_NOTE_SCHEMA_MIGRATION_ID,
+          description: "Create chat, steering, and note schema",
+        },
       ]);
 
       const database = new Database(dbPath, { readonly: true, strict: true });
@@ -76,6 +81,7 @@ describe("web/sandbox database migration harness", () => {
         SESSION_SCHEMA_MIGRATION_ID,
         ORCHESTRATOR_COMMAND_SCHEMA_MIGRATION_ID,
         ARTIFACT_EVENT_OUTBOX_SCHEMA_MIGRATION_ID,
+        CHAT_STEERING_NOTE_SCHEMA_MIGRATION_ID,
       ]);
       expect(second.applied).toEqual([]);
     } finally {
