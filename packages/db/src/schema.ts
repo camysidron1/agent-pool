@@ -7,6 +7,12 @@ export type ProjectStatus = (typeof projectStatusValues)[number];
 export const taskStatusValues = ["queued", "running", "blocked", "completed", "failed"] as const;
 export type DbTaskStatus = (typeof taskStatusValues)[number];
 
+export const sessionStatusValues = ["queued", "starting", "running", "succeeded", "failed", "canceled"] as const;
+export type SessionStatus = (typeof sessionStatusValues)[number];
+
+export const sessionSnapshotKindValues = ["manual", "retry_base", "system"] as const;
+export type SessionSnapshotKind = (typeof sessionSnapshotKindValues)[number];
+
 const timestampNow = sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`;
 
 export const projects = sqliteTable(
@@ -71,9 +77,65 @@ export const taskDependencies = sqliteTable(
   ],
 );
 
+export const sessions = sqliteTable(
+  "sessions",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    taskId: text("task_id").notNull(),
+    attemptNumber: integer("attempt_number").notNull(),
+    status: text("status", { enum: sessionStatusValues }).notNull().default("queued"),
+    runtimeProvider: text("runtime_provider"),
+    runtimeSessionId: text("runtime_session_id"),
+    createdAt: text("created_at").notNull().default(timestampNow),
+    startedAt: text("started_at"),
+    endedAt: text("ended_at"),
+  },
+  (table) => [
+    uniqueIndex("sessions_project_task_attempt_unique").on(table.projectId, table.taskId, table.attemptNumber),
+    uniqueIndex("sessions_project_id_unique").on(table.projectId, table.id),
+    index("sessions_project_status_idx").on(table.projectId, table.status),
+    foreignKey({
+      name: "sessions_task_fk",
+      columns: [table.projectId, table.taskId],
+      foreignColumns: [tasks.projectId, tasks.id],
+    }).onDelete("cascade").onUpdate("cascade"),
+  ],
+);
+
+export const sessionSnapshots = sqliteTable(
+  "session_snapshots",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    sessionId: text("session_id").notNull(),
+    kind: text("kind", { enum: sessionSnapshotKindValues }).notNull().default("system"),
+    providerSnapshotId: text("provider_snapshot_id"),
+    label: text("label"),
+    metadataJson: text("metadata_json").notNull().default("{}"),
+    createdAt: text("created_at").notNull().default(timestampNow),
+  },
+  (table) => [
+    index("session_snapshots_session_idx").on(table.projectId, table.sessionId),
+    foreignKey({
+      name: "session_snapshots_session_fk",
+      columns: [table.projectId, table.sessionId],
+      foreignColumns: [sessions.projectId, sessions.id],
+    }).onDelete("cascade").onUpdate("cascade"),
+  ],
+);
+
 export type ProjectRow = typeof projects.$inferSelect;
 export type NewProjectRow = typeof projects.$inferInsert;
 export type TaskRow = typeof tasks.$inferSelect;
 export type NewTaskRow = typeof tasks.$inferInsert;
 export type TaskDependencyRow = typeof taskDependencies.$inferSelect;
 export type NewTaskDependencyRow = typeof taskDependencies.$inferInsert;
+export type SessionRow = typeof sessions.$inferSelect;
+export type NewSessionRow = typeof sessions.$inferInsert;
+export type SessionSnapshotRow = typeof sessionSnapshots.$inferSelect;
+export type NewSessionSnapshotRow = typeof sessionSnapshots.$inferInsert;
