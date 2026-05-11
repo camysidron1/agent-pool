@@ -12,6 +12,7 @@ import {
   MIGRATION_TABLE_NAME,
   ORCHESTRATOR_COMMAND_SCHEMA_MIGRATION_ID,
   SESSION_SCHEMA_MIGRATION_ID,
+  STORAGE_LOG_SCHEMA_MIGRATION_ID,
   createDrizzleDatabase,
   createWebSandboxDatabaseConfig,
   initializeWebSandboxDatabase,
@@ -53,6 +54,10 @@ describe("web/sandbox database migration harness", () => {
           id: CHAT_STEERING_NOTE_SCHEMA_MIGRATION_ID,
           description: "Create chat, steering, and note schema",
         },
+        {
+          id: STORAGE_LOG_SCHEMA_MIGRATION_ID,
+          description: "Create storage object and log stream metadata schema",
+        },
       ]);
 
       const database = new Database(dbPath, { readonly: true, strict: true });
@@ -82,6 +87,7 @@ describe("web/sandbox database migration harness", () => {
         ORCHESTRATOR_COMMAND_SCHEMA_MIGRATION_ID,
         ARTIFACT_EVENT_OUTBOX_SCHEMA_MIGRATION_ID,
         CHAT_STEERING_NOTE_SCHEMA_MIGRATION_ID,
+        STORAGE_LOG_SCHEMA_MIGRATION_ID,
       ]);
       expect(second.applied).toEqual([]);
     } finally {

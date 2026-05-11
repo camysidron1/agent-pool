@@ -42,6 +42,7 @@ export const SESSION_SCHEMA_MIGRATION_ID = "0002_session_schema" as const;
 export const ORCHESTRATOR_COMMAND_SCHEMA_MIGRATION_ID = "0003_orchestrator_command_schema" as const;
 export const ARTIFACT_EVENT_OUTBOX_SCHEMA_MIGRATION_ID = "0004_artifact_event_outbox_schema" as const;
 export const CHAT_STEERING_NOTE_SCHEMA_MIGRATION_ID = "0005_chat_steering_note_schema" as const;
+export const STORAGE_LOG_SCHEMA_MIGRATION_ID = "0006_storage_log_schema" as const;
 
 export const WEB_SANDBOX_MIGRATIONS: readonly SqlMigration[] = [
   {
@@ -265,6 +266,46 @@ export const WEB_SANDBOX_MIGRATIONS: readonly SqlMigration[] = [
       "CREATE INDEX IF NOT EXISTS notes_project_created_idx ON notes (project_id, created_at)",
       "CREATE INDEX IF NOT EXISTS notes_task_idx ON notes (project_id, task_id)",
       "CREATE INDEX IF NOT EXISTS notes_session_idx ON notes (project_id, session_id)",
+    ],
+  },
+  {
+    id: STORAGE_LOG_SCHEMA_MIGRATION_ID,
+    description: "Create storage object and log stream metadata schema",
+    sql: [
+      "CREATE UNIQUE INDEX IF NOT EXISTS artifacts_project_id_unique ON artifacts (project_id, id)",
+      `CREATE TABLE IF NOT EXISTS storage_objects (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE ON UPDATE CASCADE,
+        artifact_id TEXT,
+        kind TEXT NOT NULL CHECK (kind IN ('artifact', 'log', 'blob')),
+        provider TEXT NOT NULL DEFAULT 'local',
+        bucket TEXT,
+        object_key TEXT NOT NULL,
+        content_type TEXT,
+        size_bytes INTEGER CHECK (size_bytes IS NULL OR size_bytes >= 0),
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        FOREIGN KEY (project_id, artifact_id) REFERENCES artifacts(project_id, id) ON DELETE SET NULL ON UPDATE CASCADE
+      )`,
+      "CREATE UNIQUE INDEX IF NOT EXISTS storage_objects_provider_key_unique ON storage_objects (provider, bucket, object_key)",
+      "CREATE INDEX IF NOT EXISTS storage_objects_project_kind_idx ON storage_objects (project_id, kind)",
+      `CREATE TABLE IF NOT EXISTS log_streams (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE ON UPDATE CASCADE,
+        task_id TEXT,
+        session_id TEXT,
+        storage_object_id TEXT,
+        kind TEXT NOT NULL DEFAULT 'combined' CHECK (kind IN ('stdout', 'stderr', 'combined', 'system')),
+        byte_offset INTEGER NOT NULL DEFAULT 0 CHECK (byte_offset >= 0),
+        line_count INTEGER NOT NULL DEFAULT 0 CHECK (line_count >= 0),
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        FOREIGN KEY (project_id, task_id) REFERENCES tasks(project_id, id) ON DELETE CASCADE ON UPDATE CASCADE,
+        FOREIGN KEY (project_id, session_id) REFERENCES sessions(project_id, id) ON DELETE CASCADE ON UPDATE CASCADE,
+        FOREIGN KEY (storage_object_id) REFERENCES storage_objects(id) ON DELETE SET NULL ON UPDATE CASCADE
+      )`,
+      "CREATE INDEX IF NOT EXISTS log_streams_session_idx ON log_streams (project_id, session_id)",
+      "CREATE INDEX IF NOT EXISTS log_streams_task_idx ON log_streams (project_id, task_id)",
     ],
   },
 ] as const;
