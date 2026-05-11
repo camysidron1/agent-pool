@@ -40,6 +40,7 @@ export const INITIAL_MIGRATION_ID = "0000_migration_harness" as const;
 export const CORE_PROJECT_TASK_SCHEMA_MIGRATION_ID = "0001_core_project_task_schema" as const;
 export const SESSION_SCHEMA_MIGRATION_ID = "0002_session_schema" as const;
 export const ORCHESTRATOR_COMMAND_SCHEMA_MIGRATION_ID = "0003_orchestrator_command_schema" as const;
+export const ARTIFACT_EVENT_OUTBOX_SCHEMA_MIGRATION_ID = "0004_artifact_event_outbox_schema" as const;
 
 export const WEB_SANDBOX_MIGRATIONS: readonly SqlMigration[] = [
   {
@@ -148,10 +149,67 @@ export const WEB_SANDBOX_MIGRATIONS: readonly SqlMigration[] = [
         FOREIGN KEY (project_id, task_id) REFERENCES tasks(project_id, id) ON DELETE CASCADE ON UPDATE CASCADE,
         FOREIGN KEY (project_id, session_id) REFERENCES sessions(project_id, id) ON DELETE CASCADE ON UPDATE CASCADE
       )`,
+      "CREATE UNIQUE INDEX IF NOT EXISTS orchestrator_commands_project_id_unique ON orchestrator_commands (project_id, id)",
       "CREATE INDEX IF NOT EXISTS orchestrator_commands_project_status_idx ON orchestrator_commands (project_id, status)",
       "CREATE INDEX IF NOT EXISTS orchestrator_commands_project_type_idx ON orchestrator_commands (project_id, type)",
       "CREATE INDEX IF NOT EXISTS orchestrator_commands_task_idx ON orchestrator_commands (project_id, task_id)",
       "CREATE INDEX IF NOT EXISTS orchestrator_commands_session_idx ON orchestrator_commands (project_id, session_id)",
+    ],
+  },
+  {
+    id: ARTIFACT_EVENT_OUTBOX_SCHEMA_MIGRATION_ID,
+    description: "Create artifact, event, and outbox schema",
+    sql: [
+      `CREATE TABLE IF NOT EXISTS artifacts (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE ON UPDATE CASCADE,
+        task_id TEXT,
+        session_id TEXT,
+        kind TEXT NOT NULL CHECK (kind IN ('final_response_url', 'document', 'log', 'file', 'link')),
+        uri TEXT NOT NULL,
+        title TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        FOREIGN KEY (project_id, task_id) REFERENCES tasks(project_id, id) ON DELETE CASCADE ON UPDATE CASCADE,
+        FOREIGN KEY (project_id, session_id) REFERENCES sessions(project_id, id) ON DELETE CASCADE ON UPDATE CASCADE
+      )`,
+      "CREATE INDEX IF NOT EXISTS artifacts_project_kind_idx ON artifacts (project_id, kind)",
+      "CREATE INDEX IF NOT EXISTS artifacts_task_idx ON artifacts (project_id, task_id)",
+      "CREATE INDEX IF NOT EXISTS artifacts_session_idx ON artifacts (project_id, session_id)",
+      `CREATE TABLE IF NOT EXISTS events (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE ON UPDATE CASCADE,
+        task_id TEXT,
+        session_id TEXT,
+        command_id TEXT,
+        type TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        FOREIGN KEY (project_id, task_id) REFERENCES tasks(project_id, id) ON DELETE CASCADE ON UPDATE CASCADE,
+        FOREIGN KEY (project_id, session_id) REFERENCES sessions(project_id, id) ON DELETE CASCADE ON UPDATE CASCADE,
+        FOREIGN KEY (project_id, command_id) REFERENCES orchestrator_commands(project_id, id) ON DELETE SET NULL ON UPDATE CASCADE
+      )`,
+      "CREATE UNIQUE INDEX IF NOT EXISTS events_project_id_unique ON events (project_id, id)",
+      "CREATE INDEX IF NOT EXISTS events_project_created_idx ON events (project_id, created_at)",
+      "CREATE INDEX IF NOT EXISTS events_type_idx ON events (project_id, type)",
+      "CREATE INDEX IF NOT EXISTS events_task_idx ON events (project_id, task_id)",
+      "CREATE INDEX IF NOT EXISTS events_session_idx ON events (project_id, session_id)",
+      "CREATE INDEX IF NOT EXISTS events_command_idx ON events (project_id, command_id)",
+      `CREATE TABLE IF NOT EXISTS outbox (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE ON UPDATE CASCADE,
+        event_id TEXT,
+        status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'published', 'failed')),
+        routing_key TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        last_error TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        published_at TEXT,
+        FOREIGN KEY (project_id, event_id) REFERENCES events(project_id, id) ON DELETE SET NULL ON UPDATE CASCADE
+      )`,
+      "CREATE INDEX IF NOT EXISTS outbox_status_created_idx ON outbox (status, created_at)",
+      "CREATE INDEX IF NOT EXISTS outbox_project_status_idx ON outbox (project_id, status)",
     ],
   },
 ] as const;
