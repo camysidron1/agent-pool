@@ -23,12 +23,13 @@ export function createOrchestratorFetchHandler(
         ok: true,
         service: "agent-pool-orchestrator",
         authMode: config.authMode,
+        backendInternalUrl: config.orchestrator.backendInternalUrl,
       });
     }
 
     if (url.pathname === "/metrics") {
       return new Response(
-        `# metrics placeholder for agent-pool-orchestrator\nagent_pool_orchestrator_info{task_queue=\"${DEFAULT_PROJECT_TASK_QUEUE}\"} 1\n`,
+        `# metrics placeholder for agent-pool-orchestrator\nagent_pool_orchestrator_info{task_queue="${DEFAULT_PROJECT_TASK_QUEUE}"} 1\nagent_pool_orchestrator_backend_internal_configured 1\n`,
         {
           headers: {
             "content-type": "text/plain; charset=utf-8",
