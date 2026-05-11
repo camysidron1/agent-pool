@@ -4,31 +4,29 @@ import { createApiApp } from "./app";
 import { openApiDatabase } from "./database";
 
 export { createApiApp, type ApiAppOptions } from "./app";
-
-const DEFAULT_API_PORT = 3000;
+export {
+  API_DATABASE_PATH_ENV,
+  DEFAULT_API_DATABASE_RELATIVE_PATH,
+  createApiDatabaseConfig,
+  openApiDatabase,
+  resolveApiDatabasePath,
+  type ApiDatabaseConnection,
+  type ApiDatabaseEnv,
+} from "./database";
 
 if (isDirectRun()) {
   const env = readProcessEnv();
   const config = loadConfig(env);
   const database = openApiDatabase(env);
   const app = createApiApp({ config, database });
-  const port = readPort();
+  const server = app.listen(config.backend.port, () => {
+    console.info(`agent-pool-api listening on ${config.backend.port}`);
+  }) as { close: () => void };
 
-  app.listen(port, () => {
-    console.info(`agent-pool-api listening on ${port}`);
+  registerShutdown(() => {
+    database.close();
+    server.close();
   });
-}
-
-function readPort(): number {
-  const value = readProcessEnv().API_PORT;
-
-  if (!value) {
-    return DEFAULT_API_PORT;
-  }
-
-  const port = Number(value);
-
-  return Number.isInteger(port) && port > 0 ? port : DEFAULT_API_PORT;
 }
 
 function isDirectRun(): boolean {
@@ -50,4 +48,15 @@ function readProcessEnv(): Readonly<Record<string, string | undefined>> {
   };
 
   return processLike.process?.env ?? {};
+}
+
+function registerShutdown(close: () => void): void {
+  const processLike = globalThis as typeof globalThis & {
+    process?: {
+      once?: (event: string, listener: () => void) => void;
+    };
+  };
+
+  processLike.process?.once?.("SIGINT", close);
+  processLike.process?.once?.("SIGTERM", close);
 }

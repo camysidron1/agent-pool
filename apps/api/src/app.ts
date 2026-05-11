@@ -22,6 +22,8 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
       authMode: config.authMode,
       database: {
         connected: Boolean(database),
+        path: database?.path ?? null,
+        appliedMigrations: database?.appliedMigrations.length ?? 0,
       },
     });
   });
@@ -30,7 +32,9 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
     response
       .status(200)
       .type("text/plain")
-      .send(`# metrics placeholder for agent-pool-api\nagent_pool_api_info{shared_package=\"${SHARED_PACKAGE_NAME}\"} 1\n`);
+      .send(
+        `# metrics placeholder for agent-pool-api\nagent_pool_api_info{shared_package="${SHARED_PACKAGE_NAME}"} 1\nagent_pool_api_database_connected ${database ? 1 : 0}\nagent_pool_api_database_applied_migrations ${database?.appliedMigrations.length ?? 0}\n`,
+      );
   });
 
   return app;
