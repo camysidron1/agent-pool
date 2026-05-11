@@ -31,6 +31,10 @@ describe("API service skeleton", () => {
       expect(body.database.connected).toBe(true);
       expect(body.database.path).toEndWith("web-sandbox.db");
       expect(body.database.appliedMigrations).toBeGreaterThan(0);
+      expect(body.adapters).toMatchObject({
+        queue: { kind: "rabbitmq", connected: false },
+        storage: { kind: "local" },
+      });
     } finally {
       await close();
     }
@@ -74,6 +78,8 @@ describe("API service skeleton", () => {
       expect(text).toContain("agent_pool_api_info");
       expect(text).toContain("agent_pool_api_database_connected 1");
       expect(text).toContain("agent_pool_api_database_applied_migrations");
+      expect(text).toContain("agent_pool_api_queue_adapter_initialized 1");
+      expect(text).toContain("agent_pool_api_storage_adapter_initialized 1");
     } finally {
       await close();
     }
