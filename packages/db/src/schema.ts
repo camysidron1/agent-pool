@@ -13,6 +13,20 @@ export type SessionStatus = (typeof sessionStatusValues)[number];
 export const sessionSnapshotKindValues = ["manual", "retry_base", "system"] as const;
 export type SessionSnapshotKind = (typeof sessionSnapshotKindValues)[number];
 
+export const orchestratorCommandTypeValues = [
+  "start",
+  "stop",
+  "cancel",
+  "retry",
+  "cleanup",
+  "interrupt",
+  "steer",
+] as const;
+export type OrchestratorCommandType = (typeof orchestratorCommandTypeValues)[number];
+
+export const orchestratorCommandStatusValues = ["queued", "running", "succeeded", "failed", "canceled"] as const;
+export type OrchestratorCommandStatus = (typeof orchestratorCommandStatusValues)[number];
+
 const timestampNow = sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`;
 
 export const projects = sqliteTable(
@@ -129,6 +143,42 @@ export const sessionSnapshots = sqliteTable(
   ],
 );
 
+export const orchestratorCommands = sqliteTable(
+  "orchestrator_commands",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    taskId: text("task_id"),
+    sessionId: text("session_id"),
+    type: text("type", { enum: orchestratorCommandTypeValues }).notNull(),
+    status: text("status", { enum: orchestratorCommandStatusValues }).notNull().default("queued"),
+    payloadJson: text("payload_json").notNull().default("{}"),
+    errorMessage: text("error_message"),
+    requestedBy: text("requested_by"),
+    createdAt: text("created_at").notNull().default(timestampNow),
+    claimedAt: text("claimed_at"),
+    completedAt: text("completed_at"),
+  },
+  (table) => [
+    index("orchestrator_commands_project_status_idx").on(table.projectId, table.status),
+    index("orchestrator_commands_project_type_idx").on(table.projectId, table.type),
+    index("orchestrator_commands_task_idx").on(table.projectId, table.taskId),
+    index("orchestrator_commands_session_idx").on(table.projectId, table.sessionId),
+    foreignKey({
+      name: "orchestrator_commands_task_fk",
+      columns: [table.projectId, table.taskId],
+      foreignColumns: [tasks.projectId, tasks.id],
+    }).onDelete("cascade").onUpdate("cascade"),
+    foreignKey({
+      name: "orchestrator_commands_session_fk",
+      columns: [table.projectId, table.sessionId],
+      foreignColumns: [sessions.projectId, sessions.id],
+    }).onDelete("cascade").onUpdate("cascade"),
+  ],
+);
+
 export type ProjectRow = typeof projects.$inferSelect;
 export type NewProjectRow = typeof projects.$inferInsert;
 export type TaskRow = typeof tasks.$inferSelect;
@@ -139,3 +189,5 @@ export type SessionRow = typeof sessions.$inferSelect;
 export type NewSessionRow = typeof sessions.$inferInsert;
 export type SessionSnapshotRow = typeof sessionSnapshots.$inferSelect;
 export type NewSessionSnapshotRow = typeof sessionSnapshots.$inferInsert;
+export type OrchestratorCommandRow = typeof orchestratorCommands.$inferSelect;
+export type NewOrchestratorCommandRow = typeof orchestratorCommands.$inferInsert;

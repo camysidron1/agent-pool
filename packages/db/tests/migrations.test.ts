@@ -7,8 +7,9 @@ import { Database } from "bun:sqlite";
 import {
   CORE_PROJECT_TASK_SCHEMA_MIGRATION_ID,
   INITIAL_MIGRATION_ID,
-  SESSION_SCHEMA_MIGRATION_ID,
   MIGRATION_TABLE_NAME,
+  ORCHESTRATOR_COMMAND_SCHEMA_MIGRATION_ID,
+  SESSION_SCHEMA_MIGRATION_ID,
   createDrizzleDatabase,
   createWebSandboxDatabaseConfig,
   initializeWebSandboxDatabase,
@@ -38,6 +39,10 @@ describe("web/sandbox database migration harness", () => {
           id: SESSION_SCHEMA_MIGRATION_ID,
           description: "Create sessions and session snapshot schema",
         },
+        {
+          id: ORCHESTRATOR_COMMAND_SCHEMA_MIGRATION_ID,
+          description: "Create durable orchestrator command schema",
+        },
       ]);
 
       const database = new Database(dbPath, { readonly: true, strict: true });
@@ -64,6 +69,7 @@ describe("web/sandbox database migration harness", () => {
         INITIAL_MIGRATION_ID,
         CORE_PROJECT_TASK_SCHEMA_MIGRATION_ID,
         SESSION_SCHEMA_MIGRATION_ID,
+        ORCHESTRATOR_COMMAND_SCHEMA_MIGRATION_ID,
       ]);
       expect(second.applied).toEqual([]);
     } finally {
