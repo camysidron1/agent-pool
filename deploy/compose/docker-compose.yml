@@ -5,11 +5,17 @@ services:
     command: sh -lc "bun install --frozen-lockfile && cd apps/api && bun run start"
     environment:
       AUTH_MODE: test
+      INTERNAL_SERVICE_TOKEN: compose-internal-service-token
       API_PORT: "3000"
+      API_PUBLIC_URL: http://localhost:3000
+      API_INTERNAL_URL: http://api:3000
       AGENT_POOL_WEB_SANDBOX_DB_PATH: /data/web-sandbox.db
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
-      AGENT_POOL_STORAGE_ENDPOINT: http://minio:9000
-      AGENT_POOL_STORAGE_BUCKET: agent-pool-local
+      RABBITMQ_PROJECT_TASK_QUEUE_PREFIX: project-tasks
+      RABBITMQ_PROJECT_CONTROL_QUEUE_PREFIX: project-control
+      STORAGE_ADAPTER: blob
+      STORAGE_BUCKET: agent-pool-local
+      STORAGE_LOCAL_ROOT: /data/storage
     ports:
       - "3000:3000"
     volumes:
@@ -28,9 +34,16 @@ services:
     command: sh -lc "bun install --frozen-lockfile && cd apps/orchestrator && bun run start"
     environment:
       AUTH_MODE: test
+      INTERNAL_SERVICE_TOKEN: compose-internal-service-token
       ORCHESTRATOR_PORT: "3001"
-      API_INTERNAL_URL: http://api:3000
+      ORCHESTRATOR_PUBLIC_URL: http://localhost:3001
+      ORCHESTRATOR_BACKEND_INTERNAL_URL: http://api:3000
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      RABBITMQ_PROJECT_TASK_QUEUE_PREFIX: project-tasks
+      RABBITMQ_PROJECT_CONTROL_QUEUE_PREFIX: project-control
+      STORAGE_ADAPTER: blob
+      STORAGE_BUCKET: agent-pool-local
+      STORAGE_LOCAL_ROOT: /workspace/.agent-pool/web-sandbox/storage
       RUNTIME_PROVIDER: stub
     ports:
       - "3001:3001"
@@ -41,6 +54,8 @@ services:
       api:
         condition: service_started
       rabbitmq:
+        condition: service_healthy
+      minio:
         condition: service_healthy
 
   rabbitmq:
