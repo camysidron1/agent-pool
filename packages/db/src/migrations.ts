@@ -41,6 +41,7 @@ export const CORE_PROJECT_TASK_SCHEMA_MIGRATION_ID = "0001_core_project_task_sch
 export const SESSION_SCHEMA_MIGRATION_ID = "0002_session_schema" as const;
 export const ORCHESTRATOR_COMMAND_SCHEMA_MIGRATION_ID = "0003_orchestrator_command_schema" as const;
 export const ARTIFACT_EVENT_OUTBOX_SCHEMA_MIGRATION_ID = "0004_artifact_event_outbox_schema" as const;
+export const CHAT_STEERING_NOTE_SCHEMA_MIGRATION_ID = "0005_chat_steering_note_schema" as const;
 
 export const WEB_SANDBOX_MIGRATIONS: readonly SqlMigration[] = [
   {
@@ -210,6 +211,60 @@ export const WEB_SANDBOX_MIGRATIONS: readonly SqlMigration[] = [
       )`,
       "CREATE INDEX IF NOT EXISTS outbox_status_created_idx ON outbox (status, created_at)",
       "CREATE INDEX IF NOT EXISTS outbox_project_status_idx ON outbox (project_id, status)",
+    ],
+  },
+  {
+    id: CHAT_STEERING_NOTE_SCHEMA_MIGRATION_ID,
+    description: "Create chat, steering, and note schema",
+    sql: [
+      `CREATE TABLE IF NOT EXISTS chat_messages (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE ON UPDATE CASCADE,
+        task_id TEXT,
+        session_id TEXT,
+        role TEXT NOT NULL CHECK (role IN ('operator', 'assistant', 'system')),
+        body TEXT NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        FOREIGN KEY (project_id, task_id) REFERENCES tasks(project_id, id) ON DELETE CASCADE ON UPDATE CASCADE,
+        FOREIGN KEY (project_id, session_id) REFERENCES sessions(project_id, id) ON DELETE CASCADE ON UPDATE CASCADE
+      )`,
+      "CREATE INDEX IF NOT EXISTS chat_messages_project_created_idx ON chat_messages (project_id, created_at)",
+      "CREATE INDEX IF NOT EXISTS chat_messages_task_idx ON chat_messages (project_id, task_id)",
+      "CREATE INDEX IF NOT EXISTS chat_messages_session_idx ON chat_messages (project_id, session_id)",
+      `CREATE TABLE IF NOT EXISTS steering_messages (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE ON UPDATE CASCADE,
+        task_id TEXT,
+        session_id TEXT,
+        command_id TEXT,
+        body TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'delivered', 'failed', 'canceled')),
+        error_message TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        delivered_at TEXT,
+        FOREIGN KEY (project_id, task_id) REFERENCES tasks(project_id, id) ON DELETE CASCADE ON UPDATE CASCADE,
+        FOREIGN KEY (project_id, session_id) REFERENCES sessions(project_id, id) ON DELETE CASCADE ON UPDATE CASCADE,
+        FOREIGN KEY (project_id, command_id) REFERENCES orchestrator_commands(project_id, id) ON DELETE SET NULL ON UPDATE CASCADE
+      )`,
+      "CREATE INDEX IF NOT EXISTS steering_messages_project_status_idx ON steering_messages (project_id, status)",
+      "CREATE INDEX IF NOT EXISTS steering_messages_task_idx ON steering_messages (project_id, task_id)",
+      "CREATE INDEX IF NOT EXISTS steering_messages_session_idx ON steering_messages (project_id, session_id)",
+      `CREATE TABLE IF NOT EXISTS notes (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE ON UPDATE CASCADE,
+        task_id TEXT,
+        session_id TEXT,
+        author_id TEXT,
+        body TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        FOREIGN KEY (project_id, task_id) REFERENCES tasks(project_id, id) ON DELETE CASCADE ON UPDATE CASCADE,
+        FOREIGN KEY (project_id, session_id) REFERENCES sessions(project_id, id) ON DELETE CASCADE ON UPDATE CASCADE
+      )`,
+      "CREATE INDEX IF NOT EXISTS notes_project_created_idx ON notes (project_id, created_at)",
+      "CREATE INDEX IF NOT EXISTS notes_task_idx ON notes (project_id, task_id)",
+      "CREATE INDEX IF NOT EXISTS notes_session_idx ON notes (project_id, session_id)",
     ],
   },
 ] as const;
