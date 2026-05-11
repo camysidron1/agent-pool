@@ -17,7 +17,9 @@
   "dependencies": {
     "@agent-pool/config": "workspace:*",
     "@agent-pool/db": "workspace:*",
+    "@agent-pool/queue": "workspace:*",
     "@agent-pool/shared": "workspace:*",
+    "@agent-pool/storage": "workspace:*",
     "express": "^5.1.0"
   }
 }

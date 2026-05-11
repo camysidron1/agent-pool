@@ -18,6 +18,10 @@ describe("orchestrator service skeleton", () => {
       service: "agent-pool-orchestrator",
       authMode: "test",
       backendInternalUrl: "http://api.internal.test:3000",
+      adapters: {
+        queue: { kind: "rabbitmq", connected: false },
+        storage: { kind: "local" },
+      },
     });
   });
 
@@ -29,6 +33,8 @@ describe("orchestrator service skeleton", () => {
     expect(response.status).toBe(200);
     expect(text).toContain("agent_pool_orchestrator_info");
     expect(text).toContain("agent_pool_orchestrator_backend_internal_configured 1");
+    expect(text).toContain("agent_pool_orchestrator_queue_adapter_initialized 1");
+    expect(text).toContain("agent_pool_orchestrator_storage_adapter_initialized 1");
   });
 
   test("backend internal health client sends service-token auth and handles success", async () => {
