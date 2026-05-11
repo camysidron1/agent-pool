@@ -96,3 +96,17 @@ export {
   type TaskDependencyRow,
   type TaskRow,
 } from "./schema";
+
+export {
+  createCanonicalStateServices,
+  type AppendEventInput,
+  type CanonicalStateServices,
+  type CreateProjectInput,
+  type CreateSessionAttemptInput,
+  type CreateTaskInput,
+  type EventRecord,
+  type OutboxRecord,
+  type ProjectRecord,
+  type SessionRecord,
+  type TaskRecord,
+} from "./services";
