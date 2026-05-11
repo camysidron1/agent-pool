@@ -8,6 +8,7 @@ export {
 export {
   CORE_PROJECT_TASK_SCHEMA_MIGRATION_ID,
   INITIAL_MIGRATION_ID,
+  ORCHESTRATOR_COMMAND_SCHEMA_MIGRATION_ID,
   SESSION_SCHEMA_MIGRATION_ID,
   MIGRATION_TABLE_NAME,
   WEB_SANDBOX_MIGRATIONS,
@@ -25,6 +26,9 @@ export {
 } from "./migrations";
 
 export {
+  orchestratorCommandStatusValues,
+  orchestratorCommandTypeValues,
+  orchestratorCommands,
   projectStatusValues,
   projects,
   sessionSnapshotKindValues,
@@ -35,11 +39,15 @@ export {
   taskStatusValues,
   tasks,
   type DbTaskStatus,
+  type NewOrchestratorCommandRow,
   type NewProjectRow,
   type NewSessionRow,
   type NewSessionSnapshotRow,
   type NewTaskDependencyRow,
   type NewTaskRow,
+  type OrchestratorCommandRow,
+  type OrchestratorCommandStatus,
+  type OrchestratorCommandType,
   type ProjectRow,
   type ProjectStatus,
   type SessionRow,

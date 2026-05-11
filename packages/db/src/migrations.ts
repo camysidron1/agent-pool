@@ -39,6 +39,7 @@ export const MIGRATION_TABLE_NAME = "web_sandbox_migrations" as const;
 export const INITIAL_MIGRATION_ID = "0000_migration_harness" as const;
 export const CORE_PROJECT_TASK_SCHEMA_MIGRATION_ID = "0001_core_project_task_schema" as const;
 export const SESSION_SCHEMA_MIGRATION_ID = "0002_session_schema" as const;
+export const ORCHESTRATOR_COMMAND_SCHEMA_MIGRATION_ID = "0003_orchestrator_command_schema" as const;
 
 export const WEB_SANDBOX_MIGRATIONS: readonly SqlMigration[] = [
   {
@@ -125,6 +126,32 @@ export const WEB_SANDBOX_MIGRATIONS: readonly SqlMigration[] = [
         FOREIGN KEY (project_id, session_id) REFERENCES sessions(project_id, id) ON DELETE CASCADE ON UPDATE CASCADE
       )`,
       "CREATE INDEX IF NOT EXISTS session_snapshots_session_idx ON session_snapshots (project_id, session_id)",
+    ],
+  },
+  {
+    id: ORCHESTRATOR_COMMAND_SCHEMA_MIGRATION_ID,
+    description: "Create durable orchestrator command schema",
+    sql: [
+      `CREATE TABLE IF NOT EXISTS orchestrator_commands (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE ON UPDATE CASCADE,
+        task_id TEXT,
+        session_id TEXT,
+        type TEXT NOT NULL CHECK (type IN ('start', 'stop', 'cancel', 'retry', 'cleanup', 'interrupt', 'steer')),
+        status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'canceled')),
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        error_message TEXT,
+        requested_by TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        claimed_at TEXT,
+        completed_at TEXT,
+        FOREIGN KEY (project_id, task_id) REFERENCES tasks(project_id, id) ON DELETE CASCADE ON UPDATE CASCADE,
+        FOREIGN KEY (project_id, session_id) REFERENCES sessions(project_id, id) ON DELETE CASCADE ON UPDATE CASCADE
+      )`,
+      "CREATE INDEX IF NOT EXISTS orchestrator_commands_project_status_idx ON orchestrator_commands (project_id, status)",
+      "CREATE INDEX IF NOT EXISTS orchestrator_commands_project_type_idx ON orchestrator_commands (project_id, type)",
+      "CREATE INDEX IF NOT EXISTS orchestrator_commands_task_idx ON orchestrator_commands (project_id, task_id)",
+      "CREATE INDEX IF NOT EXISTS orchestrator_commands_session_idx ON orchestrator_commands (project_id, session_id)",
     ],
   },
 ] as const;
