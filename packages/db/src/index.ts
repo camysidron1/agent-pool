@@ -6,6 +6,7 @@ export {
 } from "./ownership";
 
 export {
+  ARTIFACT_EVENT_OUTBOX_SCHEMA_MIGRATION_ID,
   CORE_PROJECT_TASK_SCHEMA_MIGRATION_ID,
   INITIAL_MIGRATION_ID,
   ORCHESTRATOR_COMMAND_SCHEMA_MIGRATION_ID,
@@ -26,9 +27,14 @@ export {
 } from "./migrations";
 
 export {
+  artifactKindValues,
+  artifacts,
+  events,
   orchestratorCommandStatusValues,
   orchestratorCommandTypeValues,
   orchestratorCommands,
+  outbox,
+  outboxStatusValues,
   projectStatusValues,
   projects,
   sessionSnapshotKindValues,
@@ -38,8 +44,14 @@ export {
   taskDependencies,
   taskStatusValues,
   tasks,
+  type ArtifactKind,
+  type ArtifactRow,
   type DbTaskStatus,
+  type EventRow,
+  type NewArtifactRow,
+  type NewEventRow,
   type NewOrchestratorCommandRow,
+  type NewOutboxRow,
   type NewProjectRow,
   type NewSessionRow,
   type NewSessionSnapshotRow,
@@ -48,6 +60,8 @@ export {
   type OrchestratorCommandRow,
   type OrchestratorCommandStatus,
   type OrchestratorCommandType,
+  type OutboxRow,
+  type OutboxStatus,
   type ProjectRow,
   type ProjectStatus,
   type SessionRow,

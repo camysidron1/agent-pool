@@ -27,6 +27,12 @@ export type OrchestratorCommandType = (typeof orchestratorCommandTypeValues)[num
 export const orchestratorCommandStatusValues = ["queued", "running", "succeeded", "failed", "canceled"] as const;
 export type OrchestratorCommandStatus = (typeof orchestratorCommandStatusValues)[number];
 
+export const artifactKindValues = ["final_response_url", "document", "log", "file", "link"] as const;
+export type ArtifactKind = (typeof artifactKindValues)[number];
+
+export const outboxStatusValues = ["queued", "published", "failed"] as const;
+export type OutboxStatus = (typeof outboxStatusValues)[number];
+
 const timestampNow = sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`;
 
 export const projects = sqliteTable(
@@ -162,6 +168,7 @@ export const orchestratorCommands = sqliteTable(
     completedAt: text("completed_at"),
   },
   (table) => [
+    uniqueIndex("orchestrator_commands_project_id_unique").on(table.projectId, table.id),
     index("orchestrator_commands_project_status_idx").on(table.projectId, table.status),
     index("orchestrator_commands_project_type_idx").on(table.projectId, table.type),
     index("orchestrator_commands_task_idx").on(table.projectId, table.taskId),
@@ -179,6 +186,104 @@ export const orchestratorCommands = sqliteTable(
   ],
 );
 
+export const artifacts = sqliteTable(
+  "artifacts",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    taskId: text("task_id"),
+    sessionId: text("session_id"),
+    kind: text("kind", { enum: artifactKindValues }).notNull(),
+    uri: text("uri").notNull(),
+    title: text("title"),
+    metadataJson: text("metadata_json").notNull().default("{}"),
+    createdAt: text("created_at").notNull().default(timestampNow),
+  },
+  (table) => [
+    index("artifacts_project_kind_idx").on(table.projectId, table.kind),
+    index("artifacts_task_idx").on(table.projectId, table.taskId),
+    index("artifacts_session_idx").on(table.projectId, table.sessionId),
+    foreignKey({
+      name: "artifacts_task_fk",
+      columns: [table.projectId, table.taskId],
+      foreignColumns: [tasks.projectId, tasks.id],
+    }).onDelete("cascade").onUpdate("cascade"),
+    foreignKey({
+      name: "artifacts_session_fk",
+      columns: [table.projectId, table.sessionId],
+      foreignColumns: [sessions.projectId, sessions.id],
+    }).onDelete("cascade").onUpdate("cascade"),
+  ],
+);
+
+export const events = sqliteTable(
+  "events",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    taskId: text("task_id"),
+    sessionId: text("session_id"),
+    commandId: text("command_id"),
+    type: text("type").notNull(),
+    payloadJson: text("payload_json").notNull().default("{}"),
+    createdAt: text("created_at").notNull().default(timestampNow),
+  },
+  (table) => [
+    uniqueIndex("events_project_id_unique").on(table.projectId, table.id),
+    index("events_project_created_idx").on(table.projectId, table.createdAt),
+    index("events_type_idx").on(table.projectId, table.type),
+    index("events_task_idx").on(table.projectId, table.taskId),
+    index("events_session_idx").on(table.projectId, table.sessionId),
+    index("events_command_idx").on(table.projectId, table.commandId),
+    foreignKey({
+      name: "events_task_fk",
+      columns: [table.projectId, table.taskId],
+      foreignColumns: [tasks.projectId, tasks.id],
+    }).onDelete("cascade").onUpdate("cascade"),
+    foreignKey({
+      name: "events_session_fk",
+      columns: [table.projectId, table.sessionId],
+      foreignColumns: [sessions.projectId, sessions.id],
+    }).onDelete("cascade").onUpdate("cascade"),
+    foreignKey({
+      name: "events_command_fk",
+      columns: [table.projectId, table.commandId],
+      foreignColumns: [orchestratorCommands.projectId, orchestratorCommands.id],
+    }).onDelete("set null").onUpdate("cascade"),
+  ],
+);
+
+export const outbox = sqliteTable(
+  "outbox",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    eventId: text("event_id"),
+    status: text("status", { enum: outboxStatusValues }).notNull().default("queued"),
+    routingKey: text("routing_key").notNull(),
+    payloadJson: text("payload_json").notNull().default("{}"),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    createdAt: text("created_at").notNull().default(timestampNow),
+    publishedAt: text("published_at"),
+  },
+  (table) => [
+    index("outbox_status_created_idx").on(table.status, table.createdAt),
+    index("outbox_project_status_idx").on(table.projectId, table.status),
+    foreignKey({
+      name: "outbox_event_fk",
+      columns: [table.projectId, table.eventId],
+      foreignColumns: [events.projectId, events.id],
+    }).onDelete("set null").onUpdate("cascade"),
+  ],
+);
+
 export type ProjectRow = typeof projects.$inferSelect;
 export type NewProjectRow = typeof projects.$inferInsert;
 export type TaskRow = typeof tasks.$inferSelect;
@@ -191,3 +296,9 @@ export type SessionSnapshotRow = typeof sessionSnapshots.$inferSelect;
 export type NewSessionSnapshotRow = typeof sessionSnapshots.$inferInsert;
 export type OrchestratorCommandRow = typeof orchestratorCommands.$inferSelect;
 export type NewOrchestratorCommandRow = typeof orchestratorCommands.$inferInsert;
+export type ArtifactRow = typeof artifacts.$inferSelect;
+export type NewArtifactRow = typeof artifacts.$inferInsert;
+export type EventRow = typeof events.$inferSelect;
+export type NewEventRow = typeof events.$inferInsert;
+export type OutboxRow = typeof outbox.$inferSelect;
+export type NewOutboxRow = typeof outbox.$inferInsert;
