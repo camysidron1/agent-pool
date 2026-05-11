@@ -8,6 +8,7 @@ import {
   ARTIFACT_EVENT_OUTBOX_SCHEMA_MIGRATION_ID,
   CHAT_STEERING_NOTE_SCHEMA_MIGRATION_ID,
   CORE_PROJECT_TASK_SCHEMA_MIGRATION_ID,
+  FINAL_RESPONSE_SCHEMA_MIGRATION_ID,
   INITIAL_MIGRATION_ID,
   MIGRATION_TABLE_NAME,
   ORCHESTRATOR_COMMAND_SCHEMA_MIGRATION_ID,
@@ -58,6 +59,10 @@ describe("web/sandbox database migration harness", () => {
           id: STORAGE_LOG_SCHEMA_MIGRATION_ID,
           description: "Create storage object and log stream metadata schema",
         },
+        {
+          id: FINAL_RESPONSE_SCHEMA_MIGRATION_ID,
+          description: "Add final assistant response persistence fields",
+        },
       ]);
 
       const database = new Database(dbPath, { readonly: true, strict: true });
@@ -88,6 +93,7 @@ describe("web/sandbox database migration harness", () => {
         ARTIFACT_EVENT_OUTBOX_SCHEMA_MIGRATION_ID,
         CHAT_STEERING_NOTE_SCHEMA_MIGRATION_ID,
         STORAGE_LOG_SCHEMA_MIGRATION_ID,
+        FINAL_RESPONSE_SCHEMA_MIGRATION_ID,
       ]);
       expect(second.applied).toEqual([]);
     } finally {

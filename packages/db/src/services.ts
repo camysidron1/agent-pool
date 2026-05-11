@@ -96,6 +96,17 @@ export type RequestCommandResult =
   | { readonly ok: true; readonly command: CommandRecord; readonly event: EventRecord; readonly outbox: OutboxRecord }
   | { readonly ok: false; readonly error: CommandAdmissibilityError };
 
+export type RecordFinalAssistantResponseInput = {
+  readonly projectId: string;
+  readonly sessionId: string;
+  readonly text: string;
+  readonly metadata?: Readonly<Record<string, unknown>>;
+};
+
+export type FinalAssistantResponseResult =
+  | { readonly ok: true; readonly event: EventRecord }
+  | { readonly ok: false; readonly error: { readonly code: "not_found" | "conflict"; readonly message: string } };
+
 export function createCanonicalStateServices(database: WebSandboxSqliteDatabase) {
   database.exec("PRAGMA foreign_keys = ON");
 
@@ -225,6 +236,56 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
           event,
           outbox,
         } as const;
+      });
+    },
+
+    recordFinalAssistantResponse(input: RecordFinalAssistantResponseInput): FinalAssistantResponseResult {
+      const metadataJson = JSON.stringify(input.metadata ?? {});
+      const current = database
+        .query<
+          { task_id: string; final_response_text: string | null; final_response_metadata_json: string | null },
+          [string, string]
+        >(
+          "SELECT task_id, final_response_text, final_response_metadata_json FROM sessions WHERE project_id = ? AND id = ?",
+        )
+        .get(input.projectId, input.sessionId);
+
+      if (!current) {
+        return { ok: false, error: { code: "not_found", message: `session not found: ${input.sessionId}` } };
+      }
+      if (current.final_response_text !== null || current.final_response_metadata_json !== null) {
+        if (current.final_response_text === input.text && current.final_response_metadata_json === metadataJson) {
+          const event = appendEvent(database, {
+            projectId: input.projectId,
+            taskId: current.task_id,
+            sessionId: input.sessionId,
+            type: "session.final_response.idempotent",
+            payload: { sessionId: input.sessionId },
+          });
+          return { ok: true, event };
+        }
+
+        return {
+          ok: false,
+          error: { code: "conflict", message: "final assistant response already recorded with different content" },
+        };
+      }
+
+      return transaction(database, () => {
+        database
+          .query(
+            "UPDATE sessions SET final_response_text = ?, final_response_metadata_json = ?, final_response_recorded_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ?",
+          )
+          .run(input.text, metadataJson, input.projectId, input.sessionId);
+
+        const event = appendEvent(database, {
+          projectId: input.projectId,
+          taskId: current.task_id,
+          sessionId: input.sessionId,
+          type: "session.final_response.recorded",
+          payload: { sessionId: input.sessionId },
+        });
+        return { ok: true, event } as const;
       });
     },
   };
