@@ -67,6 +67,35 @@ export type SessionRecord = {
   readonly attemptNumber: number;
 };
 
+export type CommandType = "start" | "stop" | "cancel" | "retry" | "cleanup" | "interrupt" | "steer";
+
+export type RequestCommandInput = {
+  readonly id?: string;
+  readonly projectId: string;
+  readonly taskId?: string | null;
+  readonly sessionId?: string | null;
+  readonly type: CommandType;
+  readonly payload?: Readonly<Record<string, unknown>>;
+  readonly requestedBy?: string | null;
+};
+
+export type CommandRecord = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string | null;
+  readonly sessionId: string | null;
+  readonly type: CommandType;
+};
+
+export type CommandAdmissibilityError = {
+  readonly code: "not_found" | "invalid_state" | "conflict" | "missing_scope";
+  readonly message: string;
+};
+
+export type RequestCommandResult =
+  | { readonly ok: true; readonly command: CommandRecord; readonly event: EventRecord; readonly outbox: OutboxRecord }
+  | { readonly ok: false; readonly error: CommandAdmissibilityError };
+
 export function createCanonicalStateServices(database: WebSandboxSqliteDatabase) {
   database.exec("PRAGMA foreign_keys = ON");
 
@@ -148,6 +177,56 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
         };
       });
     },
+
+    requestCommand(input: RequestCommandInput): RequestCommandResult {
+      const admissibility = validateCommand(database, input);
+      if (!admissibility.ok) return admissibility;
+
+      return transaction(database, () => {
+        const commandId = input.id ?? createId("command");
+        database
+          .query(
+            "INSERT INTO orchestrator_commands (id, project_id, task_id, session_id, type, payload_json, requested_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          )
+          .run(
+            commandId,
+            input.projectId,
+            input.taskId ?? null,
+            input.sessionId ?? null,
+            input.type,
+            JSON.stringify(input.payload ?? {}),
+            input.requestedBy ?? null,
+          );
+
+        const event = appendEvent(database, {
+          projectId: input.projectId,
+          taskId: input.taskId,
+          sessionId: input.sessionId,
+          commandId,
+          type: "command.queued",
+          payload: { commandId, type: input.type },
+        });
+        const outbox = enqueueOutbox(database, {
+          projectId: input.projectId,
+          eventId: event.id,
+          routingKey: projectRoutingKey(input.projectId, "control"),
+          payload: { eventId: event.id, commandId, type: input.type },
+        });
+
+        return {
+          ok: true,
+          command: {
+            id: commandId,
+            projectId: input.projectId,
+            taskId: input.taskId ?? null,
+            sessionId: input.sessionId ?? null,
+            type: input.type,
+          },
+          event,
+          outbox,
+        } as const;
+      });
+    },
   };
 }
 
@@ -213,6 +292,68 @@ function nextSessionAttemptNumber(database: WebSandboxSqliteDatabase, projectId:
     .get(projectId, taskId);
 
   return (row?.max_attempt ?? 0) + 1;
+}
+
+function validateCommand(database: WebSandboxSqliteDatabase, input: RequestCommandInput): { readonly ok: true } | { readonly ok: false; readonly error: CommandAdmissibilityError } {
+  const task = input.taskId ? readTaskState(database, input.projectId, input.taskId) : null;
+  const session = input.sessionId ? readSessionState(database, input.projectId, input.sessionId) : null;
+
+  if (input.taskId && !task) return commandError("not_found", `task not found: ${input.taskId}`);
+  if (input.sessionId && !session) return commandError("not_found", `session not found: ${input.sessionId}`);
+
+  const conflict = database
+    .query<{ id: string }, [string, string | null, string | null, string]>(
+      "SELECT id FROM orchestrator_commands WHERE project_id = ? AND task_id IS ? AND session_id IS ? AND type = ? AND status IN ('queued', 'running') LIMIT 1",
+    )
+    .get(input.projectId, input.taskId ?? null, input.sessionId ?? null, input.type);
+  if (conflict) return commandError("conflict", `conflicting command already queued or running: ${conflict.id}`);
+
+  switch (input.type) {
+    case "start":
+      if (!task) return commandError("missing_scope", "start requires a task");
+      if (task.status !== "queued") return commandError("invalid_state", `start requires queued task; got ${task.status}`);
+      return { ok: true };
+    case "cancel":
+      if (!task) return commandError("missing_scope", "cancel requires a task");
+      if (["completed", "failed"].includes(task.status)) {
+        return commandError("invalid_state", `cancel requires active task; got ${task.status}`);
+      }
+      return { ok: true };
+    case "retry":
+      if (!task) return commandError("missing_scope", "retry requires a task");
+      if (!["failed", "completed"].includes(task.status)) {
+        return commandError("invalid_state", `retry requires terminal task; got ${task.status}`);
+      }
+      return { ok: true };
+    case "stop":
+    case "interrupt":
+    case "steer":
+      if (!session) return commandError("missing_scope", `${input.type} requires a session`);
+      if (session.status !== "running") {
+        return commandError("invalid_state", `${input.type} requires running session; got ${session.status}`);
+      }
+      return { ok: true };
+    case "cleanup":
+      if (!session) return commandError("missing_scope", "cleanup requires a session");
+      if (!["succeeded", "failed", "canceled"].includes(session.status)) {
+        return commandError("invalid_state", `cleanup requires terminal session; got ${session.status}`);
+      }
+      return { ok: true };
+  }
+}
+
+function readTaskState(database: WebSandboxSqliteDatabase, projectId: string, taskId: string): { readonly status: string } | null {
+  return database.query<{ status: string }, [string, string]>("SELECT status FROM tasks WHERE project_id = ? AND id = ?").get(projectId, taskId);
+}
+
+function readSessionState(database: WebSandboxSqliteDatabase, projectId: string, sessionId: string): { readonly status: string } | null {
+  return database
+    .query<{ status: string }, [string, string]>("SELECT status FROM sessions WHERE project_id = ? AND id = ?")
+    .get(projectId, sessionId);
+}
+
+function commandError(code: CommandAdmissibilityError["code"], message: string): { readonly ok: false; readonly error: CommandAdmissibilityError } {
+  return { ok: false, error: { code, message } };
 }
 
 function transaction<T>(database: WebSandboxSqliteDatabase, run: () => T): T {
