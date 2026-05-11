@@ -1,5 +1,6 @@
 import express, { type Express } from "express";
 
+import { verifyServiceTokenValue } from "@agent-pool/auth";
 import { type AppConfig, loadConfig } from "@agent-pool/config";
 import { SHARED_PACKAGE_NAME } from "@agent-pool/shared";
 
@@ -23,6 +24,31 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
       database: {
         connected: Boolean(database),
         path: database?.path ?? null,
+        appliedMigrations: database?.appliedMigrations.length ?? 0,
+      },
+    });
+  });
+
+  app.get("/internal/health", (request, response) => {
+    const headers = (request as { headers?: Record<string, string | readonly string[] | undefined> }).headers ?? {};
+    const headerValue = headers[config.serviceToken.headerName];
+    const auth = verifyServiceTokenValue(Array.isArray(headerValue) ? headerValue[0] : headerValue, config.serviceToken);
+
+    if (!auth.ok) {
+      response.status(auth.reason === "missing" ? 401 : 403).json({
+        ok: false,
+        error: "invalid_internal_service_token",
+        reason: auth.reason,
+      });
+      return;
+    }
+
+    response.status(200).json({
+      ok: true,
+      service: "agent-pool-api",
+      subject: auth.subject,
+      database: {
+        connected: Boolean(database),
         appliedMigrations: database?.appliedMigrations.length ?? 0,
       },
     });
