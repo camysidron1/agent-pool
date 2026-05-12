@@ -150,6 +150,9 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
   app.post("/internal/orchestrator/reconcile", requireInternalServiceToken, (request, response) => {
     respondWithReconcile(response, services, request);
   });
+  app.post("/callbacks/:kind", (request, response) => {
+    respondWithBridgeCallback(response, services, request);
+  });
 
   app.get("/metrics", (_request, response) => {
     response
@@ -367,6 +370,106 @@ function respondWithReconcile(
   });
 }
 
+function respondWithBridgeCallback(
+  response: Response,
+  services: ReturnType<typeof createCanonicalStateServices> | null,
+  request: Request,
+): void {
+  if (!services) {
+    response.status(503).json({ ok: false, error: "database_unavailable" });
+    return;
+  }
+
+  const kind = readBridgeCallbackKind(request.params?.kind);
+  if (!kind) {
+    response.status(404).json({ ok: false, error: "unsupported_bridge_callback" });
+    return;
+  }
+
+  const body = parseObjectBody(request.body);
+  if (body.kind !== kind) {
+    response.status(400).json({ ok: false, error: "invalid_callback_kind" });
+    return;
+  }
+
+  const projectId = readOptionalString(body.projectId);
+  const taskId = readOptionalString(body.taskId);
+  const sessionId = readOptionalString(body.sessionId);
+  if (!projectId || !taskId || !sessionId) {
+    response.status(400).json({ ok: false, error: "missing_callback_scope" });
+    return;
+  }
+
+  const bridge = services.readBridgeSessionCallbackConfig({ projectId, taskId, sessionId });
+  if (!bridge.ok) {
+    response.status(bridge.error.code === "not_found" ? 404 : 409).json({ ok: false, error: bridge.error });
+    return;
+  }
+
+  const token = readHeader(request, bridge.bridge.sessionToken.headerName);
+  if (!token) {
+    response.status(401).json({ ok: false, error: "invalid_session_token", reason: "missing" });
+    return;
+  }
+  if (token !== bridge.bridge.sessionToken.token) {
+    response.status(403).json({ ok: false, error: "invalid_session_token", reason: "invalid" });
+    return;
+  }
+
+  if (kind === "heartbeat") {
+    const result = services.reportSessionHeartbeat({
+      projectId,
+      sessionId,
+      observedAt: readOptionalString(body.observedAt),
+    });
+
+    if (!result.ok) {
+      response.status(result.error.code === "not_found" ? 404 : 409).json({ ok: false, error: result.error });
+      return;
+    }
+
+    response.status(200).json({
+      ok: true,
+      session: result.session,
+      event: result.event,
+      outbox: result.outbox,
+    });
+    return;
+  }
+
+  const stream = readBridgeOutputStream(body.stream);
+  const sequence = readInteger(body.sequence);
+  const byteOffset = readInteger(body.byteOffset);
+  const text = typeof body.text === "string" ? body.text : undefined;
+  if (!stream || sequence === undefined || sequence < 1 || byteOffset === undefined || byteOffset < 0 || text === undefined) {
+    response.status(400).json({ ok: false, error: "invalid_output_callback" });
+    return;
+  }
+
+  const result = services.recordSessionOutput({
+    projectId,
+    taskId,
+    sessionId,
+    stream,
+    sequence,
+    byteOffset,
+    text,
+    observedAt: readOptionalString(body.observedAt),
+  });
+
+  if (!result.ok) {
+    response.status(result.error.code === "not_found" ? 404 : 409).json({ ok: false, error: result.error });
+    return;
+  }
+
+  response.status(200).json({
+    ok: true,
+    output: result.output,
+    event: result.event,
+    outbox: result.outbox,
+  });
+}
+
 function parseObjectBody(body: unknown): Record<string, unknown> {
   return body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
 }
@@ -375,6 +478,25 @@ function readOptionalString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function readHeader(request: Request, name: string): string | undefined {
+  const value = request.headers?.[name.toLowerCase()];
+  const raw = Array.isArray(value) ? value[0] : value;
+
+  return readOptionalString(raw);
+}
+
+function readBridgeCallbackKind(value: unknown): "heartbeat" | "output" | undefined {
+  return value === "heartbeat" || value === "output" ? value : undefined;
+}
+
+function readBridgeOutputStream(value: unknown): "stdout" | "stderr" | "combined" | "system" | undefined {
+  return value === "stdout" || value === "stderr" || value === "combined" || value === "system" ? value : undefined;
+}
+
+function readInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) ? value : undefined;
 }
 
 function countOutboxRows(database: ApiDatabaseConnection, status: "queued" | "published" | "failed"): number {

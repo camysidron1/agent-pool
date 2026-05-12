@@ -268,6 +268,46 @@ export type FinalAssistantResponseResult =
   | { readonly ok: true; readonly event: EventRecord }
   | { readonly ok: false; readonly error: { readonly code: "not_found" | "conflict"; readonly message: string } };
 
+export type ReadBridgeSessionCallbackConfigInput = {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string;
+};
+
+export type ReadBridgeSessionCallbackConfigResult =
+  | { readonly ok: true; readonly bridge: BridgeSessionCallbackConfig }
+  | { readonly ok: false; readonly error: { readonly code: "not_found" | "invalid_state"; readonly message: string } };
+
+export type RecordSessionOutputInput = {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly stream: "stdout" | "stderr" | "combined" | "system";
+  readonly sequence: number;
+  readonly byteOffset: number;
+  readonly text: string;
+  readonly observedAt?: string | null;
+};
+
+export type SessionOutputRecord = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly stream: "stdout" | "stderr" | "combined" | "system";
+  readonly byteOffset: number;
+  readonly lineCount: number;
+};
+
+export type RecordSessionOutputResult =
+  | {
+      readonly ok: true;
+      readonly output: SessionOutputRecord;
+      readonly event: EventRecord;
+      readonly outbox: OutboxRecord;
+    }
+  | { readonly ok: false; readonly error: { readonly code: "not_found" | "invalid_state"; readonly message: string } };
+
 export function createCanonicalStateServices(database: WebSandboxSqliteDatabase) {
   database.exec("PRAGMA foreign_keys = ON");
 
@@ -614,6 +654,95 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
         return { ok: true, event } as const;
       });
     },
+
+    readBridgeSessionCallbackConfig(input: ReadBridgeSessionCallbackConfigInput): ReadBridgeSessionCallbackConfigResult {
+      const row = database
+        .query<
+          {
+            project_id: string;
+            task_id: string;
+            id: string;
+            bridge_callback_base_url: string | null;
+            bridge_session_token_header: string | null;
+            bridge_session_token: string | null;
+          },
+          [string, string, string]
+        >(
+          "SELECT project_id, task_id, id, bridge_callback_base_url, bridge_session_token_header, bridge_session_token FROM sessions WHERE project_id = ? AND task_id = ? AND id = ?",
+        )
+        .get(input.projectId, input.taskId, input.sessionId);
+
+      if (!row) {
+        return { ok: false, error: { code: "not_found", message: `bridge session not found: ${input.sessionId}` } };
+      }
+
+      if (!row.bridge_callback_base_url || !row.bridge_session_token_header || !row.bridge_session_token) {
+        return {
+          ok: false,
+          error: { code: "invalid_state", message: `bridge session callback token is not configured: ${input.sessionId}` },
+        };
+      }
+
+      return {
+        ok: true,
+        bridge: {
+          projectId: row.project_id,
+          taskId: row.task_id,
+          sessionId: row.id,
+          callbackBaseUrl: row.bridge_callback_base_url,
+          sessionToken: {
+            headerName: row.bridge_session_token_header,
+            token: row.bridge_session_token,
+          },
+        },
+      };
+    },
+
+    recordSessionOutput(input: RecordSessionOutputInput): RecordSessionOutputResult {
+      const current = database
+        .query<{ id: string; project_id: string; task_id: string; status: string }, [string, string, string]>(
+          "SELECT id, project_id, task_id, status FROM sessions WHERE project_id = ? AND task_id = ? AND id = ?",
+        )
+        .get(input.projectId, input.taskId, input.sessionId);
+
+      if (!current) {
+        return { ok: false, error: { code: "not_found", message: `session not found: ${input.sessionId}` } };
+      }
+
+      if (!isActiveSessionStatus(current.status)) {
+        return {
+          ok: false,
+          error: { code: "invalid_state", message: `output requires active session; got ${current.status}` },
+        };
+      }
+
+      return transaction(database, () => {
+        const output = upsertLogStream(database, input);
+        const event = appendEvent(database, {
+          projectId: input.projectId,
+          taskId: input.taskId,
+          sessionId: input.sessionId,
+          type: "session.output",
+          payload: {
+            sessionId: input.sessionId,
+            taskId: input.taskId,
+            stream: input.stream,
+            sequence: input.sequence,
+            byteOffset: input.byteOffset,
+            text: input.text,
+            observedAt: input.observedAt ?? null,
+          },
+        });
+        const outbox = enqueueOutbox(database, {
+          projectId: input.projectId,
+          eventId: event.id,
+          routingKey: projectRoutingKey(input.projectId, "events"),
+          payload: { eventId: event.id, sessionId: input.sessionId, type: event.type },
+        });
+
+        return { ok: true, output, event, outbox } as const;
+      });
+    },
   };
 }
 
@@ -655,6 +784,53 @@ function enqueueOutbox(
     .run(outboxId, input.projectId, input.eventId, input.routingKey, JSON.stringify(input.payload));
 
   return { id: outboxId, projectId: input.projectId, eventId: input.eventId, routingKey: input.routingKey };
+}
+
+function upsertLogStream(database: WebSandboxSqliteDatabase, input: RecordSessionOutputInput): SessionOutputRecord {
+  const existing = database
+    .query<
+      { id: string; byte_offset: number; line_count: number },
+      [string, string, string, string]
+    >(
+      "SELECT id, byte_offset, line_count FROM log_streams WHERE project_id = ? AND task_id = ? AND session_id = ? AND kind = ? ORDER BY created_at ASC, id ASC LIMIT 1",
+    )
+    .get(input.projectId, input.taskId, input.sessionId, input.stream);
+  const byteOffset = Math.max(existing?.byte_offset ?? 0, input.byteOffset + byteLength(input.text));
+  const lineCount = (existing?.line_count ?? 0) + countLines(input.text);
+  const id = existing?.id ?? createId("log_stream");
+
+  if (existing) {
+    database
+      .query(
+        "UPDATE log_streams SET byte_offset = ?, line_count = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+      )
+      .run(byteOffset, lineCount, id);
+  } else {
+    database
+      .query(
+        "INSERT INTO log_streams (id, project_id, task_id, session_id, kind, byte_offset, line_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(id, input.projectId, input.taskId, input.sessionId, input.stream, byteOffset, lineCount);
+  }
+
+  return {
+    id,
+    projectId: input.projectId,
+    taskId: input.taskId,
+    sessionId: input.sessionId,
+    stream: input.stream,
+    byteOffset,
+    lineCount,
+  };
+}
+
+function byteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function countLines(value: string): number {
+  if (value.length === 0) return 0;
+  return value.split("\n").length - (value.endsWith("\n") ? 1 : 0);
 }
 
 function allocateTaskDisplayId(database: WebSandboxSqliteDatabase, projectId: string): number {

@@ -377,6 +377,131 @@ describe("API service skeleton", () => {
     }
   });
 
+  test("bridge callbacks validate session token and persist heartbeat and output", async () => {
+    const { baseUrl, config, database, close } = await startTestApi();
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      services.createProject({ id: "project_bridge", slug: "project-bridge", name: "Bridge" });
+      services.createTask({ id: "task_bridge", projectId: "project_bridge", title: "Bridge task" });
+
+      const claim = await fetch(`${baseUrl}/internal/orchestrator/tasks/claim-next`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+        body: JSON.stringify({ projectId: "project_bridge", sessionId: "session_bridge", runtimeProvider: "fake" }),
+      });
+      const claimBody = await claim.json();
+      const bridge = claimBody.session.bridge;
+
+      const heartbeat = await fetch(`${baseUrl}/callbacks/heartbeat`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [bridge.sessionToken.headerName]: bridge.sessionToken.token,
+        },
+        body: JSON.stringify({
+          kind: "heartbeat",
+          projectId: "project_bridge",
+          taskId: "task_bridge",
+          sessionId: "session_bridge",
+          observedAt: "2026-05-12T12:00:00.000Z",
+        }),
+      });
+      const output = await fetch(`${baseUrl}/callbacks/output`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [bridge.sessionToken.headerName]: bridge.sessionToken.token,
+        },
+        body: JSON.stringify({
+          kind: "output",
+          projectId: "project_bridge",
+          taskId: "task_bridge",
+          sessionId: "session_bridge",
+          stream: "stdout",
+          sequence: 1,
+          byteOffset: 0,
+          text: "hello\n",
+          observedAt: "2026-05-12T12:00:01.000Z",
+        }),
+      });
+      const invalidToken = await fetch(`${baseUrl}/callbacks/output`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [bridge.sessionToken.headerName]: "wrong-token",
+        },
+        body: JSON.stringify({
+          kind: "output",
+          projectId: "project_bridge",
+          taskId: "task_bridge",
+          sessionId: "session_bridge",
+          stream: "stdout",
+          sequence: 2,
+          byteOffset: 6,
+          text: "bad\n",
+        }),
+      });
+      const wrongKind = await fetch(`${baseUrl}/callbacks/output`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [bridge.sessionToken.headerName]: bridge.sessionToken.token,
+        },
+        body: JSON.stringify({
+          kind: "heartbeat",
+          projectId: "project_bridge",
+          taskId: "task_bridge",
+          sessionId: "session_bridge",
+          observedAt: "2026-05-12T12:00:02.000Z",
+        }),
+      });
+
+      expect(heartbeat.status).toBe(200);
+      expect(await heartbeat.json()).toMatchObject({
+        ok: true,
+        session: { id: "session_bridge", heartbeatStatus: "fresh", lastHeartbeatAt: "2026-05-12T12:00:00.000Z" },
+        event: { type: "session.heartbeat" },
+      });
+      expect(output.status).toBe(200);
+      expect(await output.json()).toMatchObject({
+        ok: true,
+        output: {
+          projectId: "project_bridge",
+          taskId: "task_bridge",
+          sessionId: "session_bridge",
+          stream: "stdout",
+          byteOffset: 6,
+          lineCount: 1,
+        },
+        event: { type: "session.output" },
+      });
+      expect(invalidToken.status).toBe(403);
+      expect(await invalidToken.json()).toEqual({ ok: false, error: "invalid_session_token", reason: "invalid" });
+      expect(wrongKind.status).toBe(400);
+      expect(await wrongKind.json()).toEqual({ ok: false, error: "invalid_callback_kind" });
+      expect(
+        database.sqlite
+          .query<{ count: number }, []>(
+            "SELECT COUNT(*) AS count FROM events WHERE project_id = 'project_bridge' AND type = 'session.output'",
+          )
+          .get()?.count,
+      ).toBe(1);
+      expect(
+        database.sqlite
+          .query<{ byte_offset: number; line_count: number }, []>(
+            "SELECT byte_offset, line_count FROM log_streams WHERE project_id = 'project_bridge' AND session_id = 'session_bridge'",
+          )
+          .get(),
+      ).toEqual({ byte_offset: 6, line_count: 1 });
+    } finally {
+      await close();
+    }
+  });
+
   test("internal orchestrator endpoints are not exposed as public routes and validate bodies", async () => {
     const { baseUrl, config, close } = await startTestApi();
 
