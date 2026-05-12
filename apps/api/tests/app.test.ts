@@ -216,7 +216,12 @@ describe("API service skeleton", () => {
       });
 
       expect(started.status).toBe(200);
-      expect(await started.json()).toMatchObject({ ok: true, idempotent: true, command: { id: "command_cancel", status: "running" } });
+      expect(await started.json()).toMatchObject({
+        ok: true,
+        idempotent: false,
+        command: { id: "command_cancel", status: "running" },
+        event: { type: "command.started" },
+      });
       expect(succeeded.status).toBe(200);
       expect(await succeeded.json()).toMatchObject({ ok: true, idempotent: false, command: { id: "command_cancel", status: "succeeded" } });
       expect(duplicate.status).toBe(200);

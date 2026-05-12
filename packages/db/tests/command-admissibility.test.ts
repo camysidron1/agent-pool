@@ -161,12 +161,20 @@ describe("command admissibility helpers", () => {
       services.claimNextCommand({ projectId: "project_a" });
 
       const started = services.reportCommandStarted({ projectId: "project_a", commandId: "command_stop" });
+      const duplicateStarted = services.reportCommandStarted({ projectId: "project_a", commandId: "command_stop" });
       const succeeded = services.reportCommandSucceeded({ projectId: "project_a", commandId: "command_stop" });
       const duplicateSucceeded = services.reportCommandSucceeded({ projectId: "project_a", commandId: "command_stop" });
       const failed = services.reportCommandFailed({ projectId: "project_a", commandId: "command_cancel", errorMessage: "provider stopped" });
       const duplicateFailed = services.reportCommandFailed({ projectId: "project_a", commandId: "command_cancel", errorMessage: "provider stopped" });
 
-      expect(started).toMatchObject({ ok: true, idempotent: true, command: { id: "command_stop", status: "running" } });
+      expect(started).toMatchObject({
+        ok: true,
+        idempotent: false,
+        command: { id: "command_stop", status: "running" },
+        event: { type: "command.started" },
+        outbox: { routingKey: "project.project_a.control" },
+      });
+      expect(duplicateStarted).toMatchObject({ ok: true, idempotent: true, command: { id: "command_stop", status: "running" } });
       expect(succeeded).toMatchObject({
         ok: true,
         idempotent: false,
@@ -209,6 +217,10 @@ describe("command admissibility helpers", () => {
       services.claimNextCommand({ projectId: "project_a" });
       const failed = services.reportCommandFailed({ projectId: "project_a", commandId: "command_cancel" });
       expect(failed).toMatchObject({ ok: true, command: { status: "failed", errorMessage: "command failed without details" } });
+      expect(services.reportCommandFailed({ projectId: "project_a", commandId: "command_cancel", errorMessage: "different details" })).toEqual({
+        ok: false,
+        error: { code: "conflict", message: "command command_cancel is already failed with different error details" },
+      });
       expect(services.reportCommandSucceeded({ projectId: "project_a", commandId: "command_cancel" })).toEqual({
         ok: false,
         error: { code: "conflict", message: "command command_cancel is already failed" },

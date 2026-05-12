@@ -601,11 +601,31 @@ function reportCommandTransition(
 ): CommandReportResult {
   return transaction(database, () => {
     const current = readCommandState(database, input.projectId, input.commandId);
+    const errorMessage = targetStatus === "failed" ? input.errorMessage?.trim() || "command failed without details" : null;
+
     if (!current) {
       return { ok: false, error: { code: "not_found", message: `command not found: ${input.commandId}` } } as const;
     }
 
     if (current.status === targetStatus) {
+      if (targetStatus === "failed" && current.error_message !== errorMessage) {
+        return {
+          ok: false,
+          error: { code: "conflict", message: `command ${input.commandId} is already failed with different error details` },
+        } as const;
+      }
+
+      if (targetStatus === "running" && !hasCommandReportEvent(database, input.projectId, input.commandId, "command.started")) {
+        const { event, outbox } = appendCommandReportEvent(database, current, targetStatus, current.error_message);
+        return {
+          ok: true,
+          idempotent: false,
+          command: commandReportRecord(current, targetStatus, current.error_message),
+          event,
+          outbox,
+        } as const;
+      }
+
       return {
         ok: true,
         idempotent: true,
@@ -627,7 +647,6 @@ function reportCommandTransition(
       } as const;
     }
 
-    const errorMessage = targetStatus === "failed" ? input.errorMessage?.trim() || "command failed without details" : null;
     const completedSql = targetStatus === "running" ? "completed_at = NULL" : "completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
     database
       .query(
@@ -638,21 +657,7 @@ function reportCommandTransition(
     const updated = readCommandState(database, input.projectId, input.commandId);
     if (!updated) throw new Error(`reported command disappeared: ${input.commandId}`);
 
-    const eventType = targetStatus === "running" ? "command.started" : `command.${targetStatus}`;
-    const event = appendEvent(database, {
-      projectId: updated.project_id,
-      taskId: updated.task_id,
-      sessionId: updated.session_id,
-      commandId: updated.id,
-      type: eventType,
-      payload: { commandId: updated.id, type: updated.type, errorMessage },
-    });
-    const outbox = enqueueOutbox(database, {
-      projectId: updated.project_id,
-      eventId: event.id,
-      routingKey: projectRoutingKey(updated.project_id, "control"),
-      payload: { eventId: event.id, commandId: updated.id, type: event.type },
-    });
+    const { event, outbox } = appendCommandReportEvent(database, updated, targetStatus, errorMessage);
 
     return {
       ok: true,
@@ -662,6 +667,47 @@ function reportCommandTransition(
       outbox,
     } as const;
   });
+}
+
+function appendCommandReportEvent(
+  database: WebSandboxSqliteDatabase,
+  command: {
+    readonly id: string;
+    readonly project_id: string;
+    readonly task_id: string | null;
+    readonly session_id: string | null;
+    readonly type: CommandType;
+  },
+  targetStatus: "running" | "succeeded" | "failed",
+  errorMessage: string | null,
+): { readonly event: EventRecord; readonly outbox: OutboxRecord } {
+  const eventType = targetStatus === "running" ? "command.started" : `command.${targetStatus}`;
+  const event = appendEvent(database, {
+    projectId: command.project_id,
+    taskId: command.task_id,
+    sessionId: command.session_id,
+    commandId: command.id,
+    type: eventType,
+    payload: { commandId: command.id, type: command.type, errorMessage },
+  });
+  const outbox = enqueueOutbox(database, {
+    projectId: command.project_id,
+    eventId: event.id,
+    routingKey: projectRoutingKey(command.project_id, "control"),
+    payload: { eventId: event.id, commandId: command.id, type: event.type },
+  });
+
+  return { event, outbox };
+}
+
+function hasCommandReportEvent(database: WebSandboxSqliteDatabase, projectId: string, commandId: string, type: string): boolean {
+  const row = database
+    .query<{ id: string }, [string, string, string]>(
+      "SELECT id FROM events WHERE project_id = ? AND command_id = ? AND type = ? LIMIT 1",
+    )
+    .get(projectId, commandId, type);
+
+  return Boolean(row);
 }
 
 function readCommandState(
