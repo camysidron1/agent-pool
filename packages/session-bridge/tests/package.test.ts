@@ -3,7 +3,10 @@ import { describe, expect, test } from "bun:test";
 import {
   SESSION_BRIDGE_PACKAGE_BOUNDARY,
   type BridgeCallbackEvent,
+  type BridgeCleanupPayload,
+  type BridgeCompletionPayload,
   type BridgeDocumentRegistration,
+  type BridgeFailurePayload,
   type BridgeFinalResponsePayload,
   type BridgeHeartbeatPayload,
   type BridgeOutputChunk,
@@ -60,11 +63,34 @@ describe("session bridge package contract", () => {
       urlCandidates: ["https://example.test"],
       observedAt: "2026-01-01T00:00:02.000Z",
     };
+    const completion: BridgeCompletionPayload = {
+      kind: "completion",
+      projectId: session.projectId,
+      taskId: session.taskId,
+      sessionId: session.sessionId,
+      observedAt: "2026-01-01T00:00:03.000Z",
+    };
+    const failure: BridgeFailurePayload = {
+      kind: "failure",
+      projectId: session.projectId,
+      taskId: session.taskId,
+      sessionId: session.sessionId,
+      errorMessage: "runtime failed",
+      observedAt: "2026-01-01T00:00:04.000Z",
+    };
+    const cleanup: BridgeCleanupPayload = {
+      kind: "cleanup",
+      projectId: session.projectId,
+      taskId: session.taskId,
+      sessionId: session.sessionId,
+      reason: "session exited",
+      observedAt: "2026-01-01T00:00:05.000Z",
+    };
     const steering: BridgeSteeringMessage = {
       id: "steer_1",
       body: "continue",
     };
-    const events: BridgeCallbackEvent[] = [heartbeat, output, document, finalResponse];
+    const events: BridgeCallbackEvent[] = [heartbeat, output, document, finalResponse, completion, failure, cleanup];
 
     expect(SESSION_BRIDGE_PACKAGE_BOUNDARY).toEqual({
       bridgeOnly: true,
@@ -73,7 +99,15 @@ describe("session bridge package contract", () => {
       importsRuntimeProvider: false,
       includesRealProvider: false,
     });
-    expect(events.map((event) => event.kind)).toEqual(["heartbeat", "output", "document", "final_response"]);
+    expect(events.map((event) => event.kind)).toEqual([
+      "heartbeat",
+      "output",
+      "document",
+      "final_response",
+      "completion",
+      "failure",
+      "cleanup",
+    ]);
     expect(steering.body).toBe("continue");
   });
 });

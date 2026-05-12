@@ -48,6 +48,9 @@ describe("bridge runner", () => {
       steeringFetched: 1,
       steeringHandled: 1,
       finalResponsePosted: true,
+      completionPosted: false,
+      failurePosted: false,
+      cleanupPosted: false,
       bufferPending: 0,
       bufferDeadLetters: 0,
     });
@@ -89,6 +92,33 @@ describe("bridge runner", () => {
     expect(scheduled).toHaveLength(1);
     expect(cleared).toEqual([{ id: "timer_1", intervalMs: 1000 }]);
     expect(runner.running).toBe(false);
+  });
+
+  test("emits lifecycle callbacks through the composed runner", async () => {
+    const session = testSession();
+    const server = createTestBridgeCallbackServer({ sessionToken: session.sessionToken });
+    const runner = createBridgeRunner({
+      session,
+      fetch: server.fetch,
+      clock: { now: () => new Date("2026-05-12T12:00:00.000Z") },
+    });
+
+    const result = await runner.runOnce({
+      output: [],
+      completion: { metadata: { outcome: "done" } },
+      failure: { errorMessage: "ignored test failure path" },
+      cleanup: { reason: "finished" },
+    });
+
+    expect(result).toMatchObject({
+      heartbeatPosted: true,
+      outputPosted: 0,
+      completionPosted: true,
+      failurePosted: true,
+      cleanupPosted: true,
+      bufferPending: 0,
+    });
+    expect(server.events.map((event) => event.kind)).toEqual(["heartbeat", "completion", "failure", "cleanup"]);
   });
 });
 

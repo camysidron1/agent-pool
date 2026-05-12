@@ -78,5 +78,13 @@ function isBridgeCallbackEvent(value: unknown): value is BridgeCallbackEvent {
   if (!value || typeof value !== "object") return false;
   const kind = (value as { readonly kind?: unknown }).kind;
 
-  return kind === "heartbeat" || kind === "output" || kind === "document" || kind === "final_response";
+  return (
+    kind === "heartbeat" ||
+    kind === "output" ||
+    kind === "document" ||
+    kind === "final_response" ||
+    kind === "completion" ||
+    kind === "failure" ||
+    kind === "cleanup"
+  );
 }

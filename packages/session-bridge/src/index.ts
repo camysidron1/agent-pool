@@ -56,11 +56,43 @@ export type BridgeFinalResponsePayload = {
   readonly observedAt: string;
 };
 
+export type BridgeCompletionPayload = {
+  readonly kind: "completion";
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly observedAt: string;
+  readonly metadata?: Readonly<Record<string, unknown>>;
+};
+
+export type BridgeFailurePayload = {
+  readonly kind: "failure";
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly errorMessage: string;
+  readonly observedAt: string;
+  readonly metadata?: Readonly<Record<string, unknown>>;
+};
+
+export type BridgeCleanupPayload = {
+  readonly kind: "cleanup";
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly reason?: string;
+  readonly observedAt: string;
+  readonly metadata?: Readonly<Record<string, unknown>>;
+};
+
 export type BridgeCallbackEvent =
   | BridgeHeartbeatPayload
   | BridgeOutputChunk
   | BridgeDocumentRegistration
-  | BridgeFinalResponsePayload;
+  | BridgeFinalResponsePayload
+  | BridgeCompletionPayload
+  | BridgeFailurePayload
+  | BridgeCleanupPayload;
 
 export type BridgeCallbackResult =
   | { readonly ok: true; readonly status: number; readonly body: unknown }
@@ -145,6 +177,15 @@ export {
   type BridgeFinalResponseCaptureResult,
   type BridgeTranscriptMessage,
 } from "./final-response";
+export {
+  createBridgeLifecycleCapture,
+  type BridgeCleanupCaptureInput,
+  type BridgeCompletionCaptureInput,
+  type BridgeFailureCaptureInput,
+  type BridgeLifecycleCapture,
+  type BridgeLifecycleCaptureOptions,
+  type BridgeLifecycleCaptureResult,
+} from "./lifecycle";
 export {
   createBridgeHeartbeatLoop,
   type BridgeHeartbeatFailure,

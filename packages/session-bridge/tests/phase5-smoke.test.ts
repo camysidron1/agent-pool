@@ -78,6 +78,9 @@ describe("Phase 5 session bridge package smoke", () => {
       steeringFetched: 2,
       steeringHandled: 2,
       finalResponsePosted: true,
+      completionPosted: false,
+      failurePosted: false,
+      cleanupPosted: false,
       bufferPending: 0,
       bufferDeadLetters: 0,
     });

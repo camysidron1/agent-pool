@@ -10,6 +10,12 @@ import { discoverBridgeDocuments } from "./document-discovery";
 import { createBridgeEventBuffer, type BridgeEventBuffer } from "./event-buffer";
 import { createBridgeFinalResponseCapture } from "./final-response";
 import { createBridgeHeartbeatLoop, type BridgeHeartbeatLoop } from "./heartbeat-loop";
+import {
+  createBridgeLifecycleCapture,
+  type BridgeCleanupCaptureInput,
+  type BridgeCompletionCaptureInput,
+  type BridgeFailureCaptureInput,
+} from "./lifecycle";
 import { createBridgeMockHarness, type BridgeMockHarness } from "./mock-harness";
 import { createBridgeOutputCapture } from "./output-capture";
 import { createBridgeSteeringPoller } from "./steering-poller";
@@ -23,6 +29,9 @@ export type BridgeRunnerRunOnceInput = {
   readonly output?: readonly BridgeRunnerOutputInput[];
   readonly finalResponseText?: string;
   readonly finalResponseMetadata?: Readonly<Record<string, unknown>>;
+  readonly completion?: BridgeCompletionCaptureInput;
+  readonly failure?: BridgeFailureCaptureInput;
+  readonly cleanup?: BridgeCleanupCaptureInput;
 };
 
 export type BridgeRunnerOptions = {
@@ -44,6 +53,9 @@ export type BridgeRunnerRunOnceResult = {
   readonly steeringFetched: number;
   readonly steeringHandled: number;
   readonly finalResponsePosted: boolean;
+  readonly completionPosted: boolean;
+  readonly failurePosted: boolean;
+  readonly cleanupPosted: boolean;
   readonly bufferPending: number;
   readonly bufferDeadLetters: number;
 };
@@ -92,6 +104,12 @@ export function createBridgeRunner(options: BridgeRunnerOptions): BridgeRunner {
     clock: options.clock,
     eventBuffer,
   });
+  const lifecycleCapture = createBridgeLifecycleCapture({
+    session: options.session,
+    client,
+    clock: options.clock,
+    eventBuffer,
+  });
 
   return {
     get running(): boolean {
@@ -106,6 +124,9 @@ export function createBridgeRunner(options: BridgeRunnerOptions): BridgeRunner {
       let documentsPosted = 0;
       let steeringHandled = 0;
       let finalResponsePosted = false;
+      let completionPosted = false;
+      let failurePosted = false;
+      let cleanupPosted = false;
 
       for (const output of input.output ?? [{ stream: "system", text: "bridge runner started" }]) {
         const result = await outputCapture.capture(output.stream, output.text);
@@ -143,6 +164,21 @@ export function createBridgeRunner(options: BridgeRunnerOptions): BridgeRunner {
         finalResponsePosted = result.callback?.ok ?? false;
       }
 
+      if (input.completion) {
+        const result = await lifecycleCapture.captureCompletion(input.completion);
+        completionPosted = result.callback.ok;
+      }
+
+      if (input.failure) {
+        const result = await lifecycleCapture.captureFailure(input.failure);
+        failurePosted = result.callback.ok;
+      }
+
+      if (input.cleanup) {
+        const result = await lifecycleCapture.captureCleanup(input.cleanup);
+        cleanupPosted = result.callback.ok;
+      }
+
       return {
         heartbeatPosted: heartbeat.ok,
         outputPosted,
@@ -151,6 +187,9 @@ export function createBridgeRunner(options: BridgeRunnerOptions): BridgeRunner {
         steeringFetched: steering.ok ? steering.fetched : 0,
         steeringHandled,
         finalResponsePosted,
+        completionPosted,
+        failurePosted,
+        cleanupPosted,
         bufferPending: eventBuffer.pending.length,
         bufferDeadLetters: eventBuffer.deadLetters.length,
       };
