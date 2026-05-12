@@ -26,6 +26,16 @@ export {
   type StartupReportResponse,
 } from "./backend-client";
 export {
+  runControlQueueConsumerOnce,
+  unsupportedCommandHandler,
+  type CommandHandler,
+  type CommandHandlingRequest,
+  type CommandHandlingResult,
+  type ControlQueueConsumerBackend,
+  type ControlQueueConsumerOptions,
+  type ControlQueueConsumerRunResult,
+} from "./control-consumer";
+export {
   createOrchestratorFetchHandler,
   startOrchestratorService,
   type BunServe,
