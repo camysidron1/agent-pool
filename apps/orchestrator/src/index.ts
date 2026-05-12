@@ -2,7 +2,29 @@ import { loadConfig } from "@agent-pool/config";
 
 import { startOrchestratorService } from "./server";
 
-export { checkBackendInternalHealth, type BackendHealthClientOptions, type BackendInternalHealthResult } from "./backend-client";
+export {
+  checkBackendInternalHealth,
+  createBackendInternalApiClient,
+  type BackendEvent,
+  type BackendHealthClientOptions,
+  type BackendInternalApiClient,
+  type BackendInternalClientOptions,
+  type BackendInternalHealthResult,
+  type BackendInternalHttpResult,
+  type BackendOutbox,
+  type ClaimNextCommandInput,
+  type ClaimNextCommandResponse,
+  type ClaimNextTaskInput,
+  type ClaimNextTaskResponse,
+  type CommandReportInput,
+  type CommandReportResponse,
+  type ReconcileInput,
+  type ReconcileResponse,
+  type SessionHeartbeatInput,
+  type SessionHeartbeatResponse,
+  type StartupReportInput,
+  type StartupReportResponse,
+} from "./backend-client";
 export {
   createOrchestratorFetchHandler,
   startOrchestratorService,
