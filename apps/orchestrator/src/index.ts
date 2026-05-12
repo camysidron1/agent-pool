@@ -26,6 +26,12 @@ export {
   type StartupReportResponse,
 } from "./backend-client";
 export {
+  createCapacityLimiter,
+  type CapacityLease,
+  type CapacityLimiter,
+  type CapacityLimiterOptions,
+} from "./capacity";
+export {
   runControlQueueConsumerOnce,
   unsupportedCommandHandler,
   type CommandHandler,

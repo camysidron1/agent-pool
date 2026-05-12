@@ -5,6 +5,7 @@ import type {
   BackendInternalHttpResult,
   ClaimNextTaskResponse,
 } from "./backend-client";
+import type { CapacityLimiter } from "./capacity";
 
 export type TaskQueueConsumerBackend = Pick<
   BackendInternalApiClient,
@@ -33,6 +34,8 @@ export type TaskQueueConsumerOptions = {
   readonly runtimeStarter: TaskRuntimeStarter;
   readonly runtimeProvider?: string;
   readonly sessionIdFactory?: () => string;
+  readonly capacityLimiter?: CapacityLimiter;
+  readonly capacityRetryDelayMs?: number;
 };
 
 export type TaskQueueConsumerRunResult = QueueDrainResult & {
@@ -52,61 +55,75 @@ export async function runTaskQueueConsumerOnce(
   let startupsFailed = 0;
 
   const drain = await options.queue.drainQueue<Readonly<Record<string, unknown>>>(queueName, async (message) => {
-    const claim = await options.backend.claimNextTask({
-      projectId: options.projectId,
-      sessionId: options.sessionIdFactory?.(),
-      runtimeProvider: options.runtimeProvider,
-    });
+    const lease = options.capacityLimiter?.acquire() ?? null;
 
-    if (!claim.ok || !isClaimNextTaskResponse(claim)) {
-      return { action: "retry", reason: "task_claim_failed" };
+    if (options.capacityLimiter && !lease) {
+      return {
+        action: "retry",
+        reason: "task_capacity_full",
+        delayMs: options.capacityRetryDelayMs ?? 1000,
+      };
     }
 
-    if (!claim.body.claimed) {
-      noWork += 1;
-      return { action: "ack" };
-    }
+    try {
+      const claim = await options.backend.claimNextTask({
+        projectId: options.projectId,
+        sessionId: options.sessionIdFactory?.(),
+        runtimeProvider: options.runtimeProvider,
+      });
 
-    const sessionId = readStringProperty(claim.body.session, "id");
-    if (!sessionId) {
-      return { action: "dead-letter", reason: "claimed_task_missing_session_id" };
-    }
+      if (!claim.ok || !isClaimNextTaskResponse(claim)) {
+        return { action: "retry", reason: "task_claim_failed" };
+      }
 
-    claimed += 1;
-    const startup = await options.runtimeStarter({
-      projectId: options.projectId,
-      task: claim.body.task,
-      session: claim.body.session,
-      wakeup: message.payload,
-    });
+      if (!claim.body.claimed) {
+        noWork += 1;
+        return { action: "ack" };
+      }
 
-    if (startup.ok) {
-      const report = await options.backend.reportStartupSucceeded({
+      const sessionId = readStringProperty(claim.body.session, "id");
+      if (!sessionId) {
+        return { action: "dead-letter", reason: "claimed_task_missing_session_id" };
+      }
+
+      claimed += 1;
+      const startup = await options.runtimeStarter({
+        projectId: options.projectId,
+        task: claim.body.task,
+        session: claim.body.session,
+        wakeup: message.payload,
+      });
+
+      if (startup.ok) {
+        const report = await options.backend.reportStartupSucceeded({
+          projectId: options.projectId,
+          sessionId,
+          runtimeSessionId: startup.runtimeSessionId,
+        });
+
+        if (!report.ok) {
+          return { action: "retry", reason: "startup_success_report_failed" };
+        }
+
+        startupsSucceeded += 1;
+        return { action: "ack" };
+      }
+
+      const report = await options.backend.reportStartupFailed({
         projectId: options.projectId,
         sessionId,
-        runtimeSessionId: startup.runtimeSessionId,
+        errorMessage: startup.errorMessage,
       });
 
       if (!report.ok) {
-        return { action: "retry", reason: "startup_success_report_failed" };
+        return { action: "retry", reason: "startup_failure_report_failed" };
       }
 
-      startupsSucceeded += 1;
+      startupsFailed += 1;
       return { action: "ack" };
+    } finally {
+      lease?.release();
     }
-
-    const report = await options.backend.reportStartupFailed({
-      projectId: options.projectId,
-      sessionId,
-      errorMessage: startup.errorMessage,
-    });
-
-    if (!report.ok) {
-      return { action: "retry", reason: "startup_failure_report_failed" };
-    }
-
-    startupsFailed += 1;
-    return { action: "ack" };
   });
 
   return {
