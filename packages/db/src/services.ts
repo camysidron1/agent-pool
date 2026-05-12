@@ -339,6 +339,55 @@ export type RecordSessionOutputResult =
     }
   | { readonly ok: false; readonly error: { readonly code: "not_found" | "invalid_state"; readonly message: string } };
 
+export type CompleteSessionInput = {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly observedAt?: string | null;
+  readonly metadata?: Readonly<Record<string, unknown>>;
+};
+
+export type FailSessionInput = CompleteSessionInput & {
+  readonly errorMessage: string;
+};
+
+export type CleanupSessionInput = CompleteSessionInput & {
+  readonly reason?: string | null;
+};
+
+export type TerminalSessionRecord = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly status: "succeeded" | "failed";
+};
+
+export type TerminalTaskRecord = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly status: "completed" | "failed" | "blocked";
+};
+
+export type SessionTerminalResult =
+  | {
+      readonly ok: true;
+      readonly idempotent: boolean;
+      readonly session: TerminalSessionRecord;
+      readonly task: TerminalTaskRecord;
+      readonly event: EventRecord;
+      readonly outbox: OutboxRecord;
+    }
+  | { readonly ok: false; readonly error: { readonly code: "not_found" | "invalid_state"; readonly message: string } };
+
+export type SessionCleanupResult =
+  | {
+      readonly ok: true;
+      readonly idempotent: boolean;
+      readonly event: EventRecord;
+      readonly outbox: OutboxRecord;
+    }
+  | { readonly ok: false; readonly error: { readonly code: "not_found" | "invalid_state"; readonly message: string } };
+
 export function createCanonicalStateServices(database: WebSandboxSqliteDatabase) {
   database.exec("PRAGMA foreign_keys = ON");
 
@@ -845,6 +894,140 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
         return { ok: true, output, event, outbox } as const;
       });
     },
+
+    completeSession(input: CompleteSessionInput): SessionTerminalResult {
+      const current = readSessionForTerminalCallback(database, input);
+      if (!current) return { ok: false, error: { code: "not_found", message: `session not found: ${input.sessionId}` } };
+      if (current.status === "succeeded" && current.task_status === "completed") {
+        return appendTerminalIdempotentEvent(database, input, current, "session.completed.idempotent");
+      }
+      if (current.status !== "running") {
+        return {
+          ok: false,
+          error: { code: "invalid_state", message: `completion requires running session; got ${current.status}` },
+        };
+      }
+
+      return transaction(database, () => {
+        database
+          .query("UPDATE sessions SET status = 'succeeded', ended_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ?")
+          .run(input.projectId, input.sessionId);
+        database
+          .query("UPDATE tasks SET status = 'completed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ?")
+          .run(input.projectId, input.taskId);
+
+        const event = appendEvent(database, {
+          projectId: input.projectId,
+          taskId: input.taskId,
+          sessionId: input.sessionId,
+          type: "session.completed",
+          payload: { sessionId: input.sessionId, taskId: input.taskId, observedAt: input.observedAt ?? null, metadata: input.metadata ?? {} },
+        });
+        const outbox = enqueueOutbox(database, {
+          projectId: input.projectId,
+          eventId: event.id,
+          routingKey: projectRoutingKey(input.projectId, "events"),
+          payload: { eventId: event.id, sessionId: input.sessionId, type: event.type },
+        });
+
+        return {
+          ok: true,
+          idempotent: false,
+          session: { id: input.sessionId, projectId: input.projectId, taskId: input.taskId, status: "succeeded" },
+          task: { id: input.taskId, projectId: input.projectId, status: "completed" },
+          event,
+          outbox,
+        } as const;
+      });
+    },
+
+    failSession(input: FailSessionInput): SessionTerminalResult {
+      const current = readSessionForTerminalCallback(database, input);
+      if (!current) return { ok: false, error: { code: "not_found", message: `session not found: ${input.sessionId}` } };
+      if (current.status === "failed") {
+        return appendTerminalIdempotentEvent(database, input, current, "session.failed.idempotent");
+      }
+      if (!isActiveSessionStatus(current.status)) {
+        return {
+          ok: false,
+          error: { code: "invalid_state", message: `failure requires active session; got ${current.status}` },
+        };
+      }
+
+      const taskStatus = current.status === "starting" ? "blocked" : "failed";
+      return transaction(database, () => {
+        database
+          .query("UPDATE sessions SET status = 'failed', ended_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ?")
+          .run(input.projectId, input.sessionId);
+        database
+          .query("UPDATE tasks SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ?")
+          .run(taskStatus, input.projectId, input.taskId);
+
+        const event = appendEvent(database, {
+          projectId: input.projectId,
+          taskId: input.taskId,
+          sessionId: input.sessionId,
+          type: "session.failed",
+          payload: {
+            sessionId: input.sessionId,
+            taskId: input.taskId,
+            errorMessage: input.errorMessage,
+            observedAt: input.observedAt ?? null,
+            metadata: input.metadata ?? {},
+          },
+        });
+        const outbox = enqueueOutbox(database, {
+          projectId: input.projectId,
+          eventId: event.id,
+          routingKey: projectRoutingKey(input.projectId, "events"),
+          payload: { eventId: event.id, sessionId: input.sessionId, type: event.type },
+        });
+
+        return {
+          ok: true,
+          idempotent: false,
+          session: { id: input.sessionId, projectId: input.projectId, taskId: input.taskId, status: "failed" },
+          task: { id: input.taskId, projectId: input.projectId, status: taskStatus },
+          event,
+          outbox,
+        } as const;
+      });
+    },
+
+    cleanupSession(input: CleanupSessionInput): SessionCleanupResult {
+      const current = readSessionForTerminalCallback(database, input);
+      if (!current) return { ok: false, error: { code: "not_found", message: `session not found: ${input.sessionId}` } };
+      if (!["succeeded", "failed", "canceled"].includes(current.status)) {
+        return {
+          ok: false,
+          error: { code: "invalid_state", message: `cleanup requires terminal session; got ${current.status}` },
+        };
+      }
+
+      const existing = database
+        .query<{ id: string }, [string, string]>(
+          "SELECT id FROM events WHERE project_id = ? AND session_id = ? AND type = 'session.cleanup' LIMIT 1",
+        )
+        .get(input.projectId, input.sessionId);
+
+      return transaction(database, () => {
+        const event = appendEvent(database, {
+          projectId: input.projectId,
+          taskId: input.taskId,
+          sessionId: input.sessionId,
+          type: existing ? "session.cleanup.idempotent" : "session.cleanup",
+          payload: { sessionId: input.sessionId, taskId: input.taskId, reason: input.reason ?? null, observedAt: input.observedAt ?? null, metadata: input.metadata ?? {} },
+        });
+        const outbox = enqueueOutbox(database, {
+          projectId: input.projectId,
+          eventId: event.id,
+          routingKey: projectRoutingKey(input.projectId, "events"),
+          payload: { eventId: event.id, sessionId: input.sessionId, type: event.type },
+        });
+
+        return { ok: true, idempotent: Boolean(existing), event, outbox } as const;
+      });
+    },
   };
 }
 
@@ -1009,6 +1192,79 @@ function extractUrls(text: string): readonly string[] {
 
 function uniqueStrings(values: readonly string[]): readonly string[] {
   return Array.from(new Set(values));
+}
+
+type TerminalSessionState = {
+  readonly id: string;
+  readonly project_id: string;
+  readonly task_id: string;
+  readonly status: string;
+  readonly task_status: string;
+};
+
+function readSessionForTerminalCallback(
+  database: WebSandboxSqliteDatabase,
+  input: { readonly projectId: string; readonly taskId: string; readonly sessionId: string },
+): TerminalSessionState | null {
+  return database
+    .query<TerminalSessionState, [string, string, string]>(
+      `
+        SELECT
+          s.id,
+          s.project_id,
+          s.task_id,
+          s.status,
+          t.status AS task_status
+        FROM sessions s
+        JOIN tasks t ON t.project_id = s.project_id AND t.id = s.task_id
+        WHERE s.project_id = ? AND s.task_id = ? AND s.id = ?
+      `,
+    )
+    .get(input.projectId, input.taskId, input.sessionId) ?? null;
+}
+
+function appendTerminalIdempotentEvent(
+  database: WebSandboxSqliteDatabase,
+  input: CompleteSessionInput,
+  current: TerminalSessionState,
+  type: "session.completed.idempotent" | "session.failed.idempotent",
+): SessionTerminalResult {
+  return transaction(database, () => {
+    const event = appendEvent(database, {
+      projectId: input.projectId,
+      taskId: input.taskId,
+      sessionId: input.sessionId,
+      type,
+      payload: { sessionId: input.sessionId, taskId: input.taskId },
+    });
+    const outbox = enqueueOutbox(database, {
+      projectId: input.projectId,
+      eventId: event.id,
+      routingKey: projectRoutingKey(input.projectId, "events"),
+      payload: { eventId: event.id, sessionId: input.sessionId, type: event.type },
+    });
+
+    return {
+      ok: true,
+      idempotent: true,
+      session: {
+        id: input.sessionId,
+        projectId: input.projectId,
+        taskId: input.taskId,
+        status: current.status === "succeeded" ? "succeeded" : "failed",
+      },
+      task: {
+        id: input.taskId,
+        projectId: input.projectId,
+        status:
+          current.task_status === "completed" || current.task_status === "failed" || current.task_status === "blocked"
+            ? current.task_status
+            : "failed",
+      },
+      event,
+      outbox,
+    } as const;
+  });
 }
 
 function allocateTaskDisplayId(database: WebSandboxSqliteDatabase, projectId: string): number {

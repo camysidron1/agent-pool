@@ -503,6 +503,87 @@ function respondWithBridgeCallback(
     return;
   }
 
+  if (kind === "completion") {
+    const result = services.completeSession({
+      projectId,
+      taskId,
+      sessionId,
+      observedAt: readOptionalString(body.observedAt),
+      metadata: readOptionalObject(body.metadata),
+    });
+
+    if (!result.ok) {
+      response.status(result.error.code === "not_found" ? 404 : 409).json({ ok: false, error: result.error });
+      return;
+    }
+
+    response.status(200).json({
+      ok: true,
+      idempotent: result.idempotent,
+      session: result.session,
+      task: result.task,
+      event: result.event,
+      outbox: result.outbox,
+    });
+    return;
+  }
+
+  if (kind === "failure") {
+    const errorMessage = readOptionalString(body.errorMessage);
+    if (!errorMessage) {
+      response.status(400).json({ ok: false, error: "invalid_failure_callback" });
+      return;
+    }
+
+    const result = services.failSession({
+      projectId,
+      taskId,
+      sessionId,
+      errorMessage,
+      observedAt: readOptionalString(body.observedAt),
+      metadata: readOptionalObject(body.metadata),
+    });
+
+    if (!result.ok) {
+      response.status(result.error.code === "not_found" ? 404 : 409).json({ ok: false, error: result.error });
+      return;
+    }
+
+    response.status(200).json({
+      ok: true,
+      idempotent: result.idempotent,
+      session: result.session,
+      task: result.task,
+      event: result.event,
+      outbox: result.outbox,
+    });
+    return;
+  }
+
+  if (kind === "cleanup") {
+    const result = services.cleanupSession({
+      projectId,
+      taskId,
+      sessionId,
+      reason: readOptionalString(body.reason),
+      observedAt: readOptionalString(body.observedAt),
+      metadata: readOptionalObject(body.metadata),
+    });
+
+    if (!result.ok) {
+      response.status(result.error.code === "not_found" ? 404 : 409).json({ ok: false, error: result.error });
+      return;
+    }
+
+    response.status(200).json({
+      ok: true,
+      idempotent: result.idempotent,
+      event: result.event,
+      outbox: result.outbox,
+    });
+    return;
+  }
+
   const stream = readBridgeOutputStream(body.stream);
   const sequence = readInteger(body.sequence);
   const byteOffset = readInteger(body.byteOffset);
@@ -553,8 +634,18 @@ function readHeader(request: Request, name: string): string | undefined {
   return readOptionalString(raw);
 }
 
-function readBridgeCallbackKind(value: unknown): "heartbeat" | "output" | "document" | "final_response" | undefined {
-  return value === "heartbeat" || value === "output" || value === "document" || value === "final_response" ? value : undefined;
+function readBridgeCallbackKind(
+  value: unknown,
+): "heartbeat" | "output" | "document" | "final_response" | "completion" | "failure" | "cleanup" | undefined {
+  return value === "heartbeat" ||
+    value === "output" ||
+    value === "document" ||
+    value === "final_response" ||
+    value === "completion" ||
+    value === "failure" ||
+    value === "cleanup"
+    ? value
+    : undefined;
 }
 
 function readBridgeOutputStream(value: unknown): "stdout" | "stderr" | "combined" | "system" | undefined {

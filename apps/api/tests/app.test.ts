@@ -591,6 +591,141 @@ describe("API service skeleton", () => {
     }
   });
 
+  test("bridge terminal callbacks complete fail and cleanup sessions idempotently", async () => {
+    const { baseUrl, config, database, close } = await startTestApi();
+
+    async function claimTask(taskId: string, sessionId: string) {
+      const response = await fetch(`${baseUrl}/internal/orchestrator/tasks/claim-next`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+        body: JSON.stringify({ projectId: "project_terminal", sessionId, runtimeProvider: "fake" }),
+      });
+      const body = await response.json();
+      expect(body).toMatchObject({ ok: true, claimed: true, task: { id: taskId }, session: { id: sessionId } });
+      return body.session.bridge;
+    }
+
+    async function postCallback(kind: string, bridge: { readonly sessionToken: { readonly headerName: string; readonly token: string } }, body: Readonly<Record<string, unknown>>) {
+      return fetch(`${baseUrl}/callbacks/${kind}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [bridge.sessionToken.headerName]: bridge.sessionToken.token,
+        },
+        body: JSON.stringify(body),
+      });
+    }
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      services.createProject({ id: "project_terminal", slug: "project-terminal", name: "Terminal" });
+      services.createTask({ id: "task_complete", projectId: "project_terminal", title: "Complete" });
+      services.createTask({ id: "task_fail", projectId: "project_terminal", title: "Fail" });
+      services.createTask({ id: "task_unsafe", projectId: "project_terminal", title: "Unsafe" });
+
+      const completeBridge = await claimTask("task_complete", "session_complete");
+      expect(
+        services.reportStartupSucceeded({
+          projectId: "project_terminal",
+          sessionId: "session_complete",
+          runtimeSessionId: "runtime_complete",
+        }),
+      ).toMatchObject({ ok: true });
+      const completion = await postCallback("completion", completeBridge, {
+        kind: "completion",
+        projectId: "project_terminal",
+        taskId: "task_complete",
+        sessionId: "session_complete",
+        observedAt: "2026-05-12T12:00:00.000Z",
+        metadata: { exitCode: 0 },
+      });
+      const cleanup = await postCallback("cleanup", completeBridge, {
+        kind: "cleanup",
+        projectId: "project_terminal",
+        taskId: "task_complete",
+        sessionId: "session_complete",
+        reason: "completed",
+      });
+      const duplicateCleanup = await postCallback("cleanup", completeBridge, {
+        kind: "cleanup",
+        projectId: "project_terminal",
+        taskId: "task_complete",
+        sessionId: "session_complete",
+        reason: "completed",
+      });
+
+      const failBridge = await claimTask("task_fail", "session_fail");
+      expect(
+        services.reportStartupSucceeded({
+          projectId: "project_terminal",
+          sessionId: "session_fail",
+          runtimeSessionId: "runtime_fail",
+        }),
+      ).toMatchObject({ ok: true });
+      const failure = await postCallback("failure", failBridge, {
+        kind: "failure",
+        projectId: "project_terminal",
+        taskId: "task_fail",
+        sessionId: "session_fail",
+        errorMessage: "runtime exited 1",
+        observedAt: "2026-05-12T12:00:01.000Z",
+      });
+
+      const unsafeBridge = await claimTask("task_unsafe", "session_unsafe");
+      const unsafeCompletion = await postCallback("completion", unsafeBridge, {
+        kind: "completion",
+        projectId: "project_terminal",
+        taskId: "task_unsafe",
+        sessionId: "session_unsafe",
+      });
+
+      expect(completion.status).toBe(200);
+      expect(await completion.json()).toMatchObject({
+        ok: true,
+        idempotent: false,
+        session: { id: "session_complete", status: "succeeded" },
+        task: { id: "task_complete", status: "completed" },
+        event: { type: "session.completed" },
+      });
+      expect(cleanup.status).toBe(200);
+      expect(await cleanup.json()).toMatchObject({ ok: true, idempotent: false, event: { type: "session.cleanup" } });
+      expect(duplicateCleanup.status).toBe(200);
+      expect(await duplicateCleanup.json()).toMatchObject({
+        ok: true,
+        idempotent: true,
+        event: { type: "session.cleanup.idempotent" },
+      });
+      expect(failure.status).toBe(200);
+      expect(await failure.json()).toMatchObject({
+        ok: true,
+        session: { id: "session_fail", status: "failed" },
+        task: { id: "task_fail", status: "failed" },
+        event: { type: "session.failed" },
+      });
+      expect(unsafeCompletion.status).toBe(409);
+      expect(await unsafeCompletion.json()).toMatchObject({
+        ok: false,
+        error: { code: "invalid_state", message: "completion requires running session; got starting" },
+      });
+      expect(
+        database.sqlite
+          .query<{ id: string; status: string }, []>(
+            "SELECT id, status FROM tasks WHERE project_id = 'project_terminal' ORDER BY id",
+          )
+          .all(),
+      ).toEqual([
+        { id: "task_complete", status: "completed" },
+        { id: "task_fail", status: "failed" },
+        { id: "task_unsafe", status: "running" },
+      ]);
+    } finally {
+      await close();
+    }
+  });
+
   test("internal orchestrator endpoints are not exposed as public routes and validate bodies", async () => {
     const { baseUrl, config, close } = await startTestApi();
 
