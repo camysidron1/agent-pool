@@ -15,6 +15,7 @@ export type ComposeSmokePlan = {
   readonly projectName: string;
   readonly apiUrl: string;
   readonly orchestratorUrl: string;
+  readonly prometheusUrl: string;
   readonly serviceToken: string;
   readonly timeoutMs: number;
   readonly teardown: boolean;
@@ -37,6 +38,7 @@ type ParsedComposeSmokeArgs = {
   readonly projectName: string;
   readonly apiUrl: string;
   readonly orchestratorUrl: string;
+  readonly prometheusUrl: string;
   readonly serviceToken: string;
   readonly timeoutMs: number;
   readonly teardown: boolean;
@@ -45,6 +47,7 @@ type ParsedComposeSmokeArgs = {
 const DEFAULT_PROJECT_NAME = "agent-pool-compose-smoke";
 const DEFAULT_API_URL = "http://127.0.0.1:3000";
 const DEFAULT_ORCHESTRATOR_URL = "http://127.0.0.1:3001";
+const DEFAULT_PROMETHEUS_URL = "http://127.0.0.1:9090";
 const DEFAULT_SERVICE_TOKEN = "compose-internal-service-token";
 const DEFAULT_TIMEOUT_MS = 120_000;
 
@@ -54,6 +57,7 @@ export function createComposeSmokePlan(input: Partial<ParsedComposeSmokeArgs> & 
   const projectName = input.projectName ?? DEFAULT_PROJECT_NAME;
   const apiUrl = trimTrailingSlash(input.apiUrl ?? DEFAULT_API_URL);
   const orchestratorUrl = trimTrailingSlash(input.orchestratorUrl ?? DEFAULT_ORCHESTRATOR_URL);
+  const prometheusUrl = trimTrailingSlash(input.prometheusUrl ?? DEFAULT_PROMETHEUS_URL);
   const serviceToken = input.serviceToken ?? DEFAULT_SERVICE_TOKEN;
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const teardown = input.teardown ?? true;
@@ -63,6 +67,7 @@ export function createComposeSmokePlan(input: Partial<ParsedComposeSmokeArgs> & 
     projectName,
     apiUrl,
     orchestratorUrl,
+    prometheusUrl,
     serviceToken,
     timeoutMs,
     teardown,
@@ -81,7 +86,7 @@ export function createComposeSmokePlan(input: Partial<ParsedComposeSmokeArgs> & 
       { label: "orchestrator health", url: `${orchestratorUrl}/health` },
       { label: "rabbitmq management", url: "http://127.0.0.1:15672/api/overview" },
       { label: "minio readiness", url: "http://127.0.0.1:9000/minio/health/ready" },
-      { label: "prometheus health", url: "http://127.0.0.1:9090/-/healthy" },
+      { label: "prometheus health", url: `${prometheusUrl}/-/healthy` },
     ],
   };
 }
@@ -105,7 +110,8 @@ export async function runComposeSmokeCli(args: readonly string[] = process.argv.
     await waitForReadiness(plan, fetchImpl, options);
     await seedSmokeFixture(plan, fetchImpl);
     const status = await waitForSmokeCompletion(plan, fetchImpl, options);
-    write(`${JSON.stringify({ ok: true, status }, null, 2)}\n`);
+    const prometheus = await waitForPrometheusVerification(plan, fetchImpl, options);
+    write(`${JSON.stringify({ ok: true, status, prometheus }, null, 2)}\n`);
     return 0;
   } finally {
     if (plan.teardown) {
@@ -120,6 +126,7 @@ export function parseComposeSmokeArgs(args: readonly string[]): ParsedComposeSmo
   let projectName = DEFAULT_PROJECT_NAME;
   let apiUrl = DEFAULT_API_URL;
   let orchestratorUrl = DEFAULT_ORCHESTRATOR_URL;
+  let prometheusUrl = DEFAULT_PROMETHEUS_URL;
   let serviceToken = DEFAULT_SERVICE_TOKEN;
   let timeoutMs = DEFAULT_TIMEOUT_MS;
   let teardown = true;
@@ -143,6 +150,9 @@ export function parseComposeSmokeArgs(args: readonly string[]): ParsedComposeSmo
       case "--orchestrator-url":
         orchestratorUrl = readFlagValue(args, (index += 1), arg);
         break;
+      case "--prometheus-url":
+        prometheusUrl = readFlagValue(args, (index += 1), arg);
+        break;
       case "--service-token":
         serviceToken = readFlagValue(args, (index += 1), arg);
         break;
@@ -163,10 +173,58 @@ export function parseComposeSmokeArgs(args: readonly string[]): ParsedComposeSmo
     projectName,
     apiUrl,
     orchestratorUrl,
+    prometheusUrl,
     serviceToken,
     timeoutMs,
     teardown,
   };
+}
+
+export type PrometheusVerification = {
+  readonly targets: {
+    readonly api: boolean;
+    readonly orchestrator: boolean;
+  };
+  readonly metrics: {
+    readonly apiOutboxPublished: number;
+    readonly orchestratorTaskConsumerRuns: number;
+    readonly orchestratorTaskClaims: number;
+  };
+};
+
+export async function readPrometheusVerification(
+  plan: Pick<ComposeSmokePlan, "prometheusUrl">,
+  fetchImpl: typeof fetch,
+): Promise<PrometheusVerification> {
+  const [targets, apiOutboxPublished, orchestratorTaskConsumerRuns, orchestratorTaskClaims] = await Promise.all([
+    fetchPrometheusTargets(`${plan.prometheusUrl}/api/v1/targets?state=active`, fetchImpl),
+    fetchPrometheusScalar(`${plan.prometheusUrl}/api/v1/query?query=${encodeURIComponent("agent_pool_api_outbox_published")}`, fetchImpl),
+    fetchPrometheusScalar(
+      `${plan.prometheusUrl}/api/v1/query?query=${encodeURIComponent("agent_pool_orchestrator_task_consumer_runs_total")}`,
+      fetchImpl,
+    ),
+    fetchPrometheusScalar(
+      `${plan.prometheusUrl}/api/v1/query?query=${encodeURIComponent("agent_pool_orchestrator_task_claim_total")}`,
+      fetchImpl,
+    ),
+  ]);
+
+  return {
+    targets,
+    metrics: {
+      apiOutboxPublished,
+      orchestratorTaskConsumerRuns,
+      orchestratorTaskClaims,
+    },
+  };
+}
+
+export function isPrometheusVerificationComplete(verification: PrometheusVerification): boolean {
+  return verification.targets.api &&
+    verification.targets.orchestrator &&
+    verification.metrics.apiOutboxPublished > 0 &&
+    verification.metrics.orchestratorTaskConsumerRuns > 0 &&
+    verification.metrics.orchestratorTaskClaims > 0;
 }
 
 async function waitForReadiness(
@@ -252,6 +310,63 @@ async function waitForSmokeCompletion(
   throw new Error(`timed out waiting for smoke completion: ${JSON.stringify(lastStatus)}`);
 }
 
+async function waitForPrometheusVerification(
+  plan: ComposeSmokePlan,
+  fetchImpl: typeof fetch,
+  options: Pick<ComposeSmokeCliOptions, "sleep" | "now">,
+): Promise<PrometheusVerification> {
+  const sleep = options.sleep ?? defaultSleep;
+  const now = options.now ?? Date.now;
+  const started = now();
+  let lastVerification: PrometheusVerification | null = null;
+  let lastError = "not checked";
+
+  while (now() - started <= plan.timeoutMs) {
+    try {
+      lastVerification = await readPrometheusVerification(plan, fetchImpl);
+      if (isPrometheusVerificationComplete(lastVerification)) return lastVerification;
+      lastError = JSON.stringify(lastVerification);
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+
+    await sleep(1000);
+  }
+
+  throw new Error(`timed out waiting for Prometheus verification: ${lastError}`);
+}
+
+async function fetchPrometheusTargets(url: string, fetchImpl: typeof fetch): Promise<PrometheusVerification["targets"]> {
+  const response = await fetchImpl(url);
+  if (!response.ok) {
+    throw new Error(`Prometheus targets request failed with status ${response.status}`);
+  }
+
+  const body = await response.json();
+  const targets = isRecord(body) && isRecord(body.data) && Array.isArray(body.data.activeTargets)
+    ? body.data.activeTargets
+    : [];
+
+  return {
+    api: targets.some((target) => isHealthyTarget(target, "agent-pool-api")),
+    orchestrator: targets.some((target) => isHealthyTarget(target, "agent-pool-orchestrator")),
+  };
+}
+
+async function fetchPrometheusScalar(url: string, fetchImpl: typeof fetch): Promise<number> {
+  const response = await fetchImpl(url);
+  if (!response.ok) {
+    throw new Error(`Prometheus query failed with status ${response.status}`);
+  }
+
+  const body = await response.json();
+  const result = isRecord(body) && isRecord(body.data) && Array.isArray(body.data.result) ? body.data.result : [];
+  const value = result.find(isPrometheusVectorResult)?.value[1];
+  const number = Number(value);
+
+  return Number.isFinite(number) ? number : 0;
+}
+
 function isSmokeComplete(body: unknown): boolean {
   if (!body || typeof body !== "object") return false;
   const candidate = body as {
@@ -265,6 +380,24 @@ function isSmokeComplete(body: unknown): boolean {
     candidate.finalResponse?.recorded === true &&
     candidate.completion?.completed === true &&
     candidate.cleanup?.completed === true;
+}
+
+function isHealthyTarget(value: unknown, job: string): boolean {
+  if (!isRecord(value)) return false;
+  const labels = isRecord(value.labels) ? value.labels : isRecord(value.discoveredLabels) ? value.discoveredLabels : {};
+
+  return value.health === "up" && labels.job === job;
+}
+
+function isPrometheusVectorResult(value: unknown): value is { readonly value: readonly [number, string] } {
+  return isRecord(value) &&
+    Array.isArray(value.value) &&
+    value.value.length >= 2 &&
+    typeof value.value[1] === "string";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 async function runSubprocess(command: readonly string[], options: { readonly cwd: string }): Promise<void> {
