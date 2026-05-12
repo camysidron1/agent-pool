@@ -126,6 +126,12 @@ export {
   type BridgeCallbackClientOptions,
 } from "./callback-client";
 export {
+  createBridgeHeartbeatLoop,
+  type BridgeHeartbeatFailure,
+  type BridgeHeartbeatLoop,
+  type BridgeHeartbeatLoopOptions,
+} from "./heartbeat-loop";
+export {
   createTestBridgeCallbackServer,
   type TestBridgeCallbackServer,
   type TestBridgeCallbackServerOptions,
