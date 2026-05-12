@@ -2,6 +2,7 @@ import express, { type Express, type Request, type Response, type NextFunction }
 
 import { verifyServiceTokenValue } from "@agent-pool/auth";
 import { type AppConfig, loadConfig } from "@agent-pool/config";
+import { createCanonicalStateServices } from "@agent-pool/db";
 import { createRabbitMqAdapter, type RabbitMqAdapter } from "@agent-pool/queue";
 import { SHARED_PACKAGE_NAME } from "@agent-pool/shared";
 import { createStorageAdapter, type StorageAdapter } from "@agent-pool/storage";
@@ -20,6 +21,7 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
   const database = options.database;
   const queue = options.queue ?? createRabbitMqAdapter(config.rabbitmq);
   const storage = options.storage ?? createStorageAdapter(config.storage);
+  const services = database ? createCanonicalStateServices(database.sqlite) : null;
   const app = express();
   const requireInternalServiceToken = createInternalServiceTokenMiddleware(config);
 
@@ -64,7 +66,33 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
     });
   });
 
-  app.post("/internal/orchestrator/tasks/claim-next", requireInternalServiceToken, sendNotImplemented);
+  app.post("/internal/orchestrator/tasks/claim-next", requireInternalServiceToken, (request, response) => {
+    if (!services) {
+      response.status(503).json({ ok: false, error: "database_unavailable" });
+      return;
+    }
+
+    const body = parseObjectBody(request.body);
+    const result = services.claimNextTask({
+      projectId: readOptionalString(body.projectId),
+      sessionId: readOptionalString(body.sessionId),
+      runtimeProvider: readOptionalString(body.runtimeProvider),
+    });
+
+    if (!result.ok) {
+      response.status(200).json({ ok: true, claimed: false, reason: result.reason });
+      return;
+    }
+
+    response.status(200).json({
+      ok: true,
+      claimed: true,
+      task: result.task,
+      session: result.session,
+      event: result.event,
+      outbox: result.outbox,
+    });
+  });
   app.post("/internal/orchestrator/commands/claim-next", requireInternalServiceToken, sendNotImplemented);
   app.post("/internal/orchestrator/commands/:commandId/started", requireInternalServiceToken, sendNotImplemented);
   app.post("/internal/orchestrator/commands/:commandId/succeeded", requireInternalServiceToken, sendNotImplemented);
@@ -119,6 +147,16 @@ function createInternalServiceTokenMiddleware(config: AppConfig) {
     }
     next();
   };
+}
+
+function parseObjectBody(body: unknown): Record<string, unknown> {
+  return body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
+}
+
+function readOptionalString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function sendNotImplemented(request: Request, response: Response): void {

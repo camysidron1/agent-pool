@@ -3,6 +3,7 @@ declare module "express" {
     readonly path: string;
     readonly method: string;
     readonly headers?: Record<string, string | readonly string[] | undefined>;
+    readonly body?: unknown;
     internalServiceSubject?: "internal-service";
   };
 
