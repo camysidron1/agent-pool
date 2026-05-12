@@ -9,6 +9,7 @@
   ],
   "scripts": {
     "typecheck": "bunx --package typescript tsc -p tsconfig.json --noEmit --pretty false",
-    "test": "bun test apps packages"
+    "test": "bun test apps packages",
+    "smoke:compose": "bun run deploy/compose/smoke-compose.ts"
   }
 }
