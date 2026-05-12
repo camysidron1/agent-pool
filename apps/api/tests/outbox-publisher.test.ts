@@ -8,7 +8,8 @@ import { createCanonicalStateServices } from "@agent-pool/db";
 import { createRabbitMqAdapter } from "@agent-pool/queue";
 
 import { API_DATABASE_PATH_ENV, openApiDatabase } from "../src/database";
-import { createOutboxPublisher } from "../src/outbox-publisher";
+import { createOutboxPublisher, type PublishQueuedOutboxResult } from "../src/outbox-publisher";
+import { createOutboxPublisherLoop, type OutboxPublisherLoopScheduler } from "../src/outbox-publisher-loop";
 
 const cleanupPaths: string[] = [];
 
@@ -113,6 +114,183 @@ describe("API outbox publisher", () => {
       await close();
     }
   });
+
+  test("async publisher flushes live queue operations before marking outbox rows published", async () => {
+    const { database, close } = await createHarness();
+    let flushes = 0;
+    const queue = {
+      ...createRabbitMqAdapter(loadConfig({ AUTH_MODE: "test" }).rabbitmq),
+      async flush() {
+        flushes += 1;
+      },
+    };
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      services.createTask({ id: "task_1", projectId: "project_a", title: "First task" });
+
+      const result = await createOutboxPublisher({ database, queue }).publishQueuedAsync();
+
+      expect(result).toMatchObject({
+        scanned: 1,
+        published: [{ projectId: "project_a", queue: "project-tasks.project_a", queueKind: "task" }],
+        failed: [],
+      });
+      expect(flushes).toBe(1);
+      expect(
+        database.sqlite
+          .query<{ status: string; attempts: number; last_error: string | null }, []>(
+            "SELECT status, attempts, last_error FROM outbox",
+          )
+          .get(),
+      ).toEqual({ status: "published", attempts: 1, last_error: null });
+    } finally {
+      await close();
+    }
+  });
+
+  test("async publisher records failed live queue flushes", async () => {
+    const { database, close } = await createHarness();
+    const queue = {
+      ...createRabbitMqAdapter(loadConfig({ AUTH_MODE: "test" }).rabbitmq),
+      async flush() {
+        throw new Error("management API unavailable");
+      },
+    };
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      services.createTask({ id: "task_1", projectId: "project_a", title: "First task" });
+
+      const result = await createOutboxPublisher({ database, queue }).publishQueuedAsync();
+
+      expect(result).toEqual({
+        scanned: 1,
+        published: [],
+        failed: [{ outboxId: expect.any(String), projectId: "project_a", error: "management API unavailable" }],
+      });
+      expect(
+        database.sqlite
+          .query<{ status: string; attempts: number; last_error: string | null }, []>(
+            "SELECT status, attempts, last_error FROM outbox",
+          )
+          .get(),
+      ).toEqual({ status: "failed", attempts: 1, last_error: "management API unavailable" });
+    } finally {
+      await close();
+    }
+  });
+
+  test("outbox publisher loop publishes on ticks and shuts down its scheduler", async () => {
+    const intervals: number[] = [];
+    const scheduledCallbacks: Array<() => void | Promise<void>> = [];
+    const clearedHandles: unknown[] = [];
+    const scheduler: OutboxPublisherLoopScheduler = {
+      setInterval(callback, intervalMs) {
+        intervals.push(intervalMs);
+        scheduledCallbacks.push(callback);
+        return `interval-${intervals.length}`;
+      },
+      clearInterval(handle) {
+        clearedHandles.push(handle);
+      },
+    };
+    let publishCalls = 0;
+    const loop = createOutboxPublisherLoop({
+      publisher: {
+        async publishQueuedAsync() {
+          publishCalls += 1;
+          return {
+            scanned: publishCalls,
+            published: [
+              {
+                outboxId: `outbox_${publishCalls}`,
+                projectId: "project_a",
+                queue: "project-tasks.project_a",
+                queueKind: "task",
+              },
+            ],
+            failed: [],
+          };
+        },
+      },
+      intervalMs: 25,
+      scheduler,
+    });
+
+    expect(loop.state).toMatchObject({ running: false, ticks: 0, failures: 0, inFlight: false });
+
+    loop.start();
+    loop.start();
+    const first = await loop.tick();
+
+    expect(intervals).toEqual([25]);
+    expect(scheduledCallbacks).toHaveLength(1);
+    expect(first).toMatchObject({ scanned: 1, failed: [] });
+    expect(loop.state).toMatchObject({ running: true, ticks: 1, failures: 0, inFlight: false });
+    expect(loop.state.lastResult).toMatchObject({ scanned: 1, published: [{ outboxId: "outbox_1" }] });
+
+    loop.stop();
+    loop.stop();
+
+    expect(clearedHandles).toEqual(["interval-1"]);
+    expect(loop.state.running).toBe(false);
+  });
+
+  test("outbox publisher loop records tick failures without overlapping publishes", async () => {
+    let resolvePublish: ((result: PublishQueuedOutboxResult) => void) | null = null;
+    let publishCalls = 0;
+    const errors: unknown[] = [];
+    const loop = createOutboxPublisherLoop({
+      publisher: {
+        publishQueuedAsync() {
+          publishCalls += 1;
+          return new Promise<PublishQueuedOutboxResult>((resolve) => {
+            resolvePublish = resolve;
+          });
+        },
+      },
+      intervalMs: 25,
+      onError(error) {
+        errors.push(error);
+      },
+    });
+
+    const first = loop.tick();
+    const second = loop.tick();
+    expect(publishCalls).toBe(1);
+    expect(loop.state.inFlight).toBe(true);
+    resolvePublish?.({
+      scanned: 1,
+      published: [],
+      failed: [],
+    });
+    await Promise.all([first, second]);
+    expect(loop.state).toMatchObject({ ticks: 1, failures: 0, inFlight: false });
+
+    const failingLoop = createOutboxPublisherLoop({
+      publisher: {
+        async publishQueuedAsync() {
+          throw new Error("publisher crashed");
+        },
+      },
+      intervalMs: 25,
+      onError(error) {
+        errors.push(error);
+      },
+    });
+
+    await expect(failingLoop.tick()).resolves.toBeNull();
+    expect(failingLoop.state).toMatchObject({
+      ticks: 1,
+      failures: 1,
+      inFlight: false,
+      lastError: "publisher crashed",
+    });
+    expect(errors).toHaveLength(1);
+  });
 });
 
 async function createHarness(): Promise<{
@@ -138,4 +316,3 @@ async function createHarness(): Promise<{
     },
   };
 }
-

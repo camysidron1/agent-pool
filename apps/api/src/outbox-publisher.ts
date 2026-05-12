@@ -72,6 +72,36 @@ export function createOutboxPublisher(options: OutboxPublisherOptions) {
 
       return { scanned: rows.length, published, failed };
     },
+    async publishQueuedAsync(input: PublishQueuedOutboxOptions = {}): Promise<PublishQueuedOutboxResult> {
+      const rows = selectQueuedOutboxRows(options.database, input.limit ?? 50);
+      const published: PublishedOutboxRecord[] = [];
+      const failed: FailedOutboxRecord[] = [];
+
+      for (const row of rows) {
+        const queueKind = resolveQueueKind(row);
+        try {
+          const envelope =
+            queueKind === "task"
+              ? options.queue.publishProjectTaskHint(row.project_id, outboxPayload(row))
+              : options.queue.publishProjectControlHint(row.project_id, outboxPayload(row));
+          await options.queue.flush?.();
+
+          markOutboxPublished(options.database, row.id);
+          published.push({
+            outboxId: row.id,
+            projectId: row.project_id,
+            queue: envelope.queue,
+            queueKind,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          markOutboxFailed(options.database, row.id, message);
+          failed.push({ outboxId: row.id, projectId: row.project_id, error: message });
+        }
+      }
+
+      return { scanned: rows.length, published, failed };
+    },
   };
 }
 

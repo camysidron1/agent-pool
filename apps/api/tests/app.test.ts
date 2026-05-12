@@ -8,6 +8,7 @@ import { createCanonicalStateServices } from "@agent-pool/db";
 
 import { createApiApp } from "../src/app";
 import { API_DATABASE_PATH_ENV, openApiDatabase } from "../src/database";
+import { createOutboxPublisherLoop, type OutboxPublisherLoop } from "../src/outbox-publisher-loop";
 
 const cleanupPaths: string[] = [];
 
@@ -34,7 +35,13 @@ describe("API service skeleton", () => {
       expect(body.database.appliedMigrations).toBeGreaterThan(0);
       expect(body.adapters).toMatchObject({
         queue: { kind: "rabbitmq", connected: false },
-        outboxPublisher: { initialized: true, queuedOutbox: 0, publishedOutbox: 0, failedOutbox: 0 },
+        outboxPublisher: {
+          initialized: true,
+          queuedOutbox: 0,
+          publishedOutbox: 0,
+          failedOutbox: 0,
+          loop: { initialized: false, running: false, inFlight: false, ticks: 0, failures: 0 },
+        },
         storage: { kind: "local" },
       });
       expect(body.controlPlane).toMatchObject({
@@ -1026,8 +1033,70 @@ describe("API service skeleton", () => {
       expect(text).toContain("agent_pool_api_outbox_queued 0");
       expect(text).toContain("agent_pool_api_outbox_published 0");
       expect(text).toContain("agent_pool_api_outbox_failed 0");
+      expect(text).toContain("agent_pool_api_outbox_loop_running 0");
+      expect(text).toContain("agent_pool_api_outbox_loop_in_flight 0");
+      expect(text).toContain("agent_pool_api_outbox_loop_ticks_total 0");
+      expect(text).toContain("agent_pool_api_outbox_loop_failures_total 0");
       expect(text).toContain("agent_pool_api_storage_adapter_initialized 1");
     } finally {
+      await close();
+    }
+  });
+
+  test("health and metrics expose explicitly started outbox publisher loop state", async () => {
+    const loop = createOutboxPublisherLoop({
+      publisher: {
+        async publishQueuedAsync() {
+          return {
+            scanned: 2,
+            published: [
+              {
+                outboxId: "outbox_1",
+                projectId: "project_a",
+                queue: "project-tasks.project_a",
+                queueKind: "task",
+              },
+            ],
+            failed: [],
+          };
+        },
+      },
+      intervalMs: 1000,
+      scheduler: {
+        setInterval() {
+          return "outbox-loop";
+        },
+        clearInterval() {},
+      },
+    });
+    loop.start();
+    await loop.tick();
+    const { baseUrl, close } = await startTestApi({ outboxPublisherLoop: loop });
+
+    try {
+      const health = await fetch(`${baseUrl}/health`);
+      const healthBody = await health.json();
+      const metrics = await fetch(`${baseUrl}/metrics`);
+      const metricsText = await metrics.text();
+
+      expect(health.status).toBe(200);
+      expect(healthBody.adapters.outboxPublisher.loop).toMatchObject({
+        initialized: true,
+        running: true,
+        inFlight: false,
+        ticks: 1,
+        failures: 0,
+        lastScanned: 2,
+        lastPublished: 1,
+        lastFailed: 0,
+        lastError: null,
+      });
+      expect(metricsText).toContain("agent_pool_api_outbox_loop_running 1");
+      expect(metricsText).toContain("agent_pool_api_outbox_loop_in_flight 0");
+      expect(metricsText).toContain("agent_pool_api_outbox_loop_ticks_total 1");
+      expect(metricsText).toContain("agent_pool_api_outbox_loop_failures_total 0");
+    } finally {
+      loop.stop();
       await close();
     }
   });
@@ -1098,7 +1167,7 @@ async function postReconcile(
   });
 }
 
-async function startTestApi(): Promise<{
+async function startTestApi(options: { readonly outboxPublisherLoop?: OutboxPublisherLoop } = {}): Promise<{
   readonly baseUrl: string;
   readonly config: ReturnType<typeof loadConfig>;
   readonly database: ReturnType<typeof openApiDatabase>;
@@ -1114,7 +1183,7 @@ async function startTestApi(): Promise<{
   };
   const config = loadConfig(env);
   const database = openApiDatabase(env);
-  const app = createApiApp({ config, database });
+  const app = createApiApp({ config, database, outboxPublisherLoop: options.outboxPublisherLoop });
   const server = app.listen(0);
   const address = server.address();
 

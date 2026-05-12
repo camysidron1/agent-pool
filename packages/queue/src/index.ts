@@ -241,9 +241,11 @@ export function createRabbitMqManagementHttpAdapter(
 
   const enqueueOperation = (operation: Promise<unknown>): void => {
     state.pendingOperations.push(operation);
-    operation.finally(() => {
+    void operation.then(removePendingOperation, removePendingOperation);
+
+    function removePendingOperation(): void {
       state.pendingOperations = state.pendingOperations.filter((candidate) => candidate !== operation);
-    });
+    }
   };
 
   const flush = async (): Promise<void> => {

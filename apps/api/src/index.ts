@@ -1,7 +1,10 @@
 import { loadConfig } from "@agent-pool/config";
+import { createRabbitMqManagementHttpAdapter } from "@agent-pool/queue";
 
 import { createApiApp } from "./app";
 import { openApiDatabase } from "./database";
+import { createOutboxPublisher } from "./outbox-publisher";
+import { createOutboxPublisherLoop } from "./outbox-publisher-loop";
 
 export { createApiApp, type ApiAppOptions } from "./app";
 export {
@@ -27,17 +30,32 @@ export {
   type PublishQueuedOutboxResult,
   type PublishedOutboxRecord,
 } from "./outbox-publisher";
+export {
+  createOutboxPublisherLoop,
+  type OutboxPublisherLoop,
+  type OutboxPublisherLoopOptions,
+  type OutboxPublisherLoopScheduler,
+  type OutboxPublisherLoopState,
+} from "./outbox-publisher-loop";
 
 if (isDirectRun()) {
   const env = readProcessEnv();
   const config = loadConfig(env);
   const database = openApiDatabase(env);
-  const app = createApiApp({ config, database });
+  const queue = createRabbitMqManagementHttpAdapter(config.rabbitmq);
+  const outboxPublisher = createOutboxPublisher({ database, queue });
+  const outboxPublisherLoop = createOutboxPublisherLoop({
+    publisher: outboxPublisher,
+    intervalMs: config.controlPlane.outboxPublishIntervalMs,
+  });
+  const app = createApiApp({ config, database, queue, outboxPublisher, outboxPublisherLoop });
   const server = app.listen(config.backend.port, () => {
     console.info(`agent-pool-api listening on ${config.backend.port}`);
   }) as { close: () => void };
+  outboxPublisherLoop.start();
 
   registerShutdown(() => {
+    outboxPublisherLoop.stop();
     database.close();
     server.close();
   });

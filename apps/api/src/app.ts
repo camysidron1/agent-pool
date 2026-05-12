@@ -9,6 +9,7 @@ import { createStorageAdapter, type StorageAdapter } from "@agent-pool/storage";
 
 import type { ApiDatabaseConnection } from "./database";
 import { createOutboxPublisher, type OutboxPublisher } from "./outbox-publisher";
+import type { OutboxPublisherLoop } from "./outbox-publisher-loop";
 
 export type ApiAppOptions = {
   readonly config?: AppConfig;
@@ -16,6 +17,7 @@ export type ApiAppOptions = {
   readonly queue?: RabbitMqAdapter;
   readonly storage?: StorageAdapter;
   readonly outboxPublisher?: OutboxPublisher;
+  readonly outboxPublisherLoop?: OutboxPublisherLoop;
 };
 
 export function createApiApp(options: ApiAppOptions = {}): Express {
@@ -24,6 +26,7 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
   const queue = options.queue ?? createRabbitMqAdapter(config.rabbitmq);
   const storage = options.storage ?? createStorageAdapter(config.storage);
   const outboxPublisher = options.outboxPublisher ?? (database ? createOutboxPublisher({ database, queue }) : null);
+  const outboxPublisherLoop = options.outboxPublisherLoop ?? null;
   const services = database ? createCanonicalStateServices(database.sqlite) : null;
   const app = express();
   const requireInternalServiceToken = createInternalServiceTokenMiddleware(config);
@@ -50,6 +53,7 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
           queuedOutbox: database ? countOutboxRows(database, "queued") : 0,
           publishedOutbox: database ? countOutboxRows(database, "published") : 0,
           failedOutbox: database ? countOutboxRows(database, "failed") : 0,
+          loop: readOutboxPublisherLoopHealth(outboxPublisherLoop),
         },
         storage: {
           kind: storage.kind,
@@ -76,7 +80,10 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
       },
       adapters: {
         queue: queue.kind,
-        outboxPublisher: Boolean(outboxPublisher),
+        outboxPublisher: {
+          initialized: Boolean(outboxPublisher),
+          loop: readOutboxPublisherLoopHealth(outboxPublisherLoop),
+        },
         storage: storage.kind,
       },
       controlPlane: {
@@ -166,15 +173,32 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
   });
 
   app.get("/metrics", (_request, response) => {
+    const loopState = outboxPublisherLoop?.state;
     response
       .status(200)
       .type("text/plain")
       .send(
-        `# metrics placeholder for agent-pool-api\nagent_pool_api_info{shared_package="${SHARED_PACKAGE_NAME}"} 1\nagent_pool_api_database_connected ${database ? 1 : 0}\nagent_pool_api_database_applied_migrations ${database?.appliedMigrations.length ?? 0}\nagent_pool_api_queue_adapter_initialized 1\nagent_pool_api_outbox_publisher_initialized ${outboxPublisher ? 1 : 0}\nagent_pool_api_outbox_queued ${database ? countOutboxRows(database, "queued") : 0}\nagent_pool_api_outbox_published ${database ? countOutboxRows(database, "published") : 0}\nagent_pool_api_outbox_failed ${database ? countOutboxRows(database, "failed") : 0}\nagent_pool_api_storage_adapter_initialized 1\n`,
+        `# metrics placeholder for agent-pool-api\nagent_pool_api_info{shared_package="${SHARED_PACKAGE_NAME}"} 1\nagent_pool_api_database_connected ${database ? 1 : 0}\nagent_pool_api_database_applied_migrations ${database?.appliedMigrations.length ?? 0}\nagent_pool_api_queue_adapter_initialized 1\nagent_pool_api_outbox_publisher_initialized ${outboxPublisher ? 1 : 0}\nagent_pool_api_outbox_queued ${database ? countOutboxRows(database, "queued") : 0}\nagent_pool_api_outbox_published ${database ? countOutboxRows(database, "published") : 0}\nagent_pool_api_outbox_failed ${database ? countOutboxRows(database, "failed") : 0}\nagent_pool_api_outbox_loop_running ${loopState?.running ? 1 : 0}\nagent_pool_api_outbox_loop_in_flight ${loopState?.inFlight ? 1 : 0}\nagent_pool_api_outbox_loop_ticks_total ${loopState?.ticks ?? 0}\nagent_pool_api_outbox_loop_failures_total ${loopState?.failures ?? 0}\nagent_pool_api_storage_adapter_initialized 1\n`,
       );
   });
 
   return app;
+}
+
+function readOutboxPublisherLoopHealth(loop: OutboxPublisherLoop | null) {
+  const state = loop?.state;
+
+  return {
+    initialized: Boolean(loop),
+    running: state?.running ?? false,
+    inFlight: state?.inFlight ?? false,
+    ticks: state?.ticks ?? 0,
+    failures: state?.failures ?? 0,
+    lastScanned: state?.lastResult?.scanned ?? null,
+    lastPublished: state?.lastResult?.published.length ?? null,
+    lastFailed: state?.lastResult?.failed.length ?? null,
+    lastError: state?.lastError ?? null,
+  };
 }
 
 type InternalServiceRequest = Request & {
