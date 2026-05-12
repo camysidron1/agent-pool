@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { loadConfig } from "@agent-pool/config";
+import { createCanonicalStateServices } from "@agent-pool/db";
 
 import { createApiApp } from "../src/app";
 import { API_DATABASE_PATH_ENV, openApiDatabase } from "../src/database";
@@ -71,14 +72,14 @@ describe("API service skeleton", () => {
     const { baseUrl, config, close } = await startTestApi();
 
     try {
-      const missing = await fetch(`${baseUrl}/internal/orchestrator/tasks/claim-next`, { method: "POST" });
-      const invalid = await fetch(`${baseUrl}/internal/orchestrator/tasks/claim-next`, {
+      const missing = await fetch(`${baseUrl}/internal/orchestrator/commands/claim-next`, { method: "POST" });
+      const invalid = await fetch(`${baseUrl}/internal/orchestrator/commands/claim-next`, {
         method: "POST",
         headers: {
           [config.serviceToken.headerName]: "wrong",
         },
       });
-      const ok = await fetch(`${baseUrl}/internal/orchestrator/tasks/claim-next`, {
+      const ok = await fetch(`${baseUrl}/internal/orchestrator/commands/claim-next`, {
         method: "POST",
         headers: {
           [config.serviceToken.headerName]: config.serviceToken.token,
@@ -94,8 +95,47 @@ describe("API service skeleton", () => {
         ok: false,
         error: "internal_orchestrator_endpoint_not_implemented",
         method: "POST",
-        path: "/internal/orchestrator/tasks/claim-next",
+        path: "/internal/orchestrator/commands/claim-next",
       });
+    } finally {
+      await close();
+    }
+  });
+
+  test("claimNextTask internal endpoint claims work and returns structured no-work response", async () => {
+    const { baseUrl, config, database, close } = await startTestApi();
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      services.createTask({ id: "task_1", projectId: "project_a", title: "First task" });
+
+      const claimed = await fetch(`${baseUrl}/internal/orchestrator/tasks/claim-next`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+        body: JSON.stringify({ projectId: "project_a", sessionId: "session_1", runtimeProvider: "test-provider" }),
+      });
+      const noWork = await fetch(`${baseUrl}/internal/orchestrator/tasks/claim-next`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+        body: JSON.stringify({ projectId: "project_a", sessionId: "session_2" }),
+      });
+
+      expect(claimed.status).toBe(200);
+      expect(await claimed.json()).toMatchObject({
+        ok: true,
+        claimed: true,
+        task: { id: "task_1", projectId: "project_a", status: "running" },
+        session: { id: "session_1", taskId: "task_1", status: "starting", runtimeProvider: "test-provider" },
+      });
+      expect(noWork.status).toBe(200);
+      expect(await noWork.json()).toEqual({ ok: true, claimed: false, reason: "no_eligible_task" });
     } finally {
       await close();
     }
@@ -164,6 +204,7 @@ describe("API service skeleton", () => {
 async function startTestApi(): Promise<{
   readonly baseUrl: string;
   readonly config: ReturnType<typeof loadConfig>;
+  readonly database: ReturnType<typeof openApiDatabase>;
   readonly close: () => Promise<void>;
 }> {
   const tempDir = await mkdtemp(join(tmpdir(), "agent-pool-api-app-"));
@@ -187,6 +228,7 @@ async function startTestApi(): Promise<{
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
     config,
+    database,
     async close() {
       await new Promise<void>((resolve, reject) => {
         server.close((error?: Error) => {
