@@ -152,6 +152,12 @@ export {
   type BridgeHeartbeatLoopOptions,
 } from "./heartbeat-loop";
 export {
+  createBridgeMockHarness,
+  type BridgeMockHarness,
+  type BridgeMockHarnessOptions,
+  type BridgeMockHarnessState,
+} from "./mock-harness";
+export {
   createBridgeOutputCapture,
   type BridgeOutputCapture,
   type BridgeOutputCaptureOptions,
