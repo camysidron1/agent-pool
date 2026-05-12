@@ -120,3 +120,13 @@ export const SESSION_BRIDGE_PACKAGE_BOUNDARY = {
   importsRuntimeProvider: false,
   includesRealProvider: false,
 } as const;
+
+export {
+  createBridgeCallbackClient,
+  type BridgeCallbackClientOptions,
+} from "./callback-client";
+export {
+  createTestBridgeCallbackServer,
+  type TestBridgeCallbackServer,
+  type TestBridgeCallbackServerOptions,
+} from "./test-callback-server";
