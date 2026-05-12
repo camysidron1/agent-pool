@@ -72,14 +72,14 @@ describe("API service skeleton", () => {
     const { baseUrl, config, close } = await startTestApi();
 
     try {
-      const missing = await fetch(`${baseUrl}/internal/orchestrator/commands/cmd_1/started`, { method: "POST" });
-      const invalid = await fetch(`${baseUrl}/internal/orchestrator/commands/cmd_1/started`, {
+      const missing = await fetch(`${baseUrl}/internal/orchestrator/sessions/session_1/startup-succeeded`, { method: "POST" });
+      const invalid = await fetch(`${baseUrl}/internal/orchestrator/sessions/session_1/startup-succeeded`, {
         method: "POST",
         headers: {
           [config.serviceToken.headerName]: "wrong",
         },
       });
-      const ok = await fetch(`${baseUrl}/internal/orchestrator/commands/cmd_1/started`, {
+      const ok = await fetch(`${baseUrl}/internal/orchestrator/sessions/session_1/startup-succeeded`, {
         method: "POST",
         headers: {
           [config.serviceToken.headerName]: config.serviceToken.token,
@@ -95,7 +95,7 @@ describe("API service skeleton", () => {
         ok: false,
         error: "internal_orchestrator_endpoint_not_implemented",
         method: "POST",
-        path: "/internal/orchestrator/commands/cmd_1/started",
+        path: "/internal/orchestrator/sessions/session_1/startup-succeeded",
       });
     } finally {
       await close();
@@ -195,6 +195,39 @@ describe("API service skeleton", () => {
     }
   });
 
+  test("command report endpoints transition running commands and handle duplicates idempotently", async () => {
+    const { baseUrl, config, database, close } = await startTestApi();
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      services.createTask({ id: "task_1", projectId: "project_a", title: "First task" });
+      const requested = services.requestCommand({ id: "command_cancel", projectId: "project_a", taskId: "task_1", type: "cancel" });
+      expect(requested.ok).toBe(true);
+      const claimed = services.claimNextCommand({ projectId: "project_a" });
+      expect(claimed.ok).toBe(true);
+
+      const started = await postCommandReport(baseUrl, config, "command_cancel", "started", { projectId: "project_a" });
+      const succeeded = await postCommandReport(baseUrl, config, "command_cancel", "succeeded", { projectId: "project_a" });
+      const duplicate = await postCommandReport(baseUrl, config, "command_cancel", "succeeded", { projectId: "project_a" });
+      const failedConflict = await postCommandReport(baseUrl, config, "command_cancel", "failed", {
+        projectId: "project_a",
+        errorMessage: "too late",
+      });
+
+      expect(started.status).toBe(200);
+      expect(await started.json()).toMatchObject({ ok: true, idempotent: true, command: { id: "command_cancel", status: "running" } });
+      expect(succeeded.status).toBe(200);
+      expect(await succeeded.json()).toMatchObject({ ok: true, idempotent: false, command: { id: "command_cancel", status: "succeeded" } });
+      expect(duplicate.status).toBe(200);
+      expect(await duplicate.json()).toMatchObject({ ok: true, idempotent: true, command: { id: "command_cancel", status: "succeeded" } });
+      expect(failedConflict.status).toBe(409);
+      expect(await failedConflict.json()).toMatchObject({ ok: false, error: { code: "conflict" } });
+    } finally {
+      await close();
+    }
+  });
+
   test("internal orchestrator placeholder endpoints are not exposed as public routes", async () => {
     const { baseUrl, config, close } = await startTestApi();
 
@@ -205,7 +238,7 @@ describe("API service skeleton", () => {
           [config.serviceToken.headerName]: config.serviceToken.token,
         },
       });
-      const commandReport = await fetch(`${baseUrl}/internal/orchestrator/commands/cmd_1/started`, {
+      const missingCommandProject = await fetch(`${baseUrl}/internal/orchestrator/commands/cmd_1/started`, {
         method: "POST",
         headers: {
           [config.serviceToken.headerName]: config.serviceToken.token,
@@ -225,8 +258,8 @@ describe("API service skeleton", () => {
       });
 
       expect(publicRoute.status).toBe(404);
-      expect(commandReport.status).toBe(501);
-      expect(await commandReport.json()).toMatchObject({ error: "internal_orchestrator_endpoint_not_implemented" });
+      expect(missingCommandProject.status).toBe(400);
+      expect(await missingCommandProject.json()).toMatchObject({ error: "missing_project_id" });
       expect(startupReport.status).toBe(501);
       expect(await startupReport.json()).toMatchObject({ error: "internal_orchestrator_endpoint_not_implemented" });
       expect(reconcile.status).toBe(501);
@@ -254,6 +287,23 @@ describe("API service skeleton", () => {
     }
   });
 });
+
+async function postCommandReport(
+  baseUrl: string,
+  config: ReturnType<typeof loadConfig>,
+  commandId: string,
+  report: "started" | "succeeded" | "failed",
+  body: Readonly<Record<string, unknown>>,
+): Promise<Response> {
+  return fetch(`${baseUrl}/internal/orchestrator/commands/${commandId}/${report}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      [config.serviceToken.headerName]: config.serviceToken.token,
+    },
+    body: JSON.stringify(body),
+  });
+}
 
 async function startTestApi(): Promise<{
   readonly baseUrl: string;

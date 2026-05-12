@@ -110,6 +110,27 @@ export type RequestCommandResult =
   | { readonly ok: true; readonly command: CommandRecord; readonly event: EventRecord; readonly outbox: OutboxRecord }
   | { readonly ok: false; readonly error: CommandAdmissibilityError };
 
+export type CommandReportInput = {
+  readonly projectId: string;
+  readonly commandId: string;
+  readonly errorMessage?: string | null;
+};
+
+export type CommandReportRecord = CommandRecord & {
+  readonly status: "running" | "succeeded" | "failed";
+  readonly errorMessage: string | null;
+};
+
+export type CommandReportResult =
+  | {
+      readonly ok: true;
+      readonly idempotent: boolean;
+      readonly command: CommandReportRecord;
+      readonly event?: EventRecord;
+      readonly outbox?: OutboxRecord;
+    }
+  | { readonly ok: false; readonly error: { readonly code: "not_found" | "invalid_state" | "conflict"; readonly message: string } };
+
 export type ClaimNextTaskInput = {
   readonly projectId?: string;
   readonly sessionId?: string;
@@ -347,6 +368,18 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
       });
     },
 
+    reportCommandStarted(input: CommandReportInput): CommandReportResult {
+      return reportCommandTransition(database, input, "running");
+    },
+
+    reportCommandSucceeded(input: CommandReportInput): CommandReportResult {
+      return reportCommandTransition(database, input, "succeeded");
+    },
+
+    reportCommandFailed(input: CommandReportInput): CommandReportResult {
+      return reportCommandTransition(database, input, "failed");
+    },
+
     requestCommand(input: RequestCommandInput): RequestCommandResult {
       const admissibility = validateCommand(database, input);
       if (!admissibility.ok) return admissibility;
@@ -559,6 +592,129 @@ function validateCommand(database: WebSandboxSqliteDatabase, input: RequestComma
       }
       return { ok: true };
   }
+}
+
+function reportCommandTransition(
+  database: WebSandboxSqliteDatabase,
+  input: CommandReportInput,
+  targetStatus: "running" | "succeeded" | "failed",
+): CommandReportResult {
+  return transaction(database, () => {
+    const current = readCommandState(database, input.projectId, input.commandId);
+    if (!current) {
+      return { ok: false, error: { code: "not_found", message: `command not found: ${input.commandId}` } } as const;
+    }
+
+    if (current.status === targetStatus) {
+      return {
+        ok: true,
+        idempotent: true,
+        command: commandReportRecord(current, targetStatus, current.error_message),
+      } as const;
+    }
+
+    if (["succeeded", "failed", "canceled"].includes(current.status)) {
+      return {
+        ok: false,
+        error: { code: "conflict", message: `command ${input.commandId} is already ${current.status}` },
+      } as const;
+    }
+
+    if (targetStatus !== "running" && current.status !== "running") {
+      return {
+        ok: false,
+        error: { code: "invalid_state", message: `${targetStatus} report requires running command; got ${current.status}` },
+      } as const;
+    }
+
+    const errorMessage = targetStatus === "failed" ? input.errorMessage?.trim() || "command failed without details" : null;
+    const completedSql = targetStatus === "running" ? "completed_at = NULL" : "completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
+    database
+      .query(
+        `UPDATE orchestrator_commands SET status = ?, error_message = ?, claimed_at = COALESCE(claimed_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), ${completedSql} WHERE project_id = ? AND id = ?`,
+      )
+      .run(targetStatus, errorMessage, input.projectId, input.commandId);
+
+    const updated = readCommandState(database, input.projectId, input.commandId);
+    if (!updated) throw new Error(`reported command disappeared: ${input.commandId}`);
+
+    const eventType = targetStatus === "running" ? "command.started" : `command.${targetStatus}`;
+    const event = appendEvent(database, {
+      projectId: updated.project_id,
+      taskId: updated.task_id,
+      sessionId: updated.session_id,
+      commandId: updated.id,
+      type: eventType,
+      payload: { commandId: updated.id, type: updated.type, errorMessage },
+    });
+    const outbox = enqueueOutbox(database, {
+      projectId: updated.project_id,
+      eventId: event.id,
+      routingKey: projectRoutingKey(updated.project_id, "control"),
+      payload: { eventId: event.id, commandId: updated.id, type: event.type },
+    });
+
+    return {
+      ok: true,
+      idempotent: false,
+      command: commandReportRecord(updated, targetStatus, errorMessage),
+      event,
+      outbox,
+    } as const;
+  });
+}
+
+function readCommandState(
+  database: WebSandboxSqliteDatabase,
+  projectId: string,
+  commandId: string,
+): {
+  readonly id: string;
+  readonly project_id: string;
+  readonly task_id: string | null;
+  readonly session_id: string | null;
+  readonly type: CommandType;
+  readonly status: string;
+  readonly error_message: string | null;
+} | null {
+  return database
+    .query<
+      {
+        id: string;
+        project_id: string;
+        task_id: string | null;
+        session_id: string | null;
+        type: CommandType;
+        status: string;
+        error_message: string | null;
+      },
+      [string, string]
+    >(
+      "SELECT id, project_id, task_id, session_id, type, status, error_message FROM orchestrator_commands WHERE project_id = ? AND id = ?",
+    )
+    .get(projectId, commandId);
+}
+
+function commandReportRecord(
+  row: {
+    readonly id: string;
+    readonly project_id: string;
+    readonly task_id: string | null;
+    readonly session_id: string | null;
+    readonly type: CommandType;
+  },
+  status: "running" | "succeeded" | "failed",
+  errorMessage: string | null,
+): CommandReportRecord {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    taskId: row.task_id,
+    sessionId: row.session_id,
+    type: row.type,
+    status,
+    errorMessage,
+  };
 }
 
 function selectNextQueuedCommand(

@@ -4,6 +4,7 @@ declare module "express" {
     readonly method: string;
     readonly headers?: Record<string, string | readonly string[] | undefined>;
     readonly body?: unknown;
+    readonly params?: Record<string, string | undefined>;
     internalServiceSubject?: "internal-service";
   };
 

@@ -148,6 +148,76 @@ describe("command admissibility helpers", () => {
     }
   });
 
+  test("reports command started succeeded and failed with idempotent duplicate reports", () => {
+    const database = createSeededMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      const stop = services.requestCommand({ id: "command_stop", projectId: "project_a", taskId: "task_running", sessionId: "session_running", type: "stop" });
+      const cancel = services.requestCommand({ id: "command_cancel", projectId: "project_a", taskId: "task_queued", type: "cancel" });
+      expect(stop.ok).toBe(true);
+      expect(cancel.ok).toBe(true);
+      services.claimNextCommand({ projectId: "project_a" });
+      services.claimNextCommand({ projectId: "project_a" });
+
+      const started = services.reportCommandStarted({ projectId: "project_a", commandId: "command_stop" });
+      const succeeded = services.reportCommandSucceeded({ projectId: "project_a", commandId: "command_stop" });
+      const duplicateSucceeded = services.reportCommandSucceeded({ projectId: "project_a", commandId: "command_stop" });
+      const failed = services.reportCommandFailed({ projectId: "project_a", commandId: "command_cancel", errorMessage: "provider stopped" });
+      const duplicateFailed = services.reportCommandFailed({ projectId: "project_a", commandId: "command_cancel", errorMessage: "provider stopped" });
+
+      expect(started).toMatchObject({ ok: true, idempotent: true, command: { id: "command_stop", status: "running" } });
+      expect(succeeded).toMatchObject({
+        ok: true,
+        idempotent: false,
+        command: { id: "command_stop", status: "succeeded", errorMessage: null },
+        event: { type: "command.succeeded" },
+      });
+      expect(duplicateSucceeded).toMatchObject({ ok: true, idempotent: true, command: { id: "command_stop", status: "succeeded" } });
+      expect(failed).toMatchObject({
+        ok: true,
+        idempotent: false,
+        command: { id: "command_cancel", status: "failed", errorMessage: "provider stopped" },
+        event: { type: "command.failed" },
+      });
+      expect(duplicateFailed).toMatchObject({ ok: true, idempotent: true, command: { id: "command_cancel", status: "failed" } });
+      expect(database.query<{ status: string; error_message: string | null }, []>("SELECT status, error_message FROM orchestrator_commands WHERE id = 'command_cancel'").get()).toEqual({
+        status: "failed",
+        error_message: "provider stopped",
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  test("rejects unsafe command report transitions", () => {
+    const database = createSeededMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      const queued = services.requestCommand({ id: "command_cancel", projectId: "project_a", taskId: "task_queued", type: "cancel" });
+      expect(queued.ok).toBe(true);
+
+      expect(services.reportCommandSucceeded({ projectId: "project_a", commandId: "command_cancel" })).toEqual({
+        ok: false,
+        error: { code: "invalid_state", message: "succeeded report requires running command; got queued" },
+      });
+      expect(services.reportCommandFailed({ projectId: "project_a", commandId: "missing" })).toEqual({
+        ok: false,
+        error: { code: "not_found", message: "command not found: missing" },
+      });
+      services.claimNextCommand({ projectId: "project_a" });
+      const failed = services.reportCommandFailed({ projectId: "project_a", commandId: "command_cancel" });
+      expect(failed).toMatchObject({ ok: true, command: { status: "failed", errorMessage: "command failed without details" } });
+      expect(services.reportCommandSucceeded({ projectId: "project_a", commandId: "command_cancel" })).toEqual({
+        ok: false,
+        error: { code: "conflict", message: "command command_cancel is already failed" },
+      });
+    } finally {
+      database.close();
+    }
+  });
+
   test("rejects missing command scope", () => {
     const database = createSeededMemoryDatabase();
 

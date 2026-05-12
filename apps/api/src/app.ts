@@ -117,9 +117,15 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
       outbox: result.outbox,
     });
   });
-  app.post("/internal/orchestrator/commands/:commandId/started", requireInternalServiceToken, sendNotImplemented);
-  app.post("/internal/orchestrator/commands/:commandId/succeeded", requireInternalServiceToken, sendNotImplemented);
-  app.post("/internal/orchestrator/commands/:commandId/failed", requireInternalServiceToken, sendNotImplemented);
+  app.post("/internal/orchestrator/commands/:commandId/started", requireInternalServiceToken, (request, response) => {
+    respondWithCommandReport(response, services, request, "started");
+  });
+  app.post("/internal/orchestrator/commands/:commandId/succeeded", requireInternalServiceToken, (request, response) => {
+    respondWithCommandReport(response, services, request, "succeeded");
+  });
+  app.post("/internal/orchestrator/commands/:commandId/failed", requireInternalServiceToken, (request, response) => {
+    respondWithCommandReport(response, services, request, "failed");
+  });
   app.post("/internal/orchestrator/sessions/:sessionId/startup-succeeded", requireInternalServiceToken, sendNotImplemented);
   app.post("/internal/orchestrator/sessions/:sessionId/startup-failed", requireInternalServiceToken, sendNotImplemented);
   app.post("/internal/orchestrator/sessions/:sessionId/heartbeat", requireInternalServiceToken, sendNotImplemented);
@@ -170,6 +176,52 @@ function createInternalServiceTokenMiddleware(config: AppConfig) {
     }
     next();
   };
+}
+
+function respondWithCommandReport(
+  response: Response,
+  services: ReturnType<typeof createCanonicalStateServices> | null,
+  request: Request,
+  report: "started" | "succeeded" | "failed",
+): void {
+  if (!services) {
+    response.status(503).json({ ok: false, error: "database_unavailable" });
+    return;
+  }
+
+  const commandId = request.params?.commandId;
+  if (!commandId) {
+    response.status(400).json({ ok: false, error: "missing_command_id" });
+    return;
+  }
+
+  const body = parseObjectBody(request.body);
+  const projectId = readOptionalString(body.projectId);
+  if (!projectId) {
+    response.status(400).json({ ok: false, error: "missing_project_id" });
+    return;
+  }
+
+  const input = { projectId, commandId, errorMessage: readOptionalString(body.errorMessage) };
+  const result =
+    report === "started"
+      ? services.reportCommandStarted(input)
+      : report === "succeeded"
+        ? services.reportCommandSucceeded(input)
+        : services.reportCommandFailed(input);
+
+  if (!result.ok) {
+    response.status(result.error.code === "not_found" ? 404 : 409).json({ ok: false, error: result.error });
+    return;
+  }
+
+  response.status(200).json({
+    ok: true,
+    idempotent: result.idempotent,
+    command: result.command,
+    event: result.event ?? null,
+    outbox: result.outbox ?? null,
+  });
 }
 
 function parseObjectBody(body: unknown): Record<string, unknown> {
