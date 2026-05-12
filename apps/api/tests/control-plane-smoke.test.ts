@@ -429,6 +429,137 @@ describe("control-plane smoke", () => {
       await server.close();
     }
   });
+
+  test("Phase 6 fake provider failure paths report startup failure, runtime failure, and lost heartbeat", async () => {
+    const server = await startApi();
+
+    try {
+      const services = createCanonicalStateServices(server.database.sqlite);
+      const backend = createBackendInternalApiClient({ config: server.orchestratorConfig });
+      const clock: RuntimeClock = { now: () => new Date("2026-05-12T12:30:00.000Z") };
+      const projectId = "project_phase6_failures";
+
+      services.createProject({ id: projectId, slug: "phase-6-failures", name: "Phase 6 Failures" });
+      services.createTask({ id: "task_startup_failure", projectId, title: "Startup failure" });
+      services.createTask({ id: "task_runtime_failure", projectId, title: "Runtime failure" });
+      services.createTask({ id: "task_lost_heartbeat", projectId, title: "Lost heartbeat" });
+
+      server.queue.publishProjectTaskHint(projectId, { taskId: "task_startup_failure" });
+      const startupFailure = await runTaskQueueConsumerOnce({
+        projectId,
+        queue: server.queue,
+        backend,
+        runtimeProvider: "fake",
+        runtimeStarter: createRuntimeStarter({
+          provider: createFakeRuntimeProvider({
+            scenario: {
+              startup: "failure",
+              startupErrorMessage: "fake sandbox image unavailable",
+            },
+          }),
+        }),
+        sessionIdFactory: () => "session_startup_failure",
+      });
+
+      expect(startupFailure).toMatchObject({
+        processed: 1,
+        acked: 1,
+        claimed: 1,
+        startupsSucceeded: 0,
+        startupsFailed: 1,
+      });
+      expect(readTaskSessionStatus(server.database.sqlite, projectId, "session_startup_failure")).toEqual({
+        task_status: "blocked",
+        session_status: "failed",
+      });
+      expect(readLatestEventPayload(server.database.sqlite, projectId, "session_startup_failure", "session.startup_failed")).toMatchObject({
+        errorMessage: "fake sandbox image unavailable",
+      });
+
+      const runtimeFailureProvider = createFakeRuntimeProvider({
+        clock,
+        fetch: rewriteFetchBase(server.apiConfig.bridge.callbackBaseUrl, server.baseUrl),
+        bridgeRunMode: "after-startup",
+        scenario: {
+          runtimeSessionId: "runtime_failure",
+          runtime: "failure",
+          runtimeErrorMessage: "fake runtime exited 17",
+          output: [{ stream: "stderr", text: "runtime failed\n" }],
+          documents: [],
+          failureMetadata: { exitCode: 17 },
+          cleanupReason: "runtime-failed",
+        },
+      });
+      server.queue.publishProjectTaskHint(projectId, { taskId: "task_runtime_failure" });
+      const runtimeFailure = await runTaskQueueConsumerOnce({
+        projectId,
+        queue: server.queue,
+        backend,
+        runtimeProvider: "fake",
+        runtimeStarter: createRuntimeStarter({ provider: runtimeFailureProvider, workspaceRoot: join(server.tempDir, "runtime-failure") }),
+        sessionIdFactory: () => "session_runtime_failure",
+      });
+
+      expect(runtimeFailure).toMatchObject({
+        processed: 1,
+        acked: 1,
+        claimed: 1,
+        startupsSucceeded: 1,
+        startupsFailed: 0,
+      });
+      expect(runtimeFailureProvider.state.started[0]?.bridgeRun).toMatchObject({
+        status: "failure",
+        result: {
+          failurePosted: true,
+          cleanupPosted: true,
+        },
+      });
+      expect(readTaskSessionStatus(server.database.sqlite, projectId, "session_runtime_failure")).toEqual({
+        task_status: "failed",
+        session_status: "failed",
+      });
+      expect(readLatestEventPayload(server.database.sqlite, projectId, "session_runtime_failure", "session.failed")).toMatchObject({
+        errorMessage: "fake runtime exited 17",
+        metadata: { exitCode: 17 },
+      });
+
+      expect(services.claimNextTask({ projectId, sessionId: "session_lost_heartbeat", runtimeProvider: "fake" })).toMatchObject({
+        ok: true,
+      });
+      expect(
+        services.reportStartupSucceeded({
+          projectId,
+          sessionId: "session_lost_heartbeat",
+          runtimeSessionId: "runtime_lost_heartbeat",
+        }),
+      ).toMatchObject({ ok: true });
+      server.database.sqlite
+        .query("UPDATE sessions SET last_heartbeat_at = '2026-05-12T11:00:00.000Z' WHERE project_id = ? AND id = ?")
+        .run(projectId, "session_lost_heartbeat");
+
+      const reconcile = await backend.reconcile({
+        projectId,
+        lostBefore: "2026-05-12T11:00:00.000Z",
+        staleBefore: "2026-05-12T11:30:00.000Z",
+        now: "2026-05-12T12:30:00.000Z",
+      });
+
+      expect(reconcile).toMatchObject({
+        ok: true,
+        body: {
+          ok: true,
+          lost: [{ id: "session_lost_heartbeat", status: "failed", heartbeatStatus: "lost" }],
+          stale: [],
+        },
+      });
+      expect(readTaskSessionStatus(server.database.sqlite, projectId, "session_lost_heartbeat")).toEqual({
+        task_status: "blocked",
+        session_status: "failed",
+      });
+    } finally {
+      await server.close();
+    }
+  });
 });
 
 async function startApi(): Promise<{
@@ -524,4 +655,42 @@ function readSessionOutputEvents(
       byteOffset: event.byteOffset,
       text: event.text,
     }));
+}
+
+function readTaskSessionStatus(
+  database: ReturnType<typeof openApiDatabase>["sqlite"],
+  projectId: string,
+  sessionId: string,
+): { readonly task_status: string; readonly session_status: string } | null {
+  return database
+    .query<{ task_status: string; session_status: string }, [string, string]>(
+      `
+        SELECT t.status AS task_status, s.status AS session_status
+        FROM sessions s
+        JOIN tasks t ON t.project_id = s.project_id AND t.id = s.task_id
+        WHERE s.project_id = ? AND s.id = ?
+      `,
+    )
+    .get(projectId, sessionId);
+}
+
+function readLatestEventPayload(
+  database: ReturnType<typeof openApiDatabase>["sqlite"],
+  projectId: string,
+  sessionId: string,
+  type: string,
+): Readonly<Record<string, unknown>> | null {
+  const row = database
+    .query<{ payload_json: string }, [string, string, string]>(
+      `
+        SELECT payload_json
+        FROM events
+        WHERE project_id = ? AND session_id = ? AND type = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+      `,
+    )
+    .get(projectId, sessionId, type);
+
+  return row ? (JSON.parse(row.payload_json) as Readonly<Record<string, unknown>>) : null;
 }
