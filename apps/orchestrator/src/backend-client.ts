@@ -35,12 +35,28 @@ export type ClaimNextTaskInput = {
   readonly runtimeProvider?: string;
 };
 
+export type BackendBridgeSessionConfig = {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly callbackBaseUrl: string;
+  readonly sessionToken: {
+    readonly headerName: string;
+    readonly token: string;
+  };
+};
+
+export type ClaimedTaskSession = Readonly<Record<string, unknown>> & {
+  readonly id: string;
+  readonly bridge: BackendBridgeSessionConfig;
+};
+
 export type ClaimNextTaskResponse =
   | {
       readonly ok: true;
       readonly claimed: true;
       readonly task: Readonly<Record<string, unknown>>;
-      readonly session: Readonly<Record<string, unknown>>;
+      readonly session: ClaimedTaskSession;
       readonly event: BackendEvent;
       readonly outbox: BackendOutbox;
     }

@@ -81,7 +81,14 @@ describe("canonical state services", () => {
       services.createTask({ id: "task_1", projectId: "project_a", title: "First" });
       services.createTask({ id: "task_2", projectId: "project_a", title: "Second" });
 
-      const claim = services.claimNextTask({ projectId: "project_a", sessionId: "session_1", runtimeProvider: "test-provider" });
+      const claim = services.claimNextTask({
+        projectId: "project_a",
+        sessionId: "session_1",
+        runtimeProvider: "test-provider",
+        bridgeCallbackBaseUrl: "http://api.internal.test",
+        bridgeSessionTokenHeaderName: "X-Agent-Pool-Session-Token",
+        bridgeSessionToken: "bridge-token",
+      });
 
       expect(claim).toMatchObject({
         ok: true,
@@ -93,6 +100,16 @@ describe("canonical state services", () => {
           attemptNumber: 1,
           status: "starting",
           runtimeProvider: "test-provider",
+          bridge: {
+            projectId: "project_a",
+            taskId: "task_1",
+            sessionId: "session_1",
+            callbackBaseUrl: "http://api.internal.test",
+            sessionToken: {
+              headerName: "x-agent-pool-session-token",
+              token: "bridge-token",
+            },
+          },
         },
         event: { projectId: "project_a", type: "task.claimed" },
         outbox: { projectId: "project_a", routingKey: "project.project_a.control" },
@@ -100,9 +117,27 @@ describe("canonical state services", () => {
       expect(database.query<{ status: string }, []>("SELECT status FROM tasks WHERE id = 'task_1'").get()).toEqual({
         status: "running",
       });
-      expect(database.query<{ status: string; runtime_provider: string | null }, []>("SELECT status, runtime_provider FROM sessions WHERE id = 'session_1'").get()).toEqual({
+      expect(
+        database
+          .query<
+            {
+              status: string;
+              runtime_provider: string | null;
+              bridge_callback_base_url: string | null;
+              bridge_session_token_header: string | null;
+              bridge_session_token: string | null;
+            },
+            []
+          >(
+            "SELECT status, runtime_provider, bridge_callback_base_url, bridge_session_token_header, bridge_session_token FROM sessions WHERE id = 'session_1'",
+          )
+          .get(),
+      ).toEqual({
         status: "starting",
         runtime_provider: "test-provider",
+        bridge_callback_base_url: "http://api.internal.test",
+        bridge_session_token_header: "x-agent-pool-session-token",
+        bridge_session_token: "bridge-token",
       });
     } finally {
       database.close();

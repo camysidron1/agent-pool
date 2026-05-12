@@ -87,6 +87,8 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
       projectId: readOptionalString(body.projectId),
       sessionId: readOptionalString(body.sessionId),
       runtimeProvider: readOptionalString(body.runtimeProvider),
+      bridgeCallbackBaseUrl: config.bridge.callbackBaseUrl,
+      bridgeSessionTokenHeaderName: config.bridge.sessionTokenHeaderName,
     });
 
     if (!result.ok) {

@@ -20,6 +20,11 @@ export type BackendServiceConfig = {
   readonly internalUrl: string;
 };
 
+export type BridgeSessionConfig = {
+  readonly callbackBaseUrl: string;
+  readonly sessionTokenHeaderName: string;
+};
+
 export type OrchestratorServiceConfig = {
   readonly port: number;
   readonly publicUrl: string;
@@ -43,6 +48,7 @@ export type AppConfig = {
   readonly operator: OperatorIdentity;
   readonly serviceToken: ServiceTokenConfig;
   readonly backend: BackendServiceConfig;
+  readonly bridge: BridgeSessionConfig;
   readonly orchestrator: OrchestratorServiceConfig;
   readonly rabbitmq: RabbitMqConfig;
   readonly storage: StorageConfig;
@@ -63,6 +69,7 @@ export const TEST_OPERATOR_IDENTITY: OperatorIdentity = {
 
 export const DEFAULT_SERVICE_TOKEN = "test-service-token" as const;
 export const DEFAULT_SERVICE_TOKEN_HEADER = "x-agent-pool-service-token" as const;
+export const DEFAULT_BRIDGE_SESSION_TOKEN_HEADER = "x-agent-pool-session-token" as const;
 export const DEFAULT_BACKEND_PORT = 3000;
 export const DEFAULT_ORCHESTRATOR_PORT = 3001;
 export const DEFAULT_BACKEND_INTERNAL_URL = `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`;
@@ -75,16 +82,20 @@ const STORAGE_ADAPTERS = new Set<StorageAdapterKind>(["local", "blob"]);
 
 export function loadConfig(env: EnvSource = readProcessEnv()): AppConfig {
   const authMode = readAuthMode(env.AUTH_MODE);
+  const serviceToken = readServiceTokenConfig(authMode, env);
+  const backend = {
+    port: readPort(env.API_PORT, DEFAULT_BACKEND_PORT, "API_PORT"),
+    publicUrl: readOptionalUrl(env.API_PUBLIC_URL, DEFAULT_BACKEND_INTERNAL_URL, "API_PUBLIC_URL"),
+    internalUrl: readOptionalUrl(env.API_INTERNAL_URL, DEFAULT_BACKEND_INTERNAL_URL, "API_INTERNAL_URL"),
+  };
+  const bridge = readBridgeSessionConfig(env, backend, serviceToken);
 
   return {
     authMode,
     operator: readOperator(authMode, env),
-    serviceToken: readServiceTokenConfig(authMode, env),
-    backend: {
-      port: readPort(env.API_PORT, DEFAULT_BACKEND_PORT, "API_PORT"),
-      publicUrl: readOptionalUrl(env.API_PUBLIC_URL, DEFAULT_BACKEND_INTERNAL_URL, "API_PUBLIC_URL"),
-      internalUrl: readOptionalUrl(env.API_INTERNAL_URL, DEFAULT_BACKEND_INTERNAL_URL, "API_INTERNAL_URL"),
-    },
+    serviceToken,
+    backend,
+    bridge,
     orchestrator: {
       port: readPort(env.ORCHESTRATOR_PORT, DEFAULT_ORCHESTRATOR_PORT, "ORCHESTRATOR_PORT"),
       publicUrl: readOptionalUrl(env.ORCHESTRATOR_PUBLIC_URL, DEFAULT_ORCHESTRATOR_URL, "ORCHESTRATOR_PUBLIC_URL"),
@@ -104,6 +115,23 @@ export function loadConfig(env: EnvSource = readProcessEnv()): AppConfig {
       localRoot: env.STORAGE_LOCAL_ROOT?.trim() || DEFAULT_STORAGE_LOCAL_ROOT,
       bucket: env.STORAGE_BUCKET?.trim() || "agent-pool-web-sandbox",
     },
+  };
+}
+
+function readBridgeSessionConfig(
+  env: EnvSource,
+  backend: BackendServiceConfig,
+  serviceToken: ServiceTokenConfig,
+): BridgeSessionConfig {
+  const sessionTokenHeaderName = (env.BRIDGE_SESSION_TOKEN_HEADER?.trim() || DEFAULT_BRIDGE_SESSION_TOKEN_HEADER).toLowerCase();
+
+  if (sessionTokenHeaderName === serviceToken.headerName) {
+    throw new ConfigError("BRIDGE_SESSION_TOKEN_HEADER must be distinct from the internal service token header.");
+  }
+
+  return {
+    callbackBaseUrl: readOptionalUrl(env.BRIDGE_CALLBACK_BASE_URL, backend.internalUrl, "BRIDGE_CALLBACK_BASE_URL"),
+    sessionTokenHeaderName,
   };
 }
 

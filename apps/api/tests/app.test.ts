@@ -131,10 +131,33 @@ describe("API service skeleton", () => {
         ok: true,
         claimed: true,
         task: { id: "task_1", projectId: "project_a", status: "running" },
-        session: { id: "session_1", taskId: "task_1", status: "starting", runtimeProvider: "test-provider" },
+        session: {
+          id: "session_1",
+          taskId: "task_1",
+          status: "starting",
+          runtimeProvider: "test-provider",
+          bridge: {
+            projectId: "project_a",
+            taskId: "task_1",
+            sessionId: "session_1",
+            callbackBaseUrl: config.bridge.callbackBaseUrl,
+            sessionToken: {
+              headerName: config.bridge.sessionTokenHeaderName,
+            },
+          },
+        },
       });
       expect(noWork.status).toBe(200);
       expect(await noWork.json()).toEqual({ ok: true, claimed: false, reason: "no_eligible_task" });
+      const stored = database.sqlite
+        .query<
+          { bridge_session_token: string | null; bridge_session_token_header: string | null },
+          []
+        >("SELECT bridge_session_token, bridge_session_token_header FROM sessions WHERE id = 'session_1'")
+        .get();
+      expect(stored?.bridge_session_token).toStartWith("bridge_token_");
+      expect(stored?.bridge_session_token).not.toBe(config.serviceToken.token);
+      expect(stored?.bridge_session_token_header).toBe(config.bridge.sessionTokenHeaderName);
     } finally {
       await close();
     }

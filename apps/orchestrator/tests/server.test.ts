@@ -119,7 +119,24 @@ describe("orchestrator service skeleton", () => {
 
         switch (url.pathname) {
           case "/internal/orchestrator/tasks/claim-next":
-            return Response.json({ ok: true, claimed: true, task: { id: "task_1" }, session: { id: "session_1" } });
+            return Response.json({
+              ok: true,
+              claimed: true,
+              task: { id: "task_1" },
+              session: {
+                id: "session_1",
+                bridge: {
+                  projectId: "project_a",
+                  taskId: "task_1",
+                  sessionId: "session_1",
+                  callbackBaseUrl: "http://api.internal.test",
+                  sessionToken: {
+                    headerName: "x-agent-pool-session-token",
+                    token: "bridge-token",
+                  },
+                },
+              },
+            });
           case "/internal/orchestrator/commands/claim-next":
             return Response.json({ ok: true, claimed: false, reason: "no_queued_command" });
           case "/internal/orchestrator/commands/command_1/started":
@@ -169,6 +186,12 @@ describe("orchestrator service skeleton", () => {
     });
 
     expect(claimedTask).toMatchObject({ ok: true, status: 200, body: { ok: true, claimed: true } });
+    if (claimedTask.ok && claimedTask.body.claimed) {
+      expect(claimedTask.body.session.bridge.sessionToken).toEqual({
+        headerName: "x-agent-pool-session-token",
+        token: "bridge-token",
+      });
+    }
     expect(noCommand).toMatchObject({ ok: true, status: 200, body: { ok: true, claimed: false, reason: "no_queued_command" } });
     expect(commandStartedError).toMatchObject({ ok: false, status: 409, body: { ok: false, error: { code: "invalid_state" } } });
     expect(commandSucceeded).toMatchObject({ ok: true, body: { ok: true, command: { id: "command_1" } } });

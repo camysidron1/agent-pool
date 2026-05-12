@@ -6,6 +6,7 @@ import { Database } from "bun:sqlite";
 
 import {
   ARTIFACT_EVENT_OUTBOX_SCHEMA_MIGRATION_ID,
+  BRIDGE_SESSION_CALLBACK_SCHEMA_MIGRATION_ID,
   CHAT_STEERING_NOTE_SCHEMA_MIGRATION_ID,
   CORE_PROJECT_TASK_SCHEMA_MIGRATION_ID,
   FINAL_RESPONSE_SCHEMA_MIGRATION_ID,
@@ -68,6 +69,10 @@ describe("web/sandbox database migration harness", () => {
           id: SESSION_HEARTBEAT_SCHEMA_MIGRATION_ID,
           description: "Add session heartbeat reconciliation fields",
         },
+        {
+          id: BRIDGE_SESSION_CALLBACK_SCHEMA_MIGRATION_ID,
+          description: "Add bridge session callback token fields",
+        },
       ]);
 
       const database = new Database(dbPath, { readonly: true, strict: true });
@@ -100,6 +105,7 @@ describe("web/sandbox database migration harness", () => {
         STORAGE_LOG_SCHEMA_MIGRATION_ID,
         FINAL_RESPONSE_SCHEMA_MIGRATION_ID,
         SESSION_HEARTBEAT_SCHEMA_MIGRATION_ID,
+        BRIDGE_SESSION_CALLBACK_SCHEMA_MIGRATION_ID,
       ]);
       expect(second.applied).toEqual([]);
     } finally {

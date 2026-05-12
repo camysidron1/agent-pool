@@ -1,5 +1,8 @@
 import type { WebSandboxSqliteDatabase } from "./migrations";
 
+const DEFAULT_BRIDGE_CALLBACK_BASE_URL = "http://127.0.0.1:3000";
+const DEFAULT_BRIDGE_SESSION_TOKEN_HEADER = "x-agent-pool-session-token";
+
 export type CanonicalStateServices = ReturnType<typeof createCanonicalStateServices>;
 
 export type CreateProjectInput = {
@@ -135,6 +138,9 @@ export type ClaimNextTaskInput = {
   readonly projectId?: string;
   readonly sessionId?: string;
   readonly runtimeProvider?: string | null;
+  readonly bridgeCallbackBaseUrl?: string | null;
+  readonly bridgeSessionTokenHeaderName?: string | null;
+  readonly bridgeSessionToken?: string | null;
 };
 
 export type ClaimedTaskRecord = TaskRecord & {
@@ -144,6 +150,18 @@ export type ClaimedTaskRecord = TaskRecord & {
 export type ClaimedSessionRecord = SessionRecord & {
   readonly status: "starting";
   readonly runtimeProvider: string | null;
+  readonly bridge: BridgeSessionCallbackConfig;
+};
+
+export type BridgeSessionCallbackConfig = {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly callbackBaseUrl: string;
+  readonly sessionToken: {
+    readonly headerName: string;
+    readonly token: string;
+  };
 };
 
 export type ClaimNextTaskResult =
@@ -340,15 +358,32 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
         const sessionId = input.sessionId ?? createId("session");
         const attemptNumber = nextSessionAttemptNumber(database, task.project_id, task.id);
         const runtimeProvider = input.runtimeProvider ?? null;
+        const bridge = bridgeCallbackConfig({
+          projectId: task.project_id,
+          taskId: task.id,
+          sessionId,
+          callbackBaseUrl: input.bridgeCallbackBaseUrl,
+          sessionTokenHeaderName: input.bridgeSessionTokenHeaderName,
+          sessionToken: input.bridgeSessionToken,
+        });
 
         database
           .query("UPDATE tasks SET status = 'running', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ? AND status = 'queued'")
           .run(task.project_id, task.id);
         database
           .query(
-            "INSERT INTO sessions (id, project_id, task_id, attempt_number, status, runtime_provider, started_at) VALUES (?, ?, ?, ?, 'starting', ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+            "INSERT INTO sessions (id, project_id, task_id, attempt_number, status, runtime_provider, bridge_callback_base_url, bridge_session_token_header, bridge_session_token, started_at) VALUES (?, ?, ?, ?, 'starting', ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
           )
-          .run(sessionId, task.project_id, task.id, attemptNumber, runtimeProvider);
+          .run(
+            sessionId,
+            task.project_id,
+            task.id,
+            attemptNumber,
+            runtimeProvider,
+            bridge.callbackBaseUrl,
+            bridge.sessionToken.headerName,
+            bridge.sessionToken.token,
+          );
 
         const event = appendEvent(database, {
           projectId: task.project_id,
@@ -380,6 +415,7 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
             attemptNumber,
             status: "starting",
             runtimeProvider,
+            bridge,
           },
           event,
           outbox,
@@ -1402,6 +1438,26 @@ function transaction<T>(database: WebSandboxSqliteDatabase, run: () => T): T {
 
 function projectRoutingKey(projectId: string, suffix: "control" | "events"): string {
   return `project.${projectId}.${suffix}`;
+}
+
+function bridgeCallbackConfig(input: {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly callbackBaseUrl?: string | null;
+  readonly sessionTokenHeaderName?: string | null;
+  readonly sessionToken?: string | null;
+}): BridgeSessionCallbackConfig {
+  return {
+    projectId: input.projectId,
+    taskId: input.taskId,
+    sessionId: input.sessionId,
+    callbackBaseUrl: input.callbackBaseUrl?.trim() || DEFAULT_BRIDGE_CALLBACK_BASE_URL,
+    sessionToken: {
+      headerName: input.sessionTokenHeaderName?.trim().toLowerCase() || DEFAULT_BRIDGE_SESSION_TOKEN_HEADER,
+      token: input.sessionToken?.trim() || createId("bridge_token"),
+    },
+  };
 }
 
 function createId(prefix: string): string {

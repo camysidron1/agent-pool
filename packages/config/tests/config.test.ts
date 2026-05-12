@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   ConfigError,
   DEFAULT_BACKEND_INTERNAL_URL,
+  DEFAULT_BRIDGE_SESSION_TOKEN_HEADER,
   DEFAULT_ORCHESTRATOR_URL,
   DEFAULT_RABBITMQ_URL,
   DEFAULT_SERVICE_TOKEN,
@@ -25,6 +26,10 @@ describe("loadConfig", () => {
         port: 3000,
         publicUrl: DEFAULT_BACKEND_INTERNAL_URL,
         internalUrl: DEFAULT_BACKEND_INTERNAL_URL,
+      },
+      bridge: {
+        callbackBaseUrl: DEFAULT_BACKEND_INTERNAL_URL,
+        sessionTokenHeaderName: DEFAULT_BRIDGE_SESSION_TOKEN_HEADER,
       },
       orchestrator: {
         port: 3001,
@@ -71,6 +76,8 @@ describe("loadConfig", () => {
         ORCHESTRATOR_PORT: "4101",
         ORCHESTRATOR_PUBLIC_URL: "http://orchestrator.local.test:4101/",
         ORCHESTRATOR_BACKEND_INTERNAL_URL: "http://api.internal.test:4100/",
+        BRIDGE_CALLBACK_BASE_URL: "http://api.internal.test:4100/",
+        BRIDGE_SESSION_TOKEN_HEADER: "X-Agent-Pool-Bridge-Session",
         RABBITMQ_URL: "amqp://rabbitmq.local.test:5672",
         RABBITMQ_PROJECT_TASK_QUEUE_PREFIX: "tasks",
         RABBITMQ_PROJECT_CONTROL_QUEUE_PREFIX: "control",
@@ -94,6 +101,10 @@ describe("loadConfig", () => {
         publicUrl: "http://api.local.test:4100",
         internalUrl: "http://api.internal.test:4100",
       },
+      bridge: {
+        callbackBaseUrl: "http://api.internal.test:4100",
+        sessionTokenHeaderName: "x-agent-pool-bridge-session",
+      },
       orchestrator: {
         port: 4101,
         publicUrl: "http://orchestrator.local.test:4101",
@@ -114,6 +125,14 @@ describe("loadConfig", () => {
 
   test("rejects invalid ports, URLs, and storage adapters", () => {
     expect(() => loadConfig({ AUTH_MODE: "test", API_PORT: "70000" })).toThrow(ConfigError);
+    expect(() => loadConfig({ AUTH_MODE: "test", BRIDGE_CALLBACK_BASE_URL: "not-a-url" })).toThrow(ConfigError);
+    expect(() =>
+      loadConfig({
+        AUTH_MODE: "test",
+        INTERNAL_SERVICE_TOKEN_HEADER: "x-shared-token",
+        BRIDGE_SESSION_TOKEN_HEADER: "x-shared-token",
+      }),
+    ).toThrow("BRIDGE_SESSION_TOKEN_HEADER must be distinct");
     expect(() => loadConfig({ AUTH_MODE: "test", RABBITMQ_URL: "not-a-url" })).toThrow(ConfigError);
     expect(() => loadConfig({ AUTH_MODE: "test", STORAGE_ADAPTER: "s3" })).toThrow(ConfigError);
   });

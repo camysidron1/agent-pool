@@ -7,6 +7,7 @@ export {
 
 export {
   ARTIFACT_EVENT_OUTBOX_SCHEMA_MIGRATION_ID,
+  BRIDGE_SESSION_CALLBACK_SCHEMA_MIGRATION_ID,
   CHAT_STEERING_NOTE_SCHEMA_MIGRATION_ID,
   CORE_PROJECT_TASK_SCHEMA_MIGRATION_ID,
   FINAL_RESPONSE_SCHEMA_MIGRATION_ID,
@@ -104,6 +105,7 @@ export {
 export {
   createCanonicalStateServices,
   type AppendEventInput,
+  type BridgeSessionCallbackConfig,
   type CanonicalStateServices,
   type ClaimNextCommandInput,
   type ClaimNextCommandResult,

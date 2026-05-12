@@ -82,8 +82,29 @@ describe("control-plane smoke", () => {
       expect(taskClaim).toMatchObject({
         ok: true,
         status: 200,
-        body: { ok: true, claimed: true, task: { id: "task_run" }, session: { id: "session_run", status: "starting" } },
+        body: {
+          ok: true,
+          claimed: true,
+          task: { id: "task_run" },
+          session: {
+            id: "session_run",
+            status: "starting",
+            bridge: {
+              projectId: "project_smoke",
+              taskId: "task_run",
+              sessionId: "session_run",
+              callbackBaseUrl: server.apiConfig.bridge.callbackBaseUrl,
+              sessionToken: {
+                headerName: server.apiConfig.bridge.sessionTokenHeaderName,
+              },
+            },
+          },
+        },
       });
+      if (taskClaim.ok && taskClaim.body.claimed) {
+        expect(taskClaim.body.session.bridge.sessionToken.token).toStartWith("bridge_token_");
+        expect(taskClaim.body.session.bridge.sessionToken.token).not.toBe(server.apiConfig.serviceToken.token);
+      }
       expect(duplicateTaskClaim).toMatchObject({ ok: true, body: { ok: true, claimed: false, reason: "no_eligible_task" } });
       expect(startupSucceeded).toMatchObject({ ok: true, body: { ok: true, session: { id: "session_run", status: "running" } } });
       expect(

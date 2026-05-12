@@ -12,6 +12,8 @@ export {
   type BackendInternalHealthResult,
   type BackendInternalHttpResult,
   type BackendOutbox,
+  type BackendBridgeSessionConfig,
+  type ClaimedTaskSession,
   type ClaimNextCommandInput,
   type ClaimNextCommandResponse,
   type ClaimNextTaskInput,

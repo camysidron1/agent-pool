@@ -45,6 +45,7 @@ export const CHAT_STEERING_NOTE_SCHEMA_MIGRATION_ID = "0005_chat_steering_note_s
 export const STORAGE_LOG_SCHEMA_MIGRATION_ID = "0006_storage_log_schema" as const;
 export const FINAL_RESPONSE_SCHEMA_MIGRATION_ID = "0007_final_response_schema" as const;
 export const SESSION_HEARTBEAT_SCHEMA_MIGRATION_ID = "0008_session_heartbeat_schema" as const;
+export const BRIDGE_SESSION_CALLBACK_SCHEMA_MIGRATION_ID = "0009_bridge_session_callback_schema" as const;
 
 export const WEB_SANDBOX_MIGRATIONS: readonly SqlMigration[] = [
   {
@@ -328,6 +329,15 @@ export const WEB_SANDBOX_MIGRATIONS: readonly SqlMigration[] = [
       "ALTER TABLE sessions ADD COLUMN stale_at TEXT",
       "ALTER TABLE sessions ADD COLUMN lost_at TEXT",
       "CREATE INDEX IF NOT EXISTS sessions_heartbeat_status_idx ON sessions (project_id, heartbeat_status, last_heartbeat_at)",
+    ],
+  },
+  {
+    id: BRIDGE_SESSION_CALLBACK_SCHEMA_MIGRATION_ID,
+    description: "Add bridge session callback token fields",
+    sql: [
+      "ALTER TABLE sessions ADD COLUMN bridge_callback_base_url TEXT",
+      "ALTER TABLE sessions ADD COLUMN bridge_session_token_header TEXT",
+      "ALTER TABLE sessions ADD COLUMN bridge_session_token TEXT",
     ],
   },
 ] as const;
