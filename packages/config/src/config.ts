@@ -34,6 +34,7 @@ export type OrchestratorServiceConfig = {
 
 export type RabbitMqConfig = {
   readonly url: string;
+  readonly managementUrl: string;
   readonly projectTaskQueuePrefix: string;
   readonly projectControlQueuePrefix: string;
 };
@@ -86,6 +87,7 @@ export const DEFAULT_ORCHESTRATOR_PORT = 3001;
 export const DEFAULT_BACKEND_INTERNAL_URL = `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`;
 export const DEFAULT_ORCHESTRATOR_URL = `http://127.0.0.1:${DEFAULT_ORCHESTRATOR_PORT}`;
 export const DEFAULT_RABBITMQ_URL = "amqp://127.0.0.1:5672" as const;
+export const DEFAULT_RABBITMQ_MANAGEMENT_URL = "http://guest:guest@127.0.0.1:15672" as const;
 export const DEFAULT_STORAGE_LOCAL_ROOT = ".agent-pool/web-sandbox/storage" as const;
 export const DEFAULT_RUNTIME_PROVIDER = "fake" as const;
 export const DEFAULT_CONTROL_PLANE_SMOKE_PROJECT_ID = "compose-smoke" as const;
@@ -124,6 +126,11 @@ export function loadConfig(env: EnvSource = readProcessEnv()): AppConfig {
     },
     rabbitmq: {
       url: readOptionalUrl(env.RABBITMQ_URL, DEFAULT_RABBITMQ_URL, "RABBITMQ_URL"),
+      managementUrl: readOptionalUrl(
+        env.RABBITMQ_MANAGEMENT_URL,
+        DEFAULT_RABBITMQ_MANAGEMENT_URL,
+        "RABBITMQ_MANAGEMENT_URL",
+      ),
       projectTaskQueuePrefix: env.RABBITMQ_PROJECT_TASK_QUEUE_PREFIX?.trim() || "project-tasks",
       projectControlQueuePrefix: env.RABBITMQ_PROJECT_CONTROL_QUEUE_PREFIX?.trim() || "project-control",
     },

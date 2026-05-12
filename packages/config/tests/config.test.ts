@@ -9,6 +9,7 @@ import {
   DEFAULT_CONTROL_PLANE_SMOKE_PROJECT_ID,
   DEFAULT_CONTROL_PLANE_WORKER_POLL_INTERVAL_MS,
   DEFAULT_ORCHESTRATOR_URL,
+  DEFAULT_RABBITMQ_MANAGEMENT_URL,
   DEFAULT_RABBITMQ_URL,
   DEFAULT_RUNTIME_PROVIDER,
   DEFAULT_SERVICE_TOKEN,
@@ -43,6 +44,7 @@ describe("loadConfig", () => {
       },
       rabbitmq: {
         url: DEFAULT_RABBITMQ_URL,
+        managementUrl: DEFAULT_RABBITMQ_MANAGEMENT_URL,
         projectTaskQueuePrefix: "project-tasks",
         projectControlQueuePrefix: "project-control",
       },
@@ -92,6 +94,7 @@ describe("loadConfig", () => {
         BRIDGE_CALLBACK_BASE_URL: "http://api.internal.test:4100/",
         BRIDGE_SESSION_TOKEN_HEADER: "X-Agent-Pool-Bridge-Session",
         RABBITMQ_URL: "amqp://rabbitmq.local.test:5672",
+        RABBITMQ_MANAGEMENT_URL: "http://rabbitmq.local.test:15672/",
         RABBITMQ_PROJECT_TASK_QUEUE_PREFIX: "tasks",
         RABBITMQ_PROJECT_CONTROL_QUEUE_PREFIX: "control",
         STORAGE_ADAPTER: "blob",
@@ -131,6 +134,7 @@ describe("loadConfig", () => {
       },
       rabbitmq: {
         url: "amqp://rabbitmq.local.test:5672",
+        managementUrl: "http://rabbitmq.local.test:15672",
         projectTaskQueuePrefix: "tasks",
         projectControlQueuePrefix: "control",
       },
@@ -161,6 +165,7 @@ describe("loadConfig", () => {
       }),
     ).toThrow("BRIDGE_SESSION_TOKEN_HEADER must be distinct");
     expect(() => loadConfig({ AUTH_MODE: "test", RABBITMQ_URL: "not-a-url" })).toThrow(ConfigError);
+    expect(() => loadConfig({ AUTH_MODE: "test", RABBITMQ_MANAGEMENT_URL: "not-a-url" })).toThrow(ConfigError);
     expect(() => loadConfig({ AUTH_MODE: "test", STORAGE_ADAPTER: "s3" })).toThrow(ConfigError);
     expect(() => loadConfig({ AUTH_MODE: "test", RUNTIME_PROVIDER: "stub" })).toThrow(ConfigError);
     expect(() => loadConfig({ AUTH_MODE: "test", COMPOSE_SMOKE_ENABLED: "sometimes" })).toThrow(ConfigError);

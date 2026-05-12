@@ -4,6 +4,7 @@ import { loadConfig } from "@agent-pool/config";
 
 import {
   QUEUE_PACKAGE_BOUNDARY,
+  createRabbitMqManagementHttpAdapter,
   createProjectQueueDeclarations,
   createProjectQueueNames,
   createRabbitMqAdapter,
@@ -36,6 +37,7 @@ describe("RabbitMQ queue adapter skeleton", () => {
 
     expect(adapter.kind).toBe("rabbitmq");
     expect(adapter.connected).toBe(false);
+    expect(adapter.transport).toBe("memory");
     expect(adapter.url).toBe("amqp://rabbitmq.test:5672");
     expect(adapter.projectQueues("project_a")).toEqual({
       taskQueue: "tasks.project_a",
@@ -141,6 +143,85 @@ describe("RabbitMQ queue adapter skeleton", () => {
         attempts: 1,
         deadLetterReason: "invalid_hint",
         deadLetteredAt: "1970-01-01T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  test("uses injected management HTTP transport for live RabbitMQ queue operations", async () => {
+    const requests: Array<{ readonly method: string; readonly path: string; readonly auth: string | null; readonly body: unknown }> = [];
+    const publishedPayloads: string[] = [];
+    const adapter = createRabbitMqManagementHttpAdapter(
+      loadConfig({
+        AUTH_MODE: "test",
+        RABBITMQ_URL: "amqp://rabbitmq.test:5672",
+        RABBITMQ_MANAGEMENT_URL: "http://guest:guest@rabbitmq.test:15672",
+      }).rabbitmq,
+      {
+        fetch: async (input, init) => {
+          const request = new Request(input, init);
+          const url = new URL(request.url);
+          const body = await request.json().catch(() => null);
+          requests.push({ method: request.method, path: url.pathname, auth: request.headers.get("authorization"), body });
+
+          if (url.pathname === "/api/exchanges/%2F/amq.default/publish" && body && typeof body === "object") {
+            publishedPayloads.push(String((body as { readonly payload?: unknown }).payload));
+            return Response.json({ routed: true });
+          }
+
+          if (url.pathname.endsWith("/get")) {
+            return Response.json(publishedPayloads.splice(0).map((payload) => ({ payload })));
+          }
+
+          return Response.json({});
+        },
+      },
+    );
+
+    expect(adapter.connected).toBe(true);
+    expect(adapter.transport).toBe("management-http");
+    expect(adapter.declareProjectQueues("project_a")).toEqual(createProjectQueueDeclarations(loadConfig({ AUTH_MODE: "test" }).rabbitmq, "project_a"));
+    adapter.publishProjectTaskHint("project_a", { id: "ack" });
+    adapter.publishProjectTaskHint("project_a", { id: "retry" });
+    adapter.publishProjectTaskHint("project_a", { id: "dead" });
+    await adapter.flush?.();
+
+    const result = await adapter.drainQueue<{ id: string }>("project-tasks.project_a", (message) => {
+      if (message.payload.id === "retry") return { action: "retry", reason: "capacity_full", delayMs: 1000 };
+      if (message.payload.id === "dead") return { action: "dead-letter", reason: "invalid_hint" };
+      return { action: "ack" };
+    });
+
+    expect(result).toEqual({
+      queue: "project-tasks.project_a",
+      processed: 3,
+      acked: 1,
+      retried: 1,
+      deadLettered: 1,
+    });
+    expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
+      "PUT /api/queues/%2F/project-tasks.project_a",
+      "PUT /api/queues/%2F/project-control.project_a",
+      "POST /api/exchanges/%2F/amq.default/publish",
+      "POST /api/exchanges/%2F/amq.default/publish",
+      "POST /api/exchanges/%2F/amq.default/publish",
+      "POST /api/queues/%2F/project-tasks.project_a/get",
+      "POST /api/exchanges/%2F/amq.default/publish",
+    ]);
+    expect(requests.every((request) => request.auth === "Basic Z3Vlc3Q6Z3Vlc3Q=")).toBe(true);
+    expect(adapter.pendingMessages).toMatchObject([
+      {
+        id: "queue_message_4",
+        attempts: 2,
+        lastRetryReason: "capacity_full",
+      },
+    ]);
+    expect(adapter.deadLetters).toMatchObject([
+      {
+        id: "queue_message_3",
+        queue: "project-tasks.project_a",
+        kind: "task",
+        payload: { id: "dead" },
+        deadLetterReason: "invalid_hint",
       },
     ]);
   });
