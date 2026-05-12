@@ -72,6 +72,76 @@ describe("canonical state services", () => {
     }
   });
 
+  test("claims the highest-priority eligible queued task atomically with a starting session", () => {
+    const database = createMigratedMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      services.createTask({ id: "task_1", projectId: "project_a", title: "First" });
+      services.createTask({ id: "task_2", projectId: "project_a", title: "Second" });
+
+      const claim = services.claimNextTask({ projectId: "project_a", sessionId: "session_1", runtimeProvider: "test-provider" });
+
+      expect(claim).toMatchObject({
+        ok: true,
+        task: { id: "task_1", projectId: "project_a", displayId: 1, status: "running" },
+        session: {
+          id: "session_1",
+          projectId: "project_a",
+          taskId: "task_1",
+          attemptNumber: 1,
+          status: "starting",
+          runtimeProvider: "test-provider",
+        },
+        event: { projectId: "project_a", type: "task.claimed" },
+        outbox: { projectId: "project_a", routingKey: "project.project_a.control" },
+      });
+      expect(database.query<{ status: string }, []>("SELECT status FROM tasks WHERE id = 'task_1'").get()).toEqual({
+        status: "running",
+      });
+      expect(database.query<{ status: string; runtime_provider: string | null }, []>("SELECT status, runtime_provider FROM sessions WHERE id = 'session_1'").get()).toEqual({
+        status: "starting",
+        runtime_provider: "test-provider",
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  test("skips tasks with unmet dependencies and reports no work after active task claims", () => {
+    const database = createMigratedMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      services.createTask({ id: "dependency", projectId: "project_a", title: "Dependency" });
+      services.createTask({ id: "blocked", projectId: "project_a", title: "Blocked" });
+      database
+        .query("INSERT INTO task_dependencies (project_id, task_id, depends_on_task_id) VALUES ('project_a', 'blocked', 'dependency')")
+        .run();
+
+      const firstClaim = services.claimNextTask({ projectId: "project_a", sessionId: "session_dependency" });
+      const secondClaim = services.claimNextTask({ projectId: "project_a", sessionId: "session_duplicate" });
+      database.query("UPDATE tasks SET status = 'completed' WHERE id = 'dependency'").run();
+      database.query("UPDATE sessions SET status = 'succeeded' WHERE id = 'session_dependency'").run();
+      const unblockedClaim = services.claimNextTask({ projectId: "project_a", sessionId: "session_blocked" });
+      const noWork = services.claimNextTask({ projectId: "project_a", sessionId: "session_none" });
+
+      expect(firstClaim).toMatchObject({ ok: true, task: { id: "dependency" } });
+      expect(secondClaim).toEqual({ ok: false, reason: "no_eligible_task" });
+      expect(unblockedClaim).toMatchObject({ ok: true, task: { id: "blocked" } });
+      expect(noWork).toEqual({ ok: false, reason: "no_eligible_task" });
+      expect(countRows(database, "sessions")).toBe(2);
+      expect(
+        database.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM sessions WHERE task_id = 'blocked' AND status IN ('queued', 'starting', 'running')").get()
+          ?.count,
+      ).toBe(1);
+    } finally {
+      database.close();
+    }
+  });
+
   test("appends structured event payloads", () => {
     const database = createMigratedMemoryDatabase();
 

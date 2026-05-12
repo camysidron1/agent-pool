@@ -96,6 +96,31 @@ export type RequestCommandResult =
   | { readonly ok: true; readonly command: CommandRecord; readonly event: EventRecord; readonly outbox: OutboxRecord }
   | { readonly ok: false; readonly error: CommandAdmissibilityError };
 
+export type ClaimNextTaskInput = {
+  readonly projectId?: string;
+  readonly sessionId?: string;
+  readonly runtimeProvider?: string | null;
+};
+
+export type ClaimedTaskRecord = TaskRecord & {
+  readonly status: "running";
+};
+
+export type ClaimedSessionRecord = SessionRecord & {
+  readonly status: "starting";
+  readonly runtimeProvider: string | null;
+};
+
+export type ClaimNextTaskResult =
+  | {
+      readonly ok: true;
+      readonly task: ClaimedTaskRecord;
+      readonly session: ClaimedSessionRecord;
+      readonly event: EventRecord;
+      readonly outbox: OutboxRecord;
+    }
+  | { readonly ok: false; readonly reason: "no_eligible_task" };
+
 export type RecordFinalAssistantResponseInput = {
   readonly projectId: string;
   readonly sessionId: string;
@@ -186,6 +211,61 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
           event,
           outbox,
         };
+      });
+    },
+
+    claimNextTask(input: ClaimNextTaskInput = {}): ClaimNextTaskResult {
+      return transaction(database, () => {
+        const task = selectNextEligibleTask(database, input.projectId);
+        if (!task) return { ok: false, reason: "no_eligible_task" } as const;
+
+        const sessionId = input.sessionId ?? createId("session");
+        const attemptNumber = nextSessionAttemptNumber(database, task.project_id, task.id);
+        const runtimeProvider = input.runtimeProvider ?? null;
+
+        database
+          .query("UPDATE tasks SET status = 'running', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ? AND status = 'queued'")
+          .run(task.project_id, task.id);
+        database
+          .query(
+            "INSERT INTO sessions (id, project_id, task_id, attempt_number, status, runtime_provider, started_at) VALUES (?, ?, ?, ?, 'starting', ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+          )
+          .run(sessionId, task.project_id, task.id, attemptNumber, runtimeProvider);
+
+        const event = appendEvent(database, {
+          projectId: task.project_id,
+          taskId: task.id,
+          sessionId,
+          type: "task.claimed",
+          payload: { taskId: task.id, sessionId, attemptNumber },
+        });
+        const outbox = enqueueOutbox(database, {
+          projectId: task.project_id,
+          eventId: event.id,
+          routingKey: projectRoutingKey(task.project_id, "control"),
+          payload: { eventId: event.id, type: event.type, taskId: task.id, sessionId },
+        });
+
+        return {
+          ok: true,
+          task: {
+            id: task.id,
+            projectId: task.project_id,
+            displayId: task.display_id,
+            title: task.title,
+            status: "running",
+          },
+          session: {
+            id: sessionId,
+            projectId: task.project_id,
+            taskId: task.id,
+            attemptNumber,
+            status: "starting",
+            runtimeProvider,
+          },
+          event,
+          outbox,
+        } as const;
       });
     },
 
@@ -401,6 +481,39 @@ function validateCommand(database: WebSandboxSqliteDatabase, input: RequestComma
       }
       return { ok: true };
   }
+}
+
+function selectNextEligibleTask(
+  database: WebSandboxSqliteDatabase,
+  projectId?: string,
+): { readonly id: string; readonly project_id: string; readonly display_id: number; readonly title: string } | null {
+  const sql = `
+    SELECT t.id, t.project_id, t.display_id, t.title
+    FROM tasks t
+    JOIN projects p ON p.id = t.project_id
+    WHERE t.status = 'queued'
+      AND p.status = 'active'
+      AND (? IS NULL OR t.project_id = ?)
+      AND NOT EXISTS (
+        SELECT 1 FROM sessions s
+        WHERE s.project_id = t.project_id
+          AND s.task_id = t.id
+          AND s.status IN ('queued', 'starting', 'running')
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM task_dependencies td
+        JOIN tasks dependency ON dependency.project_id = td.project_id AND dependency.id = td.depends_on_task_id
+        WHERE td.project_id = t.project_id
+          AND td.task_id = t.id
+          AND dependency.status != 'completed'
+      )
+    ORDER BY t.display_id ASC, t.created_at ASC, t.id ASC
+    LIMIT 1
+  `;
+
+  return database
+    .query<{ id: string; project_id: string; display_id: number; title: string }, [string | null, string | null]>(sql)
+    .get(projectId ?? null, projectId ?? null);
 }
 
 function readTaskState(database: WebSandboxSqliteDatabase, projectId: string, taskId: string): { readonly status: string } | null {
