@@ -132,6 +132,12 @@ export {
   type BridgeHeartbeatLoopOptions,
 } from "./heartbeat-loop";
 export {
+  createBridgeOutputCapture,
+  type BridgeOutputCapture,
+  type BridgeOutputCaptureOptions,
+  type BridgeOutputFailure,
+} from "./output-capture";
+export {
   createTestBridgeCallbackServer,
   type TestBridgeCallbackServer,
   type TestBridgeCallbackServerOptions,
