@@ -22,7 +22,7 @@ export type TaskRuntimeStartupRequest = {
 };
 
 export type TaskRuntimeStartupResult =
-  | { readonly ok: true; readonly runtimeSessionId?: string }
+  | { readonly ok: true; readonly runtimeSessionId?: string; readonly afterStartup?: () => Promise<void> }
   | { readonly ok: false; readonly errorMessage: string };
 
 export type TaskRuntimeStarter = (
@@ -106,6 +106,7 @@ export async function runTaskQueueConsumerOnce(
           return queuePolicy.retry(message, "startup_success_report_failed");
         }
 
+        await startup.afterStartup?.();
         startupsSucceeded += 1;
         return queuePolicy.ack();
       }

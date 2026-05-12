@@ -6,9 +6,11 @@ import { join } from "node:path";
 import { loadConfig } from "@agent-pool/config";
 import { createCanonicalStateServices } from "@agent-pool/db";
 import { createRabbitMqAdapter } from "@agent-pool/queue";
+import { createFakeRuntimeProvider, type RuntimeClock } from "@agent-pool/runtime";
 import { createStorageAdapter } from "@agent-pool/storage";
 import { checkBackendInternalHealth, createBackendInternalApiClient } from "../../orchestrator/src/backend-client";
 import { runControlQueueConsumerOnce } from "../../orchestrator/src/control-consumer";
+import { createRuntimeStarter } from "../../orchestrator/src/runtime-starter";
 import { runTaskQueueConsumerOnce } from "../../orchestrator/src/task-consumer";
 
 import { createApiApp } from "../src/app";
@@ -290,9 +292,147 @@ describe("control-plane smoke", () => {
       await server.close();
     }
   });
+
+  test("Phase 6 fake provider smoke completes through API callbacks and canonical state", async () => {
+    const server = await startApi();
+
+    try {
+      const services = createCanonicalStateServices(server.database.sqlite);
+      const backend = createBackendInternalApiClient({ config: server.orchestratorConfig });
+      const workspaceRoot = join(server.tempDir, "workspace");
+      const clock: RuntimeClock = { now: () => new Date("2026-05-12T12:00:00.000Z") };
+      const provider = createFakeRuntimeProvider({
+        clock,
+        fetch: rewriteFetchBase(server.apiConfig.bridge.callbackBaseUrl, server.baseUrl),
+        bridgeRunMode: "after-startup",
+        scenario: {
+          runtimeSessionId: "runtime_phase6",
+          output: [
+            { stream: "stdout", text: "phase 6 stdout\n" },
+            { stream: "stderr", text: "phase 6 stderr\n" },
+          ],
+          finalResponseText: "Phase 6 fake provider completed. https://example.test/phase6",
+          finalResponseMetadata: { phase: "06", provider: "fake" },
+          completionMetadata: { exitCode: 0 },
+          cleanupReason: "phase6-smoke",
+        },
+      });
+
+      services.createProject({ id: "project_phase6", slug: "phase-6", name: "Phase 6" });
+      services.createTask({ id: "task_phase6", projectId: "project_phase6", title: "Run Phase 6 fake runtime" });
+      server.queue.publishProjectTaskHint("project_phase6", { taskId: "task_phase6" });
+
+      const result = await runTaskQueueConsumerOnce({
+        projectId: "project_phase6",
+        queue: server.queue,
+        backend,
+        runtimeProvider: "fake",
+        runtimeStarter: createRuntimeStarter({ provider, workspaceRoot }),
+        sessionIdFactory: () => "session_phase6",
+      });
+
+      expect(result).toMatchObject({
+        processed: 1,
+        acked: 1,
+        claimed: 1,
+        startupsSucceeded: 1,
+        startupsFailed: 0,
+      });
+      expect(provider.state.started[0]?.bridgeRun).toMatchObject({
+        status: "success",
+        result: {
+          heartbeatPosted: true,
+          outputPosted: 2,
+          documentsPosted: 2,
+          finalResponsePosted: true,
+          completionPosted: true,
+          failurePosted: false,
+          cleanupPosted: true,
+        },
+      });
+      expect(
+        server.database.sqlite
+          .query<
+            {
+              task_status: string;
+              session_status: string;
+              runtime_provider: string | null;
+              runtime_session_id: string | null;
+              final_response_text: string | null;
+              heartbeat_status: string;
+              last_heartbeat_at: string | null;
+            },
+            []
+          >(
+            `
+              SELECT
+                t.status AS task_status,
+                s.status AS session_status,
+                s.runtime_provider,
+                s.runtime_session_id,
+                s.final_response_text,
+                s.heartbeat_status,
+                s.last_heartbeat_at
+              FROM sessions s
+              JOIN tasks t ON t.project_id = s.project_id AND t.id = s.task_id
+              WHERE s.project_id = 'project_phase6' AND s.id = 'session_phase6'
+            `,
+          )
+          .get(),
+      ).toEqual({
+        task_status: "completed",
+        session_status: "succeeded",
+        runtime_provider: "fake",
+        runtime_session_id: "runtime_phase6",
+        final_response_text: "Phase 6 fake provider completed. https://example.test/phase6",
+        heartbeat_status: "fresh",
+        last_heartbeat_at: "2026-05-12T12:00:00.000Z",
+      });
+      expect(readSessionOutputEvents(server.database.sqlite, "project_phase6", "session_phase6")).toEqual([
+        { stream: "stdout", sequence: 1, byteOffset: 0, text: "phase 6 stdout\n" },
+        { stream: "stderr", sequence: 2, byteOffset: 15, text: "phase 6 stderr\n" },
+      ]);
+      expect(
+        server.database.sqlite
+          .query<{ kind: string; uri: string }, []>(
+            `
+              SELECT kind, uri
+              FROM artifacts
+              WHERE project_id = 'project_phase6' AND task_id = 'task_phase6' AND session_id = 'session_phase6'
+              ORDER BY kind, uri
+            `,
+          )
+          .all(),
+      ).toEqual([
+        { kind: "document", uri: "agent-docs/fake-runtime-result.md" },
+        { kind: "document", uri: "shared-docs/fake-runtime-summary.json" },
+        { kind: "final_response_url", uri: "https://example.test/phase6" },
+      ]);
+      expect(
+        server.database.sqlite
+          .query<{ type: string }, []>(
+            "SELECT type FROM events WHERE project_id = 'project_phase6' AND session_id = 'session_phase6' ORDER BY created_at, id",
+          )
+          .all()
+          .map((event) => event.type),
+      ).toEqual(
+        expect.arrayContaining([
+          "session.heartbeat",
+          "session.output",
+          "artifact.document.registered",
+          "session.final_response.recorded",
+          "session.completed",
+          "session.cleanup",
+        ]),
+      );
+    } finally {
+      await server.close();
+    }
+  });
 });
 
 async function startApi(): Promise<{
+  readonly tempDir: string;
   readonly baseUrl: string;
   readonly apiConfig: ReturnType<typeof loadConfig>;
   readonly orchestratorConfig: ReturnType<typeof loadConfig>;
@@ -326,6 +466,7 @@ async function startApi(): Promise<{
   });
 
   return {
+    tempDir,
     baseUrl,
     apiConfig,
     orchestratorConfig,
@@ -341,4 +482,46 @@ async function startApi(): Promise<{
       database.close();
     },
   };
+}
+
+function rewriteFetchBase(fromBaseUrl: string, toBaseUrl: string): typeof fetch {
+  const from = new URL(fromBaseUrl);
+  const to = new URL(toBaseUrl);
+
+  return async (input, init) => {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.text();
+
+    if (url.origin === from.origin) {
+      url.protocol = to.protocol;
+      url.host = to.host;
+    }
+
+    return fetch(url, {
+      method: request.method,
+      headers: request.headers,
+      body,
+    });
+  };
+}
+
+function readSessionOutputEvents(
+  database: ReturnType<typeof openApiDatabase>["sqlite"],
+  projectId: string,
+  sessionId: string,
+): readonly Readonly<Record<string, unknown>>[] {
+  return database
+    .query<{ payload_json: string }, [string, string]>(
+      "SELECT payload_json FROM events WHERE project_id = ? AND session_id = ? AND type = 'session.output'",
+    )
+    .all(projectId, sessionId)
+    .map((event) => JSON.parse(event.payload_json) as Readonly<Record<string, unknown>>)
+    .sort((left, right) => Number(left.sequence) - Number(right.sequence))
+    .map((event) => ({
+      stream: event.stream,
+      sequence: event.sequence,
+      byteOffset: event.byteOffset,
+      text: event.text,
+    }));
 }

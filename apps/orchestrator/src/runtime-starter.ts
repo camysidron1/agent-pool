@@ -44,7 +44,11 @@ async function startRuntimeSession(
       workspaceRoot: workspaceRoot ?? bridge.workspaceRoot,
     });
 
-    return { ok: true, runtimeSessionId: handle.sessionId };
+    return {
+      ok: true,
+      runtimeSessionId: handle.sessionId,
+      ...(handle.afterStartup ? { afterStartup: handle.afterStartup } : {}),
+    };
   } catch (error) {
     return { ok: false, errorMessage: error instanceof Error ? error.message : String(error) };
   }

@@ -45,6 +45,7 @@ export type RuntimeSessionHandle = {
   readonly workspaceRoot?: string;
   readonly startedAt?: string;
   readonly metadata?: Readonly<Record<string, unknown>>;
+  readonly afterStartup?: () => Promise<void>;
 };
 
 export type FakeRuntimeOutput = {
@@ -84,6 +85,7 @@ export type FakeRuntimeProviderOptions = {
   readonly clock?: RuntimeClock;
   readonly fetch?: typeof fetch;
   readonly scheduler?: BridgeScheduler;
+  readonly bridgeRunMode?: "immediate" | "after-startup";
   readonly sessionIdFactory?: () => string;
   readonly workspaceRoot?: string;
   readonly scenario?: FakeRuntimeScenario;
@@ -160,8 +162,38 @@ export function createFakeRuntimeProvider(options: FakeRuntimeProviderOptions = 
       }
       const runtimeSessionId = scenario.runtimeSessionId ?? sessionIdFactory();
       const workspaceRoot = resolveFakeWorkspaceRoot(request, options, runtimeSessionId);
+      const bridgeRunInput = request.bridge
+        ? {
+            request,
+            workspaceRoot: workspaceRoot ?? resolveRequiredFakeWorkspaceRoot(runtimeSessionId),
+            scenario,
+            clock,
+            fetch: options.fetch,
+            scheduler: options.scheduler,
+          }
+        : null;
+      let bridgeRunPromise: Promise<FakeRuntimeBridgeRunRecord> | null = null;
+      const runBridge = (): Promise<FakeRuntimeBridgeRunRecord> => {
+        if (!bridgeRunInput) {
+          throw new Error("fake bridge session requires bridge options");
+        }
 
-      const handle: RuntimeSessionHandle = {
+        bridgeRunPromise ??= runFakeBridgeSession(bridgeRunInput).then((bridgeRun) => {
+          started = started.map((record) =>
+            record.handle.sessionId === runtimeSessionId ? { ...record, bridgeRun } : record,
+          );
+          return bridgeRun;
+        });
+        return bridgeRunPromise;
+      };
+      const afterStartup =
+        bridgeRunInput && options.bridgeRunMode === "after-startup"
+          ? async () => {
+              await runBridge();
+            }
+          : undefined;
+
+      const baseHandle: RuntimeSessionHandle = {
         provider: "fake",
         sessionId: runtimeSessionId,
         projectId: request.projectId,
@@ -170,16 +202,8 @@ export function createFakeRuntimeProvider(options: FakeRuntimeProviderOptions = 
         startedAt: clock.now().toISOString(),
         metadata: scenario.metadata,
       };
-      const bridgeRun = request.bridge
-        ? await runFakeBridgeSession({
-            request,
-            workspaceRoot: workspaceRoot ?? resolveRequiredFakeWorkspaceRoot(runtimeSessionId),
-            scenario,
-            clock,
-            fetch: options.fetch,
-            scheduler: options.scheduler,
-          })
-        : undefined;
+      const handle: RuntimeSessionHandle = afterStartup ? { ...baseHandle, afterStartup } : baseHandle;
+      const bridgeRun = bridgeRunInput && !afterStartup ? await runBridge() : undefined;
 
       started = [...started, { request, handle, bridgeRun }];
       active = [...active, handle];
