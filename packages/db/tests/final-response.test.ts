@@ -29,6 +29,17 @@ describe("final assistant response persistence", () => {
       expect(database.query<{ type: string }, []>("SELECT type FROM events WHERE session_id = 'session_1'").get()).toEqual({
         type: "session.final_response.recorded",
       });
+      expect(
+        database
+          .query<{ kind: string; uri: string; title: string | null }, []>(
+            "SELECT kind, uri, title FROM artifacts WHERE session_id = 'session_1'",
+          )
+          .get(),
+      ).toEqual({
+        kind: "final_response_url",
+        uri: "https://example.test",
+        title: "Final response URL",
+      });
     } finally {
       database.close();
     }

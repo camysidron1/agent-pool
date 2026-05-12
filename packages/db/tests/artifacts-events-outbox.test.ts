@@ -4,6 +4,7 @@ import { Database } from "bun:sqlite";
 import {
   artifactKindValues,
   artifacts,
+  createCanonicalStateServices,
   events,
   migrateWebSandboxDatabase,
   outbox,
@@ -68,6 +69,64 @@ describe("artifact, event, and outbox schema", () => {
           .query("INSERT INTO artifacts (id, project_id, task_id, kind, uri) VALUES (?, ?, ?, ?, ?)")
           .run("artifact_cross_project", "project_b", "task_a_1", "document", "agent-docs/bad.md"),
       ).toThrow();
+    } finally {
+      database.close();
+    }
+  });
+
+  test("records bridge document artifacts only from allowed document roots", () => {
+    const database = createSeededMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      database
+        .query("UPDATE sessions SET status = 'running' WHERE id = 'session_1'")
+        .run();
+
+      const result = services.recordDocumentArtifact({
+        projectId: "project_a",
+        taskId: "task_a_1",
+        sessionId: "session_1",
+        path: "agent-docs/result.md",
+        title: "result.md",
+        contentType: "text/markdown",
+        sizeBytes: 100,
+      });
+      const duplicate = services.recordDocumentArtifact({
+        projectId: "project_a",
+        taskId: "task_a_1",
+        sessionId: "session_1",
+        path: "agent-docs/result.md",
+      });
+      const rejected = services.recordDocumentArtifact({
+        projectId: "project_a",
+        taskId: "task_a_1",
+        sessionId: "session_1",
+        path: "docs/result.md",
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        idempotent: false,
+        artifact: { kind: "document", uri: "agent-docs/result.md", title: "result.md" },
+        event: { type: "artifact.document.registered" },
+        outbox: { routingKey: "project.project_a.events" },
+      });
+      expect(duplicate).toMatchObject({
+        ok: true,
+        idempotent: true,
+        artifact: { uri: "agent-docs/result.md" },
+        event: { type: "artifact.document.idempotent" },
+      });
+      expect(rejected).toEqual({
+        ok: false,
+        error: { code: "invalid_state", message: "document path is outside allowed bridge roots: docs/result.md" },
+      });
+      expect(
+        database
+          .query<{ count: number }, []>("SELECT COUNT(*) AS count FROM artifacts WHERE kind = 'document' AND uri = 'agent-docs/result.md'")
+          .get()?.count,
+      ).toBe(1);
     } finally {
       database.close();
     }

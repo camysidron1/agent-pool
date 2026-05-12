@@ -262,11 +262,42 @@ export type RecordFinalAssistantResponseInput = {
   readonly sessionId: string;
   readonly text: string;
   readonly metadata?: Readonly<Record<string, unknown>>;
+  readonly urlCandidates?: readonly string[];
+};
+
+export type ArtifactRecord = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string | null;
+  readonly sessionId: string | null;
+  readonly kind: "final_response_url" | "document";
+  readonly uri: string;
+  readonly title: string | null;
 };
 
 export type FinalAssistantResponseResult =
-  | { readonly ok: true; readonly event: EventRecord }
+  | { readonly ok: true; readonly event: EventRecord; readonly artifacts: readonly ArtifactRecord[] }
   | { readonly ok: false; readonly error: { readonly code: "not_found" | "conflict"; readonly message: string } };
+
+export type RecordDocumentArtifactInput = {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly path: string;
+  readonly title?: string | null;
+  readonly contentType?: string | null;
+  readonly sizeBytes?: number | null;
+};
+
+export type RecordDocumentArtifactResult =
+  | {
+      readonly ok: true;
+      readonly artifact: ArtifactRecord;
+      readonly event: EventRecord;
+      readonly outbox: OutboxRecord;
+      readonly idempotent: boolean;
+    }
+  | { readonly ok: false; readonly error: { readonly code: "not_found" | "invalid_state"; readonly message: string } };
 
 export type ReadBridgeSessionCallbackConfigInput = {
   readonly projectId: string;
@@ -628,7 +659,7 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
             type: "session.final_response.idempotent",
             payload: { sessionId: input.sessionId },
           });
-          return { ok: true, event };
+          return { ok: true, event, artifacts: [] };
         }
 
         return {
@@ -643,15 +674,86 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
             "UPDATE sessions SET final_response_text = ?, final_response_metadata_json = ?, final_response_recorded_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ?",
           )
           .run(input.text, metadataJson, input.projectId, input.sessionId);
+        const artifacts = uniqueStrings(input.urlCandidates ?? extractUrls(input.text)).map((url) =>
+          ensureArtifact(database, {
+            projectId: input.projectId,
+            taskId: current.task_id,
+            sessionId: input.sessionId,
+            kind: "final_response_url",
+            uri: url,
+            title: "Final response URL",
+            metadata: { source: "final_response" },
+          }).artifact,
+        );
 
         const event = appendEvent(database, {
           projectId: input.projectId,
           taskId: current.task_id,
           sessionId: input.sessionId,
           type: "session.final_response.recorded",
-          payload: { sessionId: input.sessionId },
+          payload: { sessionId: input.sessionId, artifactIds: artifacts.map((artifact) => artifact.id) },
         });
-        return { ok: true, event } as const;
+        return { ok: true, event, artifacts } as const;
+      });
+    },
+
+    recordDocumentArtifact(input: RecordDocumentArtifactInput): RecordDocumentArtifactResult {
+      if (!isAllowedBridgeDocumentPath(input.path)) {
+        return {
+          ok: false,
+          error: { code: "invalid_state", message: `document path is outside allowed bridge roots: ${input.path}` },
+        };
+      }
+
+      const session = database
+        .query<{ id: string; status: string }, [string, string, string]>(
+          "SELECT id, status FROM sessions WHERE project_id = ? AND task_id = ? AND id = ?",
+        )
+        .get(input.projectId, input.taskId, input.sessionId);
+      if (!session) {
+        return { ok: false, error: { code: "not_found", message: `session not found: ${input.sessionId}` } };
+      }
+      if (!isActiveSessionStatus(session.status)) {
+        return {
+          ok: false,
+          error: { code: "invalid_state", message: `document registration requires active session; got ${session.status}` },
+        };
+      }
+
+      return transaction(database, () => {
+        const artifactResult = ensureArtifact(database, {
+          projectId: input.projectId,
+          taskId: input.taskId,
+          sessionId: input.sessionId,
+          kind: "document",
+          uri: input.path,
+          title: input.title ?? input.path.split("/").pop() ?? input.path,
+          metadata: {
+            contentType: input.contentType ?? null,
+            sizeBytes: input.sizeBytes ?? null,
+          },
+        });
+        const event = appendEvent(database, {
+          projectId: input.projectId,
+          taskId: input.taskId,
+          sessionId: input.sessionId,
+          type: artifactResult.created ? "artifact.document.registered" : "artifact.document.idempotent",
+          payload: { artifactId: artifactResult.artifact.id, path: input.path },
+        });
+        const outbox = enqueueOutbox(database, {
+          projectId: input.projectId,
+          eventId: event.id,
+          routingKey: projectRoutingKey(input.projectId, "events"),
+          payload: { eventId: event.id, artifactId: artifactResult.artifact.id, type: event.type },
+        });
+
+        return {
+          ok: true,
+          artifact: artifactResult.artifact,
+          event,
+          outbox,
+          idempotent: !artifactResult.created,
+        } as const;
       });
     },
 
@@ -831,6 +933,82 @@ function byteLength(value: string): number {
 function countLines(value: string): number {
   if (value.length === 0) return 0;
   return value.split("\n").length - (value.endsWith("\n") ? 1 : 0);
+}
+
+function ensureArtifact(
+  database: WebSandboxSqliteDatabase,
+  input: {
+    readonly projectId: string;
+    readonly taskId: string | null;
+    readonly sessionId: string | null;
+    readonly kind: "final_response_url" | "document";
+    readonly uri: string;
+    readonly title: string | null;
+    readonly metadata: Readonly<Record<string, unknown>>;
+  },
+): { readonly artifact: ArtifactRecord; readonly created: boolean } {
+  const existing = database
+    .query<
+      { id: string; project_id: string; task_id: string | null; session_id: string | null; kind: "final_response_url" | "document"; uri: string; title: string | null },
+      [string, string | null, string | null, string, string]
+    >(
+      "SELECT id, project_id, task_id, session_id, kind, uri, title FROM artifacts WHERE project_id = ? AND task_id IS ? AND session_id IS ? AND kind = ? AND uri = ? ORDER BY created_at ASC, id ASC LIMIT 1",
+    )
+    .get(input.projectId, input.taskId, input.sessionId, input.kind, input.uri);
+
+  if (existing) {
+    return {
+      created: false,
+      artifact: {
+        id: existing.id,
+        projectId: existing.project_id,
+        taskId: existing.task_id,
+        sessionId: existing.session_id,
+        kind: existing.kind,
+        uri: existing.uri,
+        title: existing.title,
+      },
+    };
+  }
+
+  const artifact: ArtifactRecord = {
+    id: createId("artifact"),
+    projectId: input.projectId,
+    taskId: input.taskId,
+    sessionId: input.sessionId,
+    kind: input.kind,
+    uri: input.uri,
+    title: input.title,
+  };
+  database
+    .query(
+      "INSERT INTO artifacts (id, project_id, task_id, session_id, kind, uri, title, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .run(
+      artifact.id,
+      artifact.projectId,
+      artifact.taskId,
+      artifact.sessionId,
+      artifact.kind,
+      artifact.uri,
+      artifact.title,
+      JSON.stringify(input.metadata),
+    );
+
+  return { artifact, created: true };
+}
+
+function isAllowedBridgeDocumentPath(path: string): boolean {
+  if (path.startsWith("/") || path.includes("\\") || path.split("/").includes("..")) return false;
+  return path.startsWith("agent-docs/") || path.startsWith("shared-docs/");
+}
+
+function extractUrls(text: string): readonly string[] {
+  return text.match(/https?:\/\/[^\s<>"')\]]+/g)?.map((url) => url.replace(/[.,;:!?]+$/, "")) ?? [];
+}
+
+function uniqueStrings(values: readonly string[]): readonly string[] {
+  return Array.from(new Set(values));
 }
 
 function allocateTaskDisplayId(database: WebSandboxSqliteDatabase, projectId: string): number {

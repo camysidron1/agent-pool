@@ -105,6 +105,7 @@ export {
 export {
   createCanonicalStateServices,
   type AppendEventInput,
+  type ArtifactRecord,
   type BridgeSessionCallbackConfig,
   type CanonicalStateServices,
   type ClaimNextCommandInput,
@@ -131,6 +132,8 @@ export {
   type ProjectRecord,
   type RequestCommandInput,
   type RecordFinalAssistantResponseInput,
+  type RecordDocumentArtifactInput,
+  type RecordDocumentArtifactResult,
   type ReadBridgeSessionCallbackConfigInput,
   type ReadBridgeSessionCallbackConfigResult,
   type RecordSessionOutputInput,

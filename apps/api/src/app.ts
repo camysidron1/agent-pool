@@ -437,6 +437,72 @@ function respondWithBridgeCallback(
     return;
   }
 
+  if (kind === "document") {
+    const path = readOptionalString(body.path);
+    if (!path) {
+      response.status(400).json({ ok: false, error: "invalid_document_callback" });
+      return;
+    }
+
+    const sizeBytes = body.sizeBytes === undefined ? undefined : readInteger(body.sizeBytes);
+    if (body.sizeBytes !== undefined && (sizeBytes === undefined || sizeBytes < 0)) {
+      response.status(400).json({ ok: false, error: "invalid_document_callback" });
+      return;
+    }
+
+    const result = services.recordDocumentArtifact({
+      projectId,
+      taskId,
+      sessionId,
+      path,
+      title: readOptionalString(body.title),
+      contentType: readOptionalString(body.contentType),
+      sizeBytes,
+    });
+
+    if (!result.ok) {
+      response.status(result.error.code === "not_found" ? 404 : 409).json({ ok: false, error: result.error });
+      return;
+    }
+
+    response.status(200).json({
+      ok: true,
+      artifact: result.artifact,
+      event: result.event,
+      outbox: result.outbox,
+      idempotent: result.idempotent,
+    });
+    return;
+  }
+
+  if (kind === "final_response") {
+    const text = typeof body.text === "string" ? body.text : undefined;
+    if (text === undefined) {
+      response.status(400).json({ ok: false, error: "invalid_final_response_callback" });
+      return;
+    }
+
+    const result = services.recordFinalAssistantResponse({
+      projectId,
+      sessionId,
+      text,
+      metadata: readOptionalObject(body.metadata),
+      urlCandidates: readStringArray(body.urlCandidates),
+    });
+
+    if (!result.ok) {
+      response.status(result.error.code === "not_found" ? 404 : 409).json({ ok: false, error: result.error });
+      return;
+    }
+
+    response.status(200).json({
+      ok: true,
+      event: result.event,
+      artifacts: result.artifacts,
+    });
+    return;
+  }
+
   const stream = readBridgeOutputStream(body.stream);
   const sequence = readInteger(body.sequence);
   const byteOffset = readInteger(body.byteOffset);
@@ -487,8 +553,8 @@ function readHeader(request: Request, name: string): string | undefined {
   return readOptionalString(raw);
 }
 
-function readBridgeCallbackKind(value: unknown): "heartbeat" | "output" | undefined {
-  return value === "heartbeat" || value === "output" ? value : undefined;
+function readBridgeCallbackKind(value: unknown): "heartbeat" | "output" | "document" | "final_response" | undefined {
+  return value === "heartbeat" || value === "output" || value === "document" || value === "final_response" ? value : undefined;
 }
 
 function readBridgeOutputStream(value: unknown): "stdout" | "stderr" | "combined" | "system" | undefined {
@@ -497,6 +563,14 @@ function readBridgeOutputStream(value: unknown): "stdout" | "stderr" | "combined
 
 function readInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isInteger(value) ? value : undefined;
+}
+
+function readOptionalObject(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+function readStringArray(value: unknown): readonly string[] | undefined {
+  return Array.isArray(value) && value.every((item) => typeof item === "string") ? value : undefined;
 }
 
 function countOutboxRows(database: ApiDatabaseConnection, status: "queued" | "published" | "failed"): number {

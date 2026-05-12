@@ -428,6 +428,39 @@ describe("API service skeleton", () => {
           observedAt: "2026-05-12T12:00:01.000Z",
         }),
       });
+      const document = await fetch(`${baseUrl}/callbacks/document`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [bridge.sessionToken.headerName]: bridge.sessionToken.token,
+        },
+        body: JSON.stringify({
+          kind: "document",
+          projectId: "project_bridge",
+          taskId: "task_bridge",
+          sessionId: "session_bridge",
+          path: "agent-docs/result.md",
+          title: "result.md",
+          contentType: "text/markdown",
+          sizeBytes: 42,
+        }),
+      });
+      const finalResponse = await fetch(`${baseUrl}/callbacks/final_response`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [bridge.sessionToken.headerName]: bridge.sessionToken.token,
+        },
+        body: JSON.stringify({
+          kind: "final_response",
+          projectId: "project_bridge",
+          taskId: "task_bridge",
+          sessionId: "session_bridge",
+          text: "Preview https://example.test/result",
+          metadata: { model: "fake" },
+          urlCandidates: ["https://example.test/result"],
+        }),
+      });
       const invalidToken = await fetch(`${baseUrl}/callbacks/output`, {
         method: "POST",
         headers: {
@@ -459,6 +492,34 @@ describe("API service skeleton", () => {
           observedAt: "2026-05-12T12:00:02.000Z",
         }),
       });
+      const invalidDocumentPath = await fetch(`${baseUrl}/callbacks/document`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [bridge.sessionToken.headerName]: bridge.sessionToken.token,
+        },
+        body: JSON.stringify({
+          kind: "document",
+          projectId: "project_bridge",
+          taskId: "task_bridge",
+          sessionId: "session_bridge",
+          path: "docs/result.md",
+        }),
+      });
+      const crossSession = await fetch(`${baseUrl}/callbacks/document`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [bridge.sessionToken.headerName]: bridge.sessionToken.token,
+        },
+        body: JSON.stringify({
+          kind: "document",
+          projectId: "project_bridge",
+          taskId: "task_bridge",
+          sessionId: "missing_session",
+          path: "agent-docs/result.md",
+        }),
+      });
 
       expect(heartbeat.status).toBe(200);
       expect(await heartbeat.json()).toMatchObject({
@@ -479,10 +540,28 @@ describe("API service skeleton", () => {
         },
         event: { type: "session.output" },
       });
+      expect(document.status).toBe(200);
+      expect(await document.json()).toMatchObject({
+        ok: true,
+        artifact: { kind: "document", uri: "agent-docs/result.md", title: "result.md" },
+        event: { type: "artifact.document.registered" },
+      });
+      expect(finalResponse.status).toBe(200);
+      expect(await finalResponse.json()).toMatchObject({
+        ok: true,
+        artifacts: [{ kind: "final_response_url", uri: "https://example.test/result" }],
+        event: { type: "session.final_response.recorded" },
+      });
       expect(invalidToken.status).toBe(403);
       expect(await invalidToken.json()).toEqual({ ok: false, error: "invalid_session_token", reason: "invalid" });
       expect(wrongKind.status).toBe(400);
       expect(await wrongKind.json()).toEqual({ ok: false, error: "invalid_callback_kind" });
+      expect(invalidDocumentPath.status).toBe(409);
+      expect(await invalidDocumentPath.json()).toMatchObject({
+        ok: false,
+        error: { code: "invalid_state", message: "document path is outside allowed bridge roots: docs/result.md" },
+      });
+      expect(crossSession.status).toBe(404);
       expect(
         database.sqlite
           .query<{ count: number }, []>(
@@ -497,6 +576,16 @@ describe("API service skeleton", () => {
           )
           .get(),
       ).toEqual({ byte_offset: 6, line_count: 1 });
+      expect(
+        database.sqlite
+          .query<{ kind: string; uri: string }, []>(
+            "SELECT kind, uri FROM artifacts WHERE project_id = 'project_bridge' ORDER BY kind, uri",
+          )
+          .all(),
+      ).toEqual([
+        { kind: "document", uri: "agent-docs/result.md" },
+        { kind: "final_response_url", uri: "https://example.test/result" },
+      ]);
     } finally {
       await close();
     }
