@@ -1,4 +1,4 @@
-import express, { type Express } from "express";
+import express, { type Express, type Request, type Response, type NextFunction } from "express";
 
 import { verifyServiceTokenValue } from "@agent-pool/auth";
 import { type AppConfig, loadConfig } from "@agent-pool/config";
@@ -21,6 +21,9 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
   const queue = options.queue ?? createRabbitMqAdapter(config.rabbitmq);
   const storage = options.storage ?? createStorageAdapter(config.storage);
   const app = express();
+  const requireInternalServiceToken = createInternalServiceTokenMiddleware(config);
+
+  app.use(express.json());
 
   app.get("/health", (_request, response) => {
     response.status(200).json({
@@ -45,7 +48,58 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
     });
   });
 
-  app.get("/internal/health", (request, response) => {
+  app.get("/internal/health", requireInternalServiceToken, (request, response) => {
+    response.status(200).json({
+      ok: true,
+      service: "agent-pool-api",
+      subject: request.internalServiceSubject,
+      database: {
+        connected: Boolean(database),
+        appliedMigrations: database?.appliedMigrations.length ?? 0,
+      },
+      adapters: {
+        queue: queue.kind,
+        storage: storage.kind,
+      },
+    });
+  });
+
+  app.post("/internal/orchestrator/tasks/claim-next", requireInternalServiceToken, sendNotImplemented);
+  app.post("/internal/orchestrator/commands/claim-next", requireInternalServiceToken, sendNotImplemented);
+  app.post("/internal/orchestrator/commands/:commandId/started", requireInternalServiceToken, sendNotImplemented);
+  app.post("/internal/orchestrator/commands/:commandId/succeeded", requireInternalServiceToken, sendNotImplemented);
+  app.post("/internal/orchestrator/commands/:commandId/failed", requireInternalServiceToken, sendNotImplemented);
+  app.post("/internal/orchestrator/sessions/:sessionId/startup-succeeded", requireInternalServiceToken, sendNotImplemented);
+  app.post("/internal/orchestrator/sessions/:sessionId/startup-failed", requireInternalServiceToken, sendNotImplemented);
+  app.post("/internal/orchestrator/sessions/:sessionId/heartbeat", requireInternalServiceToken, sendNotImplemented);
+  app.post("/internal/orchestrator/reconcile", requireInternalServiceToken, sendNotImplemented);
+
+  app.get("/metrics", (_request, response) => {
+    response
+      .status(200)
+      .type("text/plain")
+      .send(
+        `# metrics placeholder for agent-pool-api\nagent_pool_api_info{shared_package="${SHARED_PACKAGE_NAME}"} 1\nagent_pool_api_database_connected ${database ? 1 : 0}\nagent_pool_api_database_applied_migrations ${database?.appliedMigrations.length ?? 0}\nagent_pool_api_queue_adapter_initialized 1\nagent_pool_api_storage_adapter_initialized 1\n`,
+      );
+  });
+
+  return app;
+}
+
+type InternalServiceRequest = Request & {
+  internalServiceSubject?: "internal-service";
+};
+
+declare global {
+  namespace Express {
+    interface Request {
+      internalServiceSubject?: "internal-service";
+    }
+  }
+}
+
+function createInternalServiceTokenMiddleware(config: AppConfig) {
+  return (request: InternalServiceRequest, response: Response, next?: NextFunction) => {
     const headers = (request as { headers?: Record<string, string | readonly string[] | undefined> }).headers ?? {};
     const headerValue = headers[config.serviceToken.headerName];
     const auth = verifyServiceTokenValue(Array.isArray(headerValue) ? headerValue[0] : headerValue, config.serviceToken);
@@ -59,29 +113,19 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
       return;
     }
 
-    response.status(200).json({
-      ok: true,
-      service: "agent-pool-api",
-      subject: auth.subject,
-      database: {
-        connected: Boolean(database),
-        appliedMigrations: database?.appliedMigrations.length ?? 0,
-      },
-      adapters: {
-        queue: queue.kind,
-        storage: storage.kind,
-      },
-    });
-  });
+    request.internalServiceSubject = auth.subject;
+    if (!next) {
+      throw new Error("internal service token middleware requires a next callback");
+    }
+    next();
+  };
+}
 
-  app.get("/metrics", (_request, response) => {
-    response
-      .status(200)
-      .type("text/plain")
-      .send(
-        `# metrics placeholder for agent-pool-api\nagent_pool_api_info{shared_package="${SHARED_PACKAGE_NAME}"} 1\nagent_pool_api_database_connected ${database ? 1 : 0}\nagent_pool_api_database_applied_migrations ${database?.appliedMigrations.length ?? 0}\nagent_pool_api_queue_adapter_initialized 1\nagent_pool_api_storage_adapter_initialized 1\n`,
-      );
+function sendNotImplemented(request: Request, response: Response): void {
+  response.status(501).json({
+    ok: false,
+    error: "internal_orchestrator_endpoint_not_implemented",
+    method: request.method,
+    path: request.path,
   });
-
-  return app;
 }
