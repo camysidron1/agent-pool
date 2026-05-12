@@ -26,6 +26,7 @@ const RULES: readonly BoundaryRule[] = [
     roots: [
       "apps/orchestrator/src",
       "apps/web/src",
+      "deploy/compose",
       "packages/auth/src",
       "packages/config/src",
       "packages/queue/src",
@@ -33,6 +34,11 @@ const RULES: readonly BoundaryRule[] = [
       "packages/shared/src",
       "packages/storage/src",
     ],
+    forbiddenImports: ["@agent-pool/db", "bun:sqlite", "drizzle-orm"],
+  },
+  {
+    name: "compose smoke helpers do not import backend-owned db package",
+    roots: ["deploy/compose"],
     forbiddenImports: ["@agent-pool/db", "bun:sqlite", "drizzle-orm"],
   },
   {
@@ -72,6 +78,7 @@ describe("import boundaries", () => {
     const roots = [
       "apps/orchestrator/src",
       "apps/web/src",
+      "deploy/compose",
       "packages/auth/src",
       "packages/config/src",
       "packages/queue/src",
@@ -89,6 +96,40 @@ describe("import boundaries", () => {
         for (const pattern of DB_CONNECTION_PATTERNS) {
           if (pattern.pattern.test(contents)) {
             violations.push(`${relative(process.cwd(), filePath)} contains ${pattern.name}`);
+          }
+        }
+      }
+    }
+
+    expect(violations.sort()).toEqual([]);
+  });
+
+  test("only API source constructs or opens the backend database outside the db package", async () => {
+    const allowedFiles = new Set(["apps/api/src/database.ts", "apps/api/src/index.ts"]);
+    const roots = [
+      "apps/api/src",
+      "apps/orchestrator/src",
+      "apps/web/src",
+      "deploy/compose",
+      "packages/auth/src",
+      "packages/config/src",
+      "packages/queue/src",
+      "packages/runtime/src",
+      "packages/session-bridge/src",
+      "packages/shared/src",
+      "packages/storage/src",
+    ];
+    const violations: string[] = [];
+
+    for (const root of roots) {
+      for (const filePath of await listSourceFiles(root)) {
+        const relativePath = relative(process.cwd(), filePath);
+        if (relativePath.startsWith("packages/db/src/")) continue;
+
+        const contents = await readFile(filePath, "utf8");
+        for (const pattern of DB_CONNECTION_PATTERNS) {
+          if (pattern.pattern.test(contents) && !allowedFiles.has(relativePath)) {
+            violations.push(`${relativePath} contains ${pattern.name}`);
           }
         }
       }

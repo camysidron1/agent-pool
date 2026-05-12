@@ -14,6 +14,11 @@ import {
 } from "../src/database";
 
 describe("API-owned web/sandbox database path", () => {
+  test("default relative path stays in the web sandbox namespace", () => {
+    expect(DEFAULT_API_DATABASE_RELATIVE_PATH).toBe(join(".agent-pool", "web-sandbox", "web-sandbox.db"));
+    expect(DEFAULT_API_DATABASE_RELATIVE_PATH).not.toBe(join(".agent-pool", "data", "agent-pool.db"));
+  });
+
   test("defaults to a net-new web/sandbox path instead of the existing TUI database", () => {
     const home = join(tmpdir(), "agent-pool-api-home");
     const legacyTuiPath = join(home, ".agent-pool", "data", "agent-pool.db");

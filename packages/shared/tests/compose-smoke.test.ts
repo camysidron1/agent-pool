@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import {
   createComposeSmokePlan,
@@ -9,6 +11,17 @@ import {
 } from "../../../deploy/compose/smoke-compose";
 
 describe("compose smoke runner", () => {
+  test("keeps Docker compose smoke out of the default test script", async () => {
+    const packageJson = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8")) as {
+      readonly scripts?: Record<string, string>;
+    };
+    const scripts = packageJson.scripts ?? {};
+
+    expect(scripts.test).toBe("bun test apps packages");
+    expect(scripts.test).not.toMatch(/smoke:compose|docker|compose|rabbitmq|minio|prometheus/i);
+    expect(scripts["smoke:compose"]).toBe("bun run deploy/compose/smoke-compose.ts");
+  });
+
   test("builds a bounded compose smoke plan without using the legacy TUI database", () => {
     const plan = createComposeSmokePlan({
       cwd: "/repo",
@@ -108,6 +121,88 @@ describe("compose smoke runner", () => {
       timeoutMs: 5000,
       teardown: false,
     });
+  });
+
+  test("uses API service-token smoke endpoints for seed and status instead of DB access", async () => {
+    const requests: Array<{
+      readonly url: string;
+      readonly method: string;
+      readonly serviceToken: string | null;
+      readonly contentType: string | null;
+    }> = [];
+    const serviceToken = "boundary-token";
+    const code = await runComposeSmokeCli(["--service-token", serviceToken, "--timeout-ms", "1000"], {
+      cwd: "/repo",
+      write: () => {},
+      runCommand: async () => {},
+      fetch: async (input, init) => {
+        const url = String(input);
+        const parsed = new URL(url);
+        const headers = new Headers(init?.headers);
+        requests.push({
+          url,
+          method: init?.method ?? "GET",
+          serviceToken: headers.get("x-agent-pool-service-token"),
+          contentType: headers.get("content-type"),
+        });
+
+        if (parsed.pathname === "/internal/smoke/seed") {
+          return Response.json({ ok: true, projectId: "compose-smoke", taskId: "compose-smoke-task-1" });
+        }
+
+        if (parsed.pathname === "/internal/smoke/status") {
+          return Response.json({
+            ok: true,
+            finalResponse: { recorded: true },
+            completion: { completed: true },
+            cleanup: { completed: true },
+          });
+        }
+
+        if (parsed.pathname === "/api/v1/targets") {
+          return Response.json({
+            status: "success",
+            data: {
+              activeTargets: [
+                { health: "up", labels: { job: "agent-pool-api" } },
+                { health: "up", labels: { job: "agent-pool-orchestrator" } },
+              ],
+            },
+          });
+        }
+
+        if (parsed.pathname === "/api/v1/query") {
+          return Response.json({
+            status: "success",
+            data: {
+              resultType: "vector",
+              result: [{ value: [0, "1"] }],
+            },
+          });
+        }
+
+        return Response.json({ ok: true });
+      },
+    });
+    const smokeRequests = requests.filter((request) => request.url.startsWith("http://127.0.0.1:3000/internal/smoke/"));
+    const smokeSource = await readFile(join(process.cwd(), "deploy", "compose", "smoke-compose.ts"), "utf8");
+
+    expect(code).toBe(0);
+    expect(smokeRequests).toEqual([
+      {
+        url: "http://127.0.0.1:3000/internal/smoke/seed",
+        method: "POST",
+        serviceToken,
+        contentType: "application/json",
+      },
+      {
+        url: "http://127.0.0.1:3000/internal/smoke/status",
+        method: "GET",
+        serviceToken,
+        contentType: null,
+      },
+    ]);
+    expect(smokeSource).not.toMatch(/@agent-pool\/db|bun:sqlite|openApiDatabase|openWebSandboxDatabase|AGENT_POOL_WEB_SANDBOX_DB_PATH/);
   });
 
   test("parses Prometheus target and query verification for API and orchestrator metrics", async () => {
