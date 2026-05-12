@@ -126,6 +126,13 @@ export {
   type BridgeCallbackClientOptions,
 } from "./callback-client";
 export {
+  createBridgeEventBuffer,
+  type BridgeEventBuffer,
+  type BridgeEventBufferFlushResult,
+  type BridgeEventBufferOptions,
+  type BridgeEventDeadLetterRecord,
+} from "./event-buffer";
+export {
   createBridgeHeartbeatLoop,
   type BridgeHeartbeatFailure,
   type BridgeHeartbeatLoop,
