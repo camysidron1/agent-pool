@@ -87,6 +87,20 @@ export type CommandRecord = {
   readonly type: CommandType;
 };
 
+export type ClaimedCommandRecord = CommandRecord & {
+  readonly status: "running";
+  readonly payload: Readonly<Record<string, unknown>>;
+  readonly claimedAt: string;
+};
+
+export type ClaimNextCommandInput = {
+  readonly projectId?: string;
+};
+
+export type ClaimNextCommandResult =
+  | { readonly ok: true; readonly command: ClaimedCommandRecord; readonly event: EventRecord; readonly outbox: OutboxRecord }
+  | { readonly ok: false; readonly reason: "no_queued_command" };
+
 export type CommandAdmissibilityError = {
   readonly code: "not_found" | "invalid_state" | "conflict" | "missing_scope";
   readonly message: string;
@@ -262,6 +276,70 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
             attemptNumber,
             status: "starting",
             runtimeProvider,
+          },
+          event,
+          outbox,
+        } as const;
+      });
+    },
+
+    claimNextCommand(input: ClaimNextCommandInput = {}): ClaimNextCommandResult {
+      return transaction(database, () => {
+        const command = selectNextQueuedCommand(database, input.projectId);
+        if (!command) return { ok: false, reason: "no_queued_command" } as const;
+
+        database
+          .query(
+            "UPDATE orchestrator_commands SET status = 'running', claimed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ? AND status = 'queued'",
+          )
+          .run(command.project_id, command.id);
+        const claimed = database
+          .query<
+            {
+              id: string;
+              project_id: string;
+              task_id: string | null;
+              session_id: string | null;
+              type: CommandType;
+              payload_json: string;
+              claimed_at: string;
+            },
+            [string, string]
+          >(
+            "SELECT id, project_id, task_id, session_id, type, payload_json, claimed_at FROM orchestrator_commands WHERE project_id = ? AND id = ?",
+          )
+          .get(command.project_id, command.id);
+
+        if (!claimed) {
+          throw new Error(`claimed command disappeared: ${command.id}`);
+        }
+
+        const event = appendEvent(database, {
+          projectId: claimed.project_id,
+          taskId: claimed.task_id,
+          sessionId: claimed.session_id,
+          commandId: claimed.id,
+          type: "command.claimed",
+          payload: { commandId: claimed.id, type: claimed.type },
+        });
+        const outbox = enqueueOutbox(database, {
+          projectId: claimed.project_id,
+          eventId: event.id,
+          routingKey: projectRoutingKey(claimed.project_id, "control"),
+          payload: { eventId: event.id, commandId: claimed.id, type: claimed.type },
+        });
+
+        return {
+          ok: true,
+          command: {
+            id: claimed.id,
+            projectId: claimed.project_id,
+            taskId: claimed.task_id,
+            sessionId: claimed.session_id,
+            type: claimed.type,
+            status: "running",
+            payload: parseJsonObject(claimed.payload_json),
+            claimedAt: claimed.claimed_at,
           },
           event,
           outbox,
@@ -483,6 +561,26 @@ function validateCommand(database: WebSandboxSqliteDatabase, input: RequestComma
   }
 }
 
+function selectNextQueuedCommand(
+  database: WebSandboxSqliteDatabase,
+  projectId?: string,
+): { readonly id: string; readonly project_id: string } | null {
+  return database
+    .query<{ id: string; project_id: string }, [string | null, string | null]>(
+      `
+        SELECT c.id, c.project_id
+        FROM orchestrator_commands c
+        JOIN projects p ON p.id = c.project_id
+        WHERE c.status = 'queued'
+          AND p.status = 'active'
+          AND (? IS NULL OR c.project_id = ?)
+        ORDER BY c.created_at ASC, c.rowid ASC, c.id ASC
+        LIMIT 1
+      `,
+    )
+    .get(projectId ?? null, projectId ?? null);
+}
+
 function selectNextEligibleTask(
   database: WebSandboxSqliteDatabase,
   projectId?: string,
@@ -528,6 +626,11 @@ function readSessionState(database: WebSandboxSqliteDatabase, projectId: string,
 
 function commandError(code: CommandAdmissibilityError["code"], message: string): { readonly ok: false; readonly error: CommandAdmissibilityError } {
   return { ok: false, error: { code, message } };
+}
+
+function parseJsonObject(value: string): Readonly<Record<string, unknown>> {
+  const parsed: unknown = JSON.parse(value);
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
 }
 
 function transaction<T>(database: WebSandboxSqliteDatabase, run: () => T): T {
