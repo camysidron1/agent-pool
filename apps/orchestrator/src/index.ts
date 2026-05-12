@@ -53,6 +53,17 @@ export {
   type QueueDecisionPolicyOptions,
 } from "./queue-policy";
 export {
+  createReconciliationLoop,
+  runReconciliationOnce,
+  type ReconciliationBackend,
+  type ReconciliationClock,
+  type ReconciliationLoop,
+  type ReconciliationLoopOptions,
+  type ReconciliationOnceResult,
+  type ReconciliationOptions,
+  type ReconciliationScheduler,
+} from "./reconciliation-loop";
+export {
   runTaskQueueConsumerOnce,
   type TaskQueueConsumerBackend,
   type TaskQueueConsumerOptions,
