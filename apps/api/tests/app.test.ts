@@ -72,14 +72,14 @@ describe("API service skeleton", () => {
     const { baseUrl, config, close } = await startTestApi();
 
     try {
-      const missing = await fetch(`${baseUrl}/internal/orchestrator/commands/claim-next`, { method: "POST" });
-      const invalid = await fetch(`${baseUrl}/internal/orchestrator/commands/claim-next`, {
+      const missing = await fetch(`${baseUrl}/internal/orchestrator/commands/cmd_1/started`, { method: "POST" });
+      const invalid = await fetch(`${baseUrl}/internal/orchestrator/commands/cmd_1/started`, {
         method: "POST",
         headers: {
           [config.serviceToken.headerName]: "wrong",
         },
       });
-      const ok = await fetch(`${baseUrl}/internal/orchestrator/commands/claim-next`, {
+      const ok = await fetch(`${baseUrl}/internal/orchestrator/commands/cmd_1/started`, {
         method: "POST",
         headers: {
           [config.serviceToken.headerName]: config.serviceToken.token,
@@ -95,7 +95,7 @@ describe("API service skeleton", () => {
         ok: false,
         error: "internal_orchestrator_endpoint_not_implemented",
         method: "POST",
-        path: "/internal/orchestrator/commands/claim-next",
+        path: "/internal/orchestrator/commands/cmd_1/started",
       });
     } finally {
       await close();
@@ -136,6 +136,60 @@ describe("API service skeleton", () => {
       });
       expect(noWork.status).toBe(200);
       expect(await noWork.json()).toEqual({ ok: true, claimed: false, reason: "no_eligible_task" });
+    } finally {
+      await close();
+    }
+  });
+
+  test("claimNextCommand internal endpoint claims queued commands and returns structured no-work response", async () => {
+    const { baseUrl, config, database, close } = await startTestApi();
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      services.createTask({ id: "task_1", projectId: "project_a", title: "First task" });
+      const command = services.requestCommand({
+        id: "command_cancel",
+        projectId: "project_a",
+        taskId: "task_1",
+        type: "cancel",
+        payload: { reason: "operator" },
+      });
+      expect(command.ok).toBe(true);
+
+      const claimed = await fetch(`${baseUrl}/internal/orchestrator/commands/claim-next`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+        body: JSON.stringify({ projectId: "project_a" }),
+      });
+      const noWork = await fetch(`${baseUrl}/internal/orchestrator/commands/claim-next`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+        body: JSON.stringify({ projectId: "project_a" }),
+      });
+
+      expect(claimed.status).toBe(200);
+      expect(await claimed.json()).toMatchObject({
+        ok: true,
+        claimed: true,
+        command: {
+          id: "command_cancel",
+          projectId: "project_a",
+          taskId: "task_1",
+          sessionId: null,
+          type: "cancel",
+          status: "running",
+          payload: { reason: "operator" },
+        },
+      });
+      expect(noWork.status).toBe(200);
+      expect(await noWork.json()).toEqual({ ok: true, claimed: false, reason: "no_queued_command" });
     } finally {
       await close();
     }
