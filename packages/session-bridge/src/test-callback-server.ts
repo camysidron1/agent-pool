@@ -18,6 +18,40 @@ export type TestBridgeCallbackServer = {
 export function createTestBridgeCallbackServer(options: TestBridgeCallbackServerOptions): TestBridgeCallbackServer {
   const events: BridgeCallbackEvent[] = [];
   const steeringPolls: unknown[] = [];
+  const fetchImpl = async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]): Promise<Response> => {
+    const request = new Request(input, init);
+    const auth = verifySessionToken(request, options.sessionToken);
+
+    if (!auth.ok) {
+      return Response.json(
+        { ok: false, error: "invalid_session_token", reason: auth.reason },
+        { status: auth.reason === "missing" ? 401 : 403 },
+      );
+    }
+
+    if (request.method !== "POST") {
+      return Response.json({ ok: false, error: "method_not_allowed" }, { status: 405 });
+    }
+
+    const url = new URL(request.url);
+    const body = await request.json().catch(() => null);
+
+    if (url.pathname === "/steering/poll") {
+      steeringPolls.push(body);
+      return Response.json({ ok: true, messages: options.steeringMessages ?? [] });
+    }
+
+    if (url.pathname.startsWith("/callbacks/")) {
+      if (!isBridgeCallbackEvent(body)) {
+        return Response.json({ ok: false, error: "invalid_callback_event" }, { status: 400 });
+      }
+
+      events.push(body);
+      return Response.json({ ok: true, accepted: true, kind: body.kind });
+    }
+
+    return Response.json({ ok: false, error: "not_found" }, { status: 404 });
+  };
 
   return {
     get events(): readonly BridgeCallbackEvent[] {
@@ -26,40 +60,7 @@ export function createTestBridgeCallbackServer(options: TestBridgeCallbackServer
     get steeringPolls(): readonly unknown[] {
       return [...steeringPolls];
     },
-    fetch: async (input, init) => {
-      const request = new Request(input, init);
-      const auth = verifySessionToken(request, options.sessionToken);
-
-      if (!auth.ok) {
-        return Response.json(
-          { ok: false, error: "invalid_session_token", reason: auth.reason },
-          { status: auth.reason === "missing" ? 401 : 403 },
-        );
-      }
-
-      if (request.method !== "POST") {
-        return Response.json({ ok: false, error: "method_not_allowed" }, { status: 405 });
-      }
-
-      const url = new URL(request.url);
-      const body = await request.json().catch(() => null);
-
-      if (url.pathname === "/steering/poll") {
-        steeringPolls.push(body);
-        return Response.json({ ok: true, messages: options.steeringMessages ?? [] });
-      }
-
-      if (url.pathname.startsWith("/callbacks/")) {
-        if (!isBridgeCallbackEvent(body)) {
-          return Response.json({ ok: false, error: "invalid_callback_event" }, { status: 400 });
-        }
-
-        events.push(body);
-        return Response.json({ ok: true, accepted: true, kind: body.kind });
-      }
-
-      return Response.json({ ok: false, error: "not_found" }, { status: 404 });
-    },
+    fetch: fetchImpl as typeof fetch,
   };
 }
 

@@ -370,7 +370,7 @@ function resolveRequiredFakeWorkspaceRoot(runtimeSessionId: string): string {
 }
 
 function createOfflineBridgeFetch(): typeof fetch {
-  return async (input, init) => {
+  const fetchImpl = async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]): Promise<Response> => {
     const request = new Request(input, init);
     if (request.method !== "POST") {
       return Response.json({ ok: false, error: "method_not_allowed" }, { status: 405 });
@@ -387,4 +387,6 @@ function createOfflineBridgeFetch(): typeof fetch {
 
     return Response.json({ ok: false, error: "not_found" }, { status: 404 });
   };
+
+  return fetchImpl as typeof fetch;
 }
