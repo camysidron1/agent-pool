@@ -5,6 +5,11 @@ import { openApiDatabase } from "./database";
 
 export { createApiApp, type ApiAppOptions } from "./app";
 export {
+  createApiBackendServices,
+  type ApiBackendServicesOptions,
+  type CreateProjectWithQueuesResult,
+} from "./backend-services";
+export {
   API_DATABASE_PATH_ENV,
   DEFAULT_API_DATABASE_RELATIVE_PATH,
   createApiDatabaseConfig,
