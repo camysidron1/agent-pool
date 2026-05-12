@@ -67,6 +67,81 @@ describe("API service skeleton", () => {
     }
   });
 
+  test("internal orchestrator namespace requires service-token auth and exposes structured placeholders", async () => {
+    const { baseUrl, config, close } = await startTestApi();
+
+    try {
+      const missing = await fetch(`${baseUrl}/internal/orchestrator/tasks/claim-next`, { method: "POST" });
+      const invalid = await fetch(`${baseUrl}/internal/orchestrator/tasks/claim-next`, {
+        method: "POST",
+        headers: {
+          [config.serviceToken.headerName]: "wrong",
+        },
+      });
+      const ok = await fetch(`${baseUrl}/internal/orchestrator/tasks/claim-next`, {
+        method: "POST",
+        headers: {
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+      });
+
+      expect(missing.status).toBe(401);
+      expect(await missing.json()).toMatchObject({ ok: false, reason: "missing" });
+      expect(invalid.status).toBe(403);
+      expect(await invalid.json()).toMatchObject({ ok: false, reason: "invalid" });
+      expect(ok.status).toBe(501);
+      expect(await ok.json()).toMatchObject({
+        ok: false,
+        error: "internal_orchestrator_endpoint_not_implemented",
+        method: "POST",
+        path: "/internal/orchestrator/tasks/claim-next",
+      });
+    } finally {
+      await close();
+    }
+  });
+
+  test("internal orchestrator placeholder endpoints are not exposed as public routes", async () => {
+    const { baseUrl, config, close } = await startTestApi();
+
+    try {
+      const publicRoute = await fetch(`${baseUrl}/orchestrator/tasks/claim-next`, {
+        method: "POST",
+        headers: {
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+      });
+      const commandReport = await fetch(`${baseUrl}/internal/orchestrator/commands/cmd_1/started`, {
+        method: "POST",
+        headers: {
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+      });
+      const startupReport = await fetch(`${baseUrl}/internal/orchestrator/sessions/session_1/startup-failed`, {
+        method: "POST",
+        headers: {
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+      });
+      const reconcile = await fetch(`${baseUrl}/internal/orchestrator/reconcile`, {
+        method: "POST",
+        headers: {
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+      });
+
+      expect(publicRoute.status).toBe(404);
+      expect(commandReport.status).toBe(501);
+      expect(await commandReport.json()).toMatchObject({ error: "internal_orchestrator_endpoint_not_implemented" });
+      expect(startupReport.status).toBe(501);
+      expect(await startupReport.json()).toMatchObject({ error: "internal_orchestrator_endpoint_not_implemented" });
+      expect(reconcile.status).toBe(501);
+      expect(await reconcile.json()).toMatchObject({ error: "internal_orchestrator_endpoint_not_implemented" });
+    } finally {
+      await close();
+    }
+  });
+
   test("metrics exposes service and database migration gauges", async () => {
     const { baseUrl, close } = await startTestApi();
 
