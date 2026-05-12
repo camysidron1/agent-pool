@@ -7,6 +7,7 @@ import { checkBackendInternalHealth, createBackendInternalApiClient } from "../s
 import { createCapacityLimiter } from "../src/capacity";
 import { createOrchestratorMetrics } from "../src/metrics";
 import { createOrchestratorFetchHandler } from "../src/server";
+import type { OrchestratorWorkerLoops } from "../src/worker-loops";
 
 describe("orchestrator service skeleton", () => {
   test("health exposes configured backend internal URL", async () => {
@@ -32,6 +33,12 @@ describe("orchestrator service skeleton", () => {
         workerPollIntervalMs: 1000,
         reconcileIntervalMs: 5000,
       },
+      workerLoops: {
+        initialized: false,
+        task: { running: false, ticks: 0, failures: 0 },
+        control: { running: false, ticks: 0, failures: 0 },
+        reconcile: { running: false, ticks: 0, failures: 0 },
+      },
     });
   });
 
@@ -50,7 +57,8 @@ describe("orchestrator service skeleton", () => {
       reconcileFailures: 1,
     });
     queue.publishProjectTaskHint("project_a", { taskId: "task_1" });
-    const handler = createOrchestratorFetchHandler({ config: loadConfig({ AUTH_MODE: "test" }), queue, capacityLimiter, metrics });
+    const workerLoops = fakeWorkerLoops();
+    const handler = createOrchestratorFetchHandler({ config: loadConfig({ AUTH_MODE: "test" }), queue, capacityLimiter, metrics, workerLoops });
     const response = handler(new Request("http://orchestrator.test/metrics"));
     const text = await response.text();
 
@@ -72,6 +80,10 @@ describe("orchestrator service skeleton", () => {
     expect(text).toContain("agent_pool_orchestrator_capacity_available 1");
     expect(text).toContain("agent_pool_orchestrator_reconcile_runs_total 8");
     expect(text).toContain("agent_pool_orchestrator_reconcile_failures_total 1");
+    expect(text).toContain('agent_pool_orchestrator_worker_loop_running{loop="task"} 1');
+    expect(text).toContain('agent_pool_orchestrator_worker_loop_ticks_total{loop="task"} 2');
+    expect(text).toContain('agent_pool_orchestrator_worker_loop_failures_total{loop="control"} 1');
+    expect(text).toContain('agent_pool_orchestrator_worker_loop_running{loop="reconcile"} 0');
   });
 
   test("backend internal health client sends service-token auth and handles success", async () => {
@@ -228,3 +240,39 @@ describe("orchestrator service skeleton", () => {
     expect(requests[7]?.body).toEqual({ projectId: "project_a", observedAt: "2026-01-01T00:00:00.000Z" });
   });
 });
+
+function fakeWorkerLoops(): OrchestratorWorkerLoops {
+  return {
+    state: {
+      task: {
+        running: true,
+        ticks: 2,
+        failures: 0,
+        inFlight: false,
+        lastError: null,
+        lastResult: { processed: 1 },
+      },
+      control: {
+        running: true,
+        ticks: 3,
+        failures: 1,
+        inFlight: false,
+        lastError: "command failed",
+        lastResult: null,
+      },
+      reconcile: {
+        running: false,
+        ticks: 4,
+        failures: 0,
+        inFlight: false,
+        lastError: null,
+        lastResult: { ok: true },
+      },
+    },
+    tickTask: async () => null,
+    tickControl: async () => null,
+    tickReconcile: async () => null,
+    start() {},
+    stop() {},
+  };
+}

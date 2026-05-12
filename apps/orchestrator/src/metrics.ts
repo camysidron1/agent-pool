@@ -2,6 +2,7 @@ import type { QueueDrainResult, RabbitMqAdapter } from "@agent-pool/queue";
 
 import type { CapacityLimiter } from "./capacity";
 import type { ReconciliationOnceResult } from "./reconciliation-loop";
+import type { OrchestratorWorkerLoops } from "./worker-loops";
 
 export type OrchestratorMetricsCounters = {
   readonly taskConsumerRuns: number;
@@ -27,6 +28,7 @@ export type RenderOrchestratorMetricsOptions = {
   readonly queue: RabbitMqAdapter;
   readonly capacityLimiter?: CapacityLimiter;
   readonly metrics?: OrchestratorMetricsRecorder | Partial<OrchestratorMetricsCounters>;
+  readonly workerLoops?: OrchestratorWorkerLoops;
 };
 
 const ZERO_COUNTERS: OrchestratorMetricsCounters = {
@@ -76,6 +78,7 @@ export function createOrchestratorMetrics(
 export function renderOrchestratorMetrics(options: RenderOrchestratorMetricsOptions): string {
   const counters = readCounters(options.metrics);
   const capacity = options.capacityLimiter;
+  const loopMetrics = renderWorkerLoopMetrics(options.workerLoops);
 
   return [
     "# metrics placeholder for agent-pool-orchestrator",
@@ -97,8 +100,24 @@ export function renderOrchestratorMetrics(options: RenderOrchestratorMetricsOpti
     `agent_pool_orchestrator_capacity_available ${capacity?.available ? 1 : 0}`,
     `agent_pool_orchestrator_reconcile_runs_total ${counters.reconcileRuns}`,
     `agent_pool_orchestrator_reconcile_failures_total ${counters.reconcileFailures}`,
+    ...loopMetrics,
     "",
   ].join("\n");
+}
+
+function renderWorkerLoopMetrics(workerLoops: OrchestratorWorkerLoops | undefined): readonly string[] {
+  const states = workerLoops?.state;
+
+  return ([
+    ["task", states?.task],
+    ["control", states?.control],
+    ["reconcile", states?.reconcile],
+  ] as const).flatMap(([loop, state]) => [
+    `agent_pool_orchestrator_worker_loop_running{loop="${loop}"} ${state?.running ? 1 : 0}`,
+    `agent_pool_orchestrator_worker_loop_in_flight{loop="${loop}"} ${state?.inFlight ? 1 : 0}`,
+    `agent_pool_orchestrator_worker_loop_ticks_total{loop="${loop}"} ${state?.ticks ?? 0}`,
+    `agent_pool_orchestrator_worker_loop_failures_total{loop="${loop}"} ${state?.failures ?? 0}`,
+  ]);
 }
 
 function readCounters(metrics: RenderOrchestratorMetricsOptions["metrics"]): OrchestratorMetricsCounters {

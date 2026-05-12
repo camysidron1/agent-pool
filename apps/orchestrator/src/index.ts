@@ -1,6 +1,11 @@
 import { loadConfig } from "@agent-pool/config";
+import { createRabbitMqManagementHttpAdapter } from "@agent-pool/queue";
 
+import { createBackendInternalApiClient } from "./backend-client";
+import { createCapacityLimiter } from "./capacity";
+import { createOrchestratorMetrics } from "./metrics";
 import { startOrchestratorService } from "./server";
+import { createOrchestratorWorkerLoops } from "./worker-loops";
 
 export {
   checkBackendInternalHealth,
@@ -85,11 +90,29 @@ export {
   type TaskRuntimeStartupRequest,
   type TaskRuntimeStartupResult,
 } from "./task-consumer";
+export {
+  createOrchestratorWorkerLoops,
+  type OrchestratorWorkerLoopScheduler,
+  type OrchestratorWorkerLoops,
+  type OrchestratorWorkerLoopsOptions,
+  type OrchestratorWorkerLoopsState,
+  type OrchestratorWorkerLoopState,
+} from "./worker-loops";
 
 if (isDirectRun()) {
   const config = loadConfig(readProcessEnv());
+  const queue = createRabbitMqManagementHttpAdapter(config.rabbitmq);
+  const backend = createBackendInternalApiClient({ config });
+  const capacityLimiter = createCapacityLimiter({ maxConcurrent: 1 });
+  const metrics = createOrchestratorMetrics();
+  const workerLoops = createOrchestratorWorkerLoops({ config, queue, backend, capacityLimiter, metrics });
 
-  startOrchestratorService({ config, port: config.orchestrator.port });
+  const server = startOrchestratorService({ config, port: config.orchestrator.port, queue, capacityLimiter, metrics, workerLoops });
+  workerLoops.start();
+  registerShutdown(() => {
+    workerLoops.stop();
+    stopServer(server);
+  });
   console.info(`agent-pool-orchestrator listening on ${config.orchestrator.port}`);
 }
 
@@ -112,4 +135,21 @@ function readProcessEnv(): Readonly<Record<string, string | undefined>> {
   };
 
   return processLike.process?.env ?? {};
+}
+
+function registerShutdown(close: () => void): void {
+  const processLike = globalThis as typeof globalThis & {
+    process?: {
+      once?: (event: string, listener: () => void) => void;
+    };
+  };
+
+  processLike.process?.once?.("SIGINT", close);
+  processLike.process?.once?.("SIGTERM", close);
+}
+
+function stopServer(server: unknown): void {
+  if (server && typeof server === "object" && "stop" in server && typeof server.stop === "function") {
+    server.stop();
+  }
 }

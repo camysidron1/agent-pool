@@ -5,6 +5,7 @@ import { createStorageAdapter, type StorageAdapter } from "@agent-pool/storage";
 
 import type { CapacityLimiter } from "./capacity";
 import { createOrchestratorMetrics, renderOrchestratorMetrics, type OrchestratorMetricsRecorder } from "./metrics";
+import type { OrchestratorWorkerLoops, OrchestratorWorkerLoopsState } from "./worker-loops";
 
 export type OrchestratorServerOptions = {
   readonly config?: AppConfig;
@@ -12,6 +13,7 @@ export type OrchestratorServerOptions = {
   readonly storage?: StorageAdapter;
   readonly capacityLimiter?: CapacityLimiter;
   readonly metrics?: OrchestratorMetricsRecorder;
+  readonly workerLoops?: OrchestratorWorkerLoops;
 };
 
 export type BunServe = (options: {
@@ -44,27 +46,63 @@ export function createOrchestratorFetchHandler(
           storage: {
             kind: storage.kind,
             bucket: storage.bucket,
+          },
         },
-      },
-      controlPlane: {
-        smokeEnabled: config.controlPlane.smokeEnabled,
-        smokeProjectId: config.controlPlane.smokeProjectId,
-        runtimeProvider: config.controlPlane.runtimeProvider,
-        workerPollIntervalMs: config.controlPlane.workerPollIntervalMs,
-        reconcileIntervalMs: config.controlPlane.reconcileIntervalMs,
-      },
-    });
-  }
-
-    if (url.pathname === "/metrics") {
-      return new Response(renderOrchestratorMetrics({ taskQueueName: DEFAULT_PROJECT_TASK_QUEUE, queue, capacityLimiter: options.capacityLimiter, metrics }), {
-        headers: {
-          "content-type": "text/plain; charset=utf-8",
+        controlPlane: {
+          smokeEnabled: config.controlPlane.smokeEnabled,
+          smokeProjectId: config.controlPlane.smokeProjectId,
+          runtimeProvider: config.controlPlane.runtimeProvider,
+          workerPollIntervalMs: config.controlPlane.workerPollIntervalMs,
+          reconcileIntervalMs: config.controlPlane.reconcileIntervalMs,
         },
+        workerLoops: readWorkerLoopsHealth(options.workerLoops),
       });
     }
 
+    if (url.pathname === "/metrics") {
+      return new Response(
+        renderOrchestratorMetrics({
+          taskQueueName: DEFAULT_PROJECT_TASK_QUEUE,
+          queue,
+          capacityLimiter: options.capacityLimiter,
+          metrics,
+          workerLoops: options.workerLoops,
+        }),
+        {
+          headers: {
+            "content-type": "text/plain; charset=utf-8",
+          },
+        },
+      );
+    }
+
     return Response.json({ error: "not found" }, { status: 404 });
+  };
+}
+
+function readWorkerLoopsHealth(workerLoops: OrchestratorWorkerLoops | undefined) {
+  return {
+    initialized: Boolean(workerLoops),
+    ...readWorkerLoopsState(workerLoops?.state),
+  };
+}
+
+function readWorkerLoopsState(state: OrchestratorWorkerLoopsState | undefined) {
+  return {
+    task: readWorkerLoopState(state?.task),
+    control: readWorkerLoopState(state?.control),
+    reconcile: readWorkerLoopState(state?.reconcile),
+  };
+}
+
+function readWorkerLoopState(state: OrchestratorWorkerLoopsState[keyof OrchestratorWorkerLoopsState] | undefined) {
+  return {
+    running: state?.running ?? false,
+    inFlight: state?.inFlight ?? false,
+    ticks: state?.ticks ?? 0,
+    failures: state?.failures ?? 0,
+    lastError: state?.lastError ?? null,
+    lastResult: state?.lastResult ?? null,
   };
 }
 

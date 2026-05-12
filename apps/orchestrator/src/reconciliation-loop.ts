@@ -27,6 +27,7 @@ export type ReconciliationOptions = {
   readonly staleAfterMs?: number;
   readonly lostAfterMs?: number;
   readonly runtimeProvider?: string;
+  readonly claimSafetyNet?: boolean;
   readonly metrics?: OrchestratorMetricsRecorder;
 };
 
@@ -73,6 +74,22 @@ export async function runReconciliationOnce(options: ReconciliationOptions): Pro
       reconcileStatus: reconcile.status,
       staleCount: 0,
       lostCount: 0,
+      taskClaimed: false,
+      taskNoWork: false,
+      commandClaimed: false,
+      commandNoWork: false,
+    };
+
+    options.metrics?.recordReconciliationRun(result);
+    return result;
+  }
+
+  if (options.claimSafetyNet === false) {
+    const result = {
+      ok: true,
+      reconcileStatus: reconcile.status,
+      staleCount: reconcile.body.stale.length,
+      lostCount: reconcile.body.lost.length,
       taskClaimed: false,
       taskNoWork: false,
       commandClaimed: false,
