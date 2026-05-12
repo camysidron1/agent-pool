@@ -24,6 +24,10 @@ export type QueueEnvelope<TPayload> = {
 
 export type QueueConsumerMessage<TPayload> = QueueEnvelope<TPayload> & {
   readonly attempts: number;
+  readonly lastRetryReason?: string;
+  readonly availableAt?: string;
+  readonly deadLetterReason?: string;
+  readonly deadLetteredAt?: string;
 };
 
 export type QueueConsumerResult =
@@ -49,6 +53,7 @@ export type RabbitMqAdapter = {
   readonly connected: false;
   readonly declaredQueues: readonly ProjectQueueDeclaration[];
   readonly publishedHints: readonly QueueEnvelope<unknown>[];
+  readonly pendingMessages: readonly QueueConsumerMessage<unknown>[];
   readonly deadLetters: readonly QueueConsumerMessage<unknown>[];
   readonly projectQueues: (projectId: string) => ProjectQueueNames;
   readonly declareProjectQueues: (projectId: string) => readonly ProjectQueueDeclaration[];
@@ -100,7 +105,7 @@ export function createProjectQueueDeclarations(config: RabbitMqConfig, projectId
 export function createRabbitMqAdapter(config: RabbitMqConfig): RabbitMqAdapter {
   const state: {
     declarations: ProjectQueueDeclaration[];
-    published: QueueEnvelope<unknown>[];
+    published: QueueConsumerMessage<unknown>[];
     deadLetters: QueueConsumerMessage<unknown>[];
     sequence: number;
   } = {
@@ -118,6 +123,9 @@ export function createRabbitMqAdapter(config: RabbitMqConfig): RabbitMqAdapter {
       return [...state.declarations];
     },
     get publishedHints(): readonly QueueEnvelope<unknown>[] {
+      return state.published.map(stripConsumerMetadata);
+    },
+    get pendingMessages(): readonly QueueConsumerMessage<unknown>[] {
       return [...state.published];
     },
     get deadLetters(): readonly QueueConsumerMessage<unknown>[] {
@@ -157,7 +165,7 @@ export function createRabbitMqAdapter(config: RabbitMqConfig): RabbitMqAdapter {
 
       for (const message of pending) {
         state.published = state.published.filter((candidate) => candidate.id !== message.id);
-        const consumerMessage = { ...message, attempts: 1 } as QueueConsumerMessage<TPayload>;
+        const consumerMessage = { ...message } as QueueConsumerMessage<TPayload>;
         const result = await consumer(consumerMessage);
 
         switch (result.action) {
@@ -170,11 +178,18 @@ export function createRabbitMqAdapter(config: RabbitMqConfig): RabbitMqAdapter {
               ...message,
               id: nextQueueMessageId(state),
               enqueuedAt: deterministicTimestamp(),
+              attempts: message.attempts + 1,
+              lastRetryReason: result.reason,
+              availableAt: deterministicTimestamp(result.delayMs ?? 0),
             });
             break;
           case "dead-letter":
             deadLettered += 1;
-            state.deadLetters.push(consumerMessage as QueueConsumerMessage<unknown>);
+            state.deadLetters.push({
+              ...consumerMessage,
+              deadLetterReason: result.reason,
+              deadLetteredAt: deterministicTimestamp(),
+            } as QueueConsumerMessage<unknown>);
             break;
         }
       }
@@ -191,7 +206,7 @@ export function createRabbitMqAdapter(config: RabbitMqConfig): RabbitMqAdapter {
 }
 
 function publish<TPayload>(
-  state: { sequence: number; published: QueueEnvelope<unknown>[] },
+  state: { sequence: number; published: QueueConsumerMessage<unknown>[] },
   queue: string,
   kind: ProjectQueueKind | "raw",
   payload: TPayload,
@@ -204,8 +219,18 @@ function publish<TPayload>(
     enqueuedAt: deterministicTimestamp(),
   };
 
-  state.published.push(envelope);
+  state.published.push({ ...envelope, attempts: 1 });
   return envelope;
+}
+
+function stripConsumerMetadata(message: QueueConsumerMessage<unknown>): QueueEnvelope<unknown> {
+  return {
+    id: message.id,
+    queue: message.queue,
+    kind: message.kind,
+    payload: message.payload,
+    enqueuedAt: message.enqueuedAt,
+  };
 }
 
 function nextQueueMessageId(state: { sequence: number }): string {
@@ -213,8 +238,8 @@ function nextQueueMessageId(state: { sequence: number }): string {
   return `queue_message_${state.sequence}`;
 }
 
-function deterministicTimestamp(): string {
-  return new Date(0).toISOString();
+function deterministicTimestamp(offsetMs = 0): string {
+  return new Date(offsetMs).toISOString();
 }
 
 function sanitizeProjectId(projectId: string): string {

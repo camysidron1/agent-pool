@@ -6,6 +6,7 @@ import type {
   ClaimNextTaskResponse,
 } from "./backend-client";
 import type { CapacityLimiter } from "./capacity";
+import { createQueueDecisionPolicy, type QueueDecisionPolicy } from "./queue-policy";
 
 export type TaskQueueConsumerBackend = Pick<
   BackendInternalApiClient,
@@ -36,6 +37,7 @@ export type TaskQueueConsumerOptions = {
   readonly sessionIdFactory?: () => string;
   readonly capacityLimiter?: CapacityLimiter;
   readonly capacityRetryDelayMs?: number;
+  readonly queuePolicy?: QueueDecisionPolicy;
 };
 
 export type TaskQueueConsumerRunResult = QueueDrainResult & {
@@ -53,16 +55,13 @@ export async function runTaskQueueConsumerOnce(
   let noWork = 0;
   let startupsSucceeded = 0;
   let startupsFailed = 0;
+  const queuePolicy = options.queuePolicy ?? createQueueDecisionPolicy();
 
   const drain = await options.queue.drainQueue<Readonly<Record<string, unknown>>>(queueName, async (message) => {
     const lease = options.capacityLimiter?.acquire() ?? null;
 
     if (options.capacityLimiter && !lease) {
-      return {
-        action: "retry",
-        reason: "task_capacity_full",
-        delayMs: options.capacityRetryDelayMs ?? 1000,
-      };
+      return queuePolicy.retry(message, "task_capacity_full", options.capacityRetryDelayMs ?? queuePolicy.retryDelayMs);
     }
 
     try {
@@ -73,17 +72,17 @@ export async function runTaskQueueConsumerOnce(
       });
 
       if (!claim.ok || !isClaimNextTaskResponse(claim)) {
-        return { action: "retry", reason: "task_claim_failed" };
+        return queuePolicy.retry(message, "task_claim_failed");
       }
 
       if (!claim.body.claimed) {
         noWork += 1;
-        return { action: "ack" };
+        return queuePolicy.ack();
       }
 
       const sessionId = readStringProperty(claim.body.session, "id");
       if (!sessionId) {
-        return { action: "dead-letter", reason: "claimed_task_missing_session_id" };
+        return queuePolicy.deadLetter("claimed_task_missing_session_id");
       }
 
       claimed += 1;
@@ -102,11 +101,11 @@ export async function runTaskQueueConsumerOnce(
         });
 
         if (!report.ok) {
-          return { action: "retry", reason: "startup_success_report_failed" };
+          return queuePolicy.retry(message, "startup_success_report_failed");
         }
 
         startupsSucceeded += 1;
-        return { action: "ack" };
+        return queuePolicy.ack();
       }
 
       const report = await options.backend.reportStartupFailed({
@@ -116,11 +115,11 @@ export async function runTaskQueueConsumerOnce(
       });
 
       if (!report.ok) {
-        return { action: "retry", reason: "startup_failure_report_failed" };
+        return queuePolicy.retry(message, "startup_failure_report_failed");
       }
 
       startupsFailed += 1;
-      return { action: "ack" };
+      return queuePolicy.ack();
     } finally {
       lease?.release();
     }

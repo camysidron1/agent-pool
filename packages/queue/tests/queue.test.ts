@@ -124,6 +124,14 @@ describe("RabbitMQ queue adapter skeleton", () => {
         payload: { id: "retry" },
       },
     ]);
+    expect(adapter.pendingMessages).toMatchObject([
+      {
+        id: "queue_message_4",
+        attempts: 2,
+        lastRetryReason: "capacity_full",
+        availableAt: "1970-01-01T00:00:01.000Z",
+      },
+    ]);
     expect(adapter.deadLetters).toMatchObject([
       {
         id: "queue_message_3",
@@ -131,6 +139,8 @@ describe("RabbitMQ queue adapter skeleton", () => {
         kind: "task",
         payload: { id: "dead" },
         attempts: 1,
+        deadLetterReason: "invalid_hint",
+        deadLetteredAt: "1970-01-01T00:00:00.000Z",
       },
     ]);
   });

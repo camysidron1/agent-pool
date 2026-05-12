@@ -5,6 +5,7 @@ import type {
   BackendInternalHttpResult,
   ClaimNextCommandResponse,
 } from "./backend-client";
+import { createQueueDecisionPolicy, type QueueDecisionPolicy } from "./queue-policy";
 
 export type ControlQueueConsumerBackend = Pick<
   BackendInternalApiClient,
@@ -28,6 +29,7 @@ export type ControlQueueConsumerOptions = {
   readonly queue: RabbitMqAdapter;
   readonly backend: ControlQueueConsumerBackend;
   readonly commandHandler?: CommandHandler;
+  readonly queuePolicy?: QueueDecisionPolicy;
 };
 
 export type ControlQueueConsumerRunResult = QueueDrainResult & {
@@ -48,22 +50,23 @@ export async function runControlQueueConsumerOnce(
   let commandsStarted = 0;
   let commandsSucceeded = 0;
   let commandsFailed = 0;
+  const queuePolicy = options.queuePolicy ?? createQueueDecisionPolicy();
 
   const drain = await options.queue.drainQueue<Readonly<Record<string, unknown>>>(queueName, async (message) => {
     const claim = await options.backend.claimNextCommand({ projectId: options.projectId });
 
     if (!claim.ok || !isClaimNextCommandResponse(claim)) {
-      return { action: "retry", reason: "command_claim_failed" };
+      return queuePolicy.retry(message, "command_claim_failed");
     }
 
     if (!claim.body.claimed) {
       noWork += 1;
-      return { action: "ack" };
+      return queuePolicy.ack();
     }
 
     const commandId = readStringProperty(claim.body.command, "id");
     if (!commandId) {
-      return { action: "dead-letter", reason: "claimed_command_missing_id" };
+      return queuePolicy.deadLetter("claimed_command_missing_id");
     }
 
     claimed += 1;
@@ -73,7 +76,7 @@ export async function runControlQueueConsumerOnce(
     });
 
     if (!started.ok) {
-      return { action: "retry", reason: "command_started_report_failed" };
+      return queuePolicy.retry(message, "command_started_report_failed");
     }
 
     commandsStarted += 1;
@@ -90,11 +93,11 @@ export async function runControlQueueConsumerOnce(
       });
 
       if (!succeeded.ok) {
-        return { action: "retry", reason: "command_success_report_failed" };
+        return queuePolicy.retry(message, "command_success_report_failed");
       }
 
       commandsSucceeded += 1;
-      return { action: "ack" };
+      return queuePolicy.ack();
     }
 
     const failed = await options.backend.reportCommandFailed({
@@ -104,11 +107,11 @@ export async function runControlQueueConsumerOnce(
     });
 
     if (!failed.ok) {
-      return { action: "retry", reason: "command_failure_report_failed" };
+      return queuePolicy.retry(message, "command_failure_report_failed");
     }
 
     commandsFailed += 1;
-    return { action: "ack" };
+    return queuePolicy.ack();
   });
 
   return {

@@ -48,6 +48,11 @@ export {
   type OrchestratorServerOptions,
 } from "./server";
 export {
+  createQueueDecisionPolicy,
+  type QueueDecisionPolicy,
+  type QueueDecisionPolicyOptions,
+} from "./queue-policy";
+export {
   runTaskQueueConsumerOnce,
   type TaskQueueConsumerBackend,
   type TaskQueueConsumerOptions,
