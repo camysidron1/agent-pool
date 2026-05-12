@@ -1,5 +1,6 @@
 export type AuthMode = "test" | "local" | "external";
 export type StorageAdapterKind = "local" | "blob";
+export type RuntimeProviderName = "fake" | "e2b" | "docker";
 
 export type EnvSource = Readonly<Record<string, string | undefined>>;
 
@@ -43,6 +44,15 @@ export type StorageConfig = {
   readonly bucket: string;
 };
 
+export type ControlPlaneRuntimeConfig = {
+  readonly runtimeProvider: RuntimeProviderName;
+  readonly smokeEnabled: boolean;
+  readonly smokeProjectId: string;
+  readonly workerPollIntervalMs: number;
+  readonly outboxPublishIntervalMs: number;
+  readonly reconcileIntervalMs: number;
+};
+
 export type AppConfig = {
   readonly authMode: AuthMode;
   readonly operator: OperatorIdentity;
@@ -52,6 +62,7 @@ export type AppConfig = {
   readonly orchestrator: OrchestratorServiceConfig;
   readonly rabbitmq: RabbitMqConfig;
   readonly storage: StorageConfig;
+  readonly controlPlane: ControlPlaneRuntimeConfig;
 };
 
 export class ConfigError extends Error {
@@ -76,9 +87,15 @@ export const DEFAULT_BACKEND_INTERNAL_URL = `http://127.0.0.1:${DEFAULT_BACKEND_
 export const DEFAULT_ORCHESTRATOR_URL = `http://127.0.0.1:${DEFAULT_ORCHESTRATOR_PORT}`;
 export const DEFAULT_RABBITMQ_URL = "amqp://127.0.0.1:5672" as const;
 export const DEFAULT_STORAGE_LOCAL_ROOT = ".agent-pool/web-sandbox/storage" as const;
+export const DEFAULT_RUNTIME_PROVIDER = "fake" as const;
+export const DEFAULT_CONTROL_PLANE_SMOKE_PROJECT_ID = "compose-smoke" as const;
+export const DEFAULT_CONTROL_PLANE_WORKER_POLL_INTERVAL_MS = 1000;
+export const DEFAULT_CONTROL_PLANE_OUTBOX_PUBLISH_INTERVAL_MS = 1000;
+export const DEFAULT_CONTROL_PLANE_RECONCILE_INTERVAL_MS = 5000;
 
 const AUTH_MODES = new Set<AuthMode>(["test", "local", "external"]);
 const STORAGE_ADAPTERS = new Set<StorageAdapterKind>(["local", "blob"]);
+const RUNTIME_PROVIDERS = new Set<RuntimeProviderName>(["fake", "e2b", "docker"]);
 
 export function loadConfig(env: EnvSource = readProcessEnv()): AppConfig {
   const authMode = readAuthMode(env.AUTH_MODE);
@@ -114,6 +131,30 @@ export function loadConfig(env: EnvSource = readProcessEnv()): AppConfig {
       adapter: readStorageAdapter(env.STORAGE_ADAPTER),
       localRoot: env.STORAGE_LOCAL_ROOT?.trim() || DEFAULT_STORAGE_LOCAL_ROOT,
       bucket: env.STORAGE_BUCKET?.trim() || "agent-pool-web-sandbox",
+    },
+    controlPlane: {
+      runtimeProvider: readRuntimeProvider(env.RUNTIME_PROVIDER),
+      smokeEnabled: readBoolean(env.COMPOSE_SMOKE_ENABLED, authMode === "test", "COMPOSE_SMOKE_ENABLED"),
+      smokeProjectId: readRequiredIdentifier(
+        env.COMPOSE_SMOKE_PROJECT_ID,
+        DEFAULT_CONTROL_PLANE_SMOKE_PROJECT_ID,
+        "COMPOSE_SMOKE_PROJECT_ID",
+      ),
+      workerPollIntervalMs: readPositiveInteger(
+        env.CONTROL_PLANE_WORKER_POLL_INTERVAL_MS,
+        DEFAULT_CONTROL_PLANE_WORKER_POLL_INTERVAL_MS,
+        "CONTROL_PLANE_WORKER_POLL_INTERVAL_MS",
+      ),
+      outboxPublishIntervalMs: readPositiveInteger(
+        env.CONTROL_PLANE_OUTBOX_PUBLISH_INTERVAL_MS,
+        DEFAULT_CONTROL_PLANE_OUTBOX_PUBLISH_INTERVAL_MS,
+        "CONTROL_PLANE_OUTBOX_PUBLISH_INTERVAL_MS",
+      ),
+      reconcileIntervalMs: readPositiveInteger(
+        env.CONTROL_PLANE_RECONCILE_INTERVAL_MS,
+        DEFAULT_CONTROL_PLANE_RECONCILE_INTERVAL_MS,
+        "CONTROL_PLANE_RECONCILE_INTERVAL_MS",
+      ),
     },
   };
 }
@@ -182,6 +223,42 @@ function readStorageAdapter(value: string | undefined): StorageAdapterKind {
   }
 
   throw new ConfigError(`STORAGE_ADAPTER must be one of: ${Array.from(STORAGE_ADAPTERS).join(", ")}.`);
+}
+
+function readRuntimeProvider(value: string | undefined): RuntimeProviderName {
+  const provider = value?.trim() || DEFAULT_RUNTIME_PROVIDER;
+
+  if (RUNTIME_PROVIDERS.has(provider as RuntimeProviderName)) {
+    return provider as RuntimeProviderName;
+  }
+
+  throw new ConfigError(`RUNTIME_PROVIDER must be one of: ${Array.from(RUNTIME_PROVIDERS).join(", ")}.`);
+}
+
+function readBoolean(value: string | undefined, defaultValue: boolean, name: string): boolean {
+  const raw = value?.trim().toLowerCase();
+  if (!raw) return defaultValue;
+  if (["1", "true", "yes", "on"].includes(raw)) return true;
+  if (["0", "false", "no", "off"].includes(raw)) return false;
+  throw new ConfigError(`${name} must be a boolean value.`);
+}
+
+function readRequiredIdentifier(value: string | undefined, defaultValue: string, name: string): string {
+  const raw = value?.trim() || defaultValue;
+  if (/^[a-zA-Z0-9_-]+$/.test(raw)) return raw;
+  throw new ConfigError(`${name} must contain only letters, numbers, underscores, or hyphens.`);
+}
+
+function readPositiveInteger(value: string | undefined, defaultValue: number, name: string): number {
+  const raw = value?.trim();
+  if (!raw) return defaultValue;
+  const number = Number(raw);
+
+  if (!Number.isInteger(number) || number < 1) {
+    throw new ConfigError(`${name} must be a positive integer.`);
+  }
+
+  return number;
 }
 
 function readPort(value: string | undefined, defaultValue: number, name: string): number {

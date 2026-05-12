@@ -4,8 +4,13 @@ import {
   ConfigError,
   DEFAULT_BACKEND_INTERNAL_URL,
   DEFAULT_BRIDGE_SESSION_TOKEN_HEADER,
+  DEFAULT_CONTROL_PLANE_OUTBOX_PUBLISH_INTERVAL_MS,
+  DEFAULT_CONTROL_PLANE_RECONCILE_INTERVAL_MS,
+  DEFAULT_CONTROL_PLANE_SMOKE_PROJECT_ID,
+  DEFAULT_CONTROL_PLANE_WORKER_POLL_INTERVAL_MS,
   DEFAULT_ORCHESTRATOR_URL,
   DEFAULT_RABBITMQ_URL,
+  DEFAULT_RUNTIME_PROVIDER,
   DEFAULT_SERVICE_TOKEN,
   DEFAULT_SERVICE_TOKEN_HEADER,
   DEFAULT_STORAGE_LOCAL_ROOT,
@@ -46,6 +51,14 @@ describe("loadConfig", () => {
         localRoot: DEFAULT_STORAGE_LOCAL_ROOT,
         bucket: "agent-pool-web-sandbox",
       },
+      controlPlane: {
+        runtimeProvider: DEFAULT_RUNTIME_PROVIDER,
+        smokeEnabled: true,
+        smokeProjectId: DEFAULT_CONTROL_PLANE_SMOKE_PROJECT_ID,
+        workerPollIntervalMs: DEFAULT_CONTROL_PLANE_WORKER_POLL_INTERVAL_MS,
+        outboxPublishIntervalMs: DEFAULT_CONTROL_PLANE_OUTBOX_PUBLISH_INTERVAL_MS,
+        reconcileIntervalMs: DEFAULT_CONTROL_PLANE_RECONCILE_INTERVAL_MS,
+      },
     });
   });
 
@@ -84,6 +97,12 @@ describe("loadConfig", () => {
         STORAGE_ADAPTER: "blob",
         STORAGE_LOCAL_ROOT: "/tmp/agent-pool-storage",
         STORAGE_BUCKET: "agent-pool-test-bucket",
+        RUNTIME_PROVIDER: "docker",
+        COMPOSE_SMOKE_ENABLED: "true",
+        COMPOSE_SMOKE_PROJECT_ID: "project-compose",
+        CONTROL_PLANE_WORKER_POLL_INTERVAL_MS: "250",
+        CONTROL_PLANE_OUTBOX_PUBLISH_INTERVAL_MS: "500",
+        CONTROL_PLANE_RECONCILE_INTERVAL_MS: "1500",
       }),
     ).toEqual({
       authMode: "local",
@@ -120,10 +139,18 @@ describe("loadConfig", () => {
         localRoot: "/tmp/agent-pool-storage",
         bucket: "agent-pool-test-bucket",
       },
+      controlPlane: {
+        runtimeProvider: "docker",
+        smokeEnabled: true,
+        smokeProjectId: "project-compose",
+        workerPollIntervalMs: 250,
+        outboxPublishIntervalMs: 500,
+        reconcileIntervalMs: 1500,
+      },
     });
   });
 
-  test("rejects invalid ports, URLs, and storage adapters", () => {
+  test("rejects invalid ports, URLs, runtime config, and storage adapters", () => {
     expect(() => loadConfig({ AUTH_MODE: "test", API_PORT: "70000" })).toThrow(ConfigError);
     expect(() => loadConfig({ AUTH_MODE: "test", BRIDGE_CALLBACK_BASE_URL: "not-a-url" })).toThrow(ConfigError);
     expect(() =>
@@ -135,5 +162,9 @@ describe("loadConfig", () => {
     ).toThrow("BRIDGE_SESSION_TOKEN_HEADER must be distinct");
     expect(() => loadConfig({ AUTH_MODE: "test", RABBITMQ_URL: "not-a-url" })).toThrow(ConfigError);
     expect(() => loadConfig({ AUTH_MODE: "test", STORAGE_ADAPTER: "s3" })).toThrow(ConfigError);
+    expect(() => loadConfig({ AUTH_MODE: "test", RUNTIME_PROVIDER: "stub" })).toThrow(ConfigError);
+    expect(() => loadConfig({ AUTH_MODE: "test", COMPOSE_SMOKE_ENABLED: "sometimes" })).toThrow(ConfigError);
+    expect(() => loadConfig({ AUTH_MODE: "test", COMPOSE_SMOKE_PROJECT_ID: "../bad" })).toThrow(ConfigError);
+    expect(() => loadConfig({ AUTH_MODE: "test", CONTROL_PLANE_WORKER_POLL_INTERVAL_MS: "0" })).toThrow(ConfigError);
   });
 });

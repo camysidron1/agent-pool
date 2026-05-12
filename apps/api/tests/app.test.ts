@@ -37,6 +37,12 @@ describe("API service skeleton", () => {
         outboxPublisher: { initialized: true, queuedOutbox: 0, publishedOutbox: 0, failedOutbox: 0 },
         storage: { kind: "local" },
       });
+      expect(body.controlPlane).toMatchObject({
+        smokeEnabled: true,
+        smokeProjectId: "compose-smoke",
+        runtimeProvider: "fake",
+        outboxPublishIntervalMs: 1000,
+      });
     } finally {
       await close();
     }

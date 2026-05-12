@@ -56,6 +56,12 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
           bucket: storage.bucket,
         },
       },
+      controlPlane: {
+        smokeEnabled: config.controlPlane.smokeEnabled,
+        smokeProjectId: config.controlPlane.smokeProjectId,
+        runtimeProvider: config.controlPlane.runtimeProvider,
+        outboxPublishIntervalMs: config.controlPlane.outboxPublishIntervalMs,
+      },
     });
   });
 
@@ -72,6 +78,11 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
         queue: queue.kind,
         outboxPublisher: Boolean(outboxPublisher),
         storage: storage.kind,
+      },
+      controlPlane: {
+        smokeEnabled: config.controlPlane.smokeEnabled,
+        smokeProjectId: config.controlPlane.smokeProjectId,
+        runtimeProvider: config.controlPlane.runtimeProvider,
       },
     });
   });

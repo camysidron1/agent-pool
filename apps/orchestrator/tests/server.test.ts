@@ -25,6 +25,13 @@ describe("orchestrator service skeleton", () => {
         queue: { kind: "rabbitmq", connected: false },
         storage: { kind: "local" },
       },
+      controlPlane: {
+        smokeEnabled: true,
+        smokeProjectId: "compose-smoke",
+        runtimeProvider: "fake",
+        workerPollIntervalMs: 1000,
+        reconcileIntervalMs: 5000,
+      },
     });
   });
 

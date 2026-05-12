@@ -44,10 +44,17 @@ export function createOrchestratorFetchHandler(
           storage: {
             kind: storage.kind,
             bucket: storage.bucket,
-          },
         },
-      });
-    }
+      },
+      controlPlane: {
+        smokeEnabled: config.controlPlane.smokeEnabled,
+        smokeProjectId: config.controlPlane.smokeProjectId,
+        runtimeProvider: config.controlPlane.runtimeProvider,
+        workerPollIntervalMs: config.controlPlane.workerPollIntervalMs,
+        reconcileIntervalMs: config.controlPlane.reconcileIntervalMs,
+      },
+    });
+  }
 
     if (url.pathname === "/metrics") {
       return new Response(renderOrchestratorMetrics({ taskQueueName: DEFAULT_PROJECT_TASK_QUEUE, queue, capacityLimiter: options.capacityLimiter, metrics }), {
