@@ -31,6 +31,15 @@ export {
   type BunServe,
   type OrchestratorServerOptions,
 } from "./server";
+export {
+  runTaskQueueConsumerOnce,
+  type TaskQueueConsumerBackend,
+  type TaskQueueConsumerOptions,
+  type TaskQueueConsumerRunResult,
+  type TaskRuntimeStarter,
+  type TaskRuntimeStartupRequest,
+  type TaskRuntimeStartupResult,
+} from "./task-consumer";
 
 if (isDirectRun()) {
   const config = loadConfig(readProcessEnv());
