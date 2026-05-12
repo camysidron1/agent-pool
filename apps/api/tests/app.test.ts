@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { loadConfig } from "@agent-pool/config";
 import { createCanonicalStateServices } from "@agent-pool/db";
+import { createRabbitMqAdapter, type RabbitMqAdapter } from "@agent-pool/queue";
 
 import { createApiApp } from "../src/app";
 import { API_DATABASE_PATH_ENV, openApiDatabase } from "../src/database";
@@ -109,6 +110,239 @@ describe("API service skeleton", () => {
         ok: false,
         error: "missing_project_id",
       });
+    } finally {
+      await close();
+    }
+  });
+
+  test("internal smoke fixture rejects missing or invalid service-token requests without mutation", async () => {
+    const { baseUrl, config, database, close } = await startTestApi();
+
+    try {
+      const missing = await fetch(`${baseUrl}/internal/smoke/seed`, { method: "POST" });
+      const invalid = await fetch(`${baseUrl}/internal/smoke/seed`, {
+        method: "POST",
+        headers: {
+          [config.serviceToken.headerName]: "wrong",
+        },
+      });
+
+      expect(missing.status).toBe(401);
+      expect(await missing.json()).toMatchObject({ ok: false, reason: "missing" });
+      expect(invalid.status).toBe(403);
+      expect(await invalid.json()).toMatchObject({ ok: false, reason: "invalid" });
+      expect(database.sqlite.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM projects").get()?.count).toBe(0);
+    } finally {
+      await close();
+    }
+  });
+
+  test("internal smoke fixture is disabled outside test auth unless smoke mode is explicit", async () => {
+    const disabled = await startTestApi({
+      env: {
+        AUTH_MODE: "local",
+        INTERNAL_SERVICE_TOKEN: "local-service-token",
+        OPERATOR_ID: "operator-local",
+        OPERATOR_EMAIL: "operator@example.test",
+        COMPOSE_SMOKE_ENABLED: "false",
+      },
+    });
+
+    try {
+      const response = await fetch(`${disabled.baseUrl}/internal/smoke/seed`, {
+        method: "POST",
+        headers: {
+          [disabled.config.serviceToken.headerName]: disabled.config.serviceToken.token,
+        },
+      });
+
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ ok: false, error: "smoke_disabled" });
+      expect(disabled.database.sqlite.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM projects").get()?.count).toBe(0);
+    } finally {
+      await disabled.close();
+    }
+
+    const enabled = await startTestApi({
+      env: {
+        AUTH_MODE: "local",
+        INTERNAL_SERVICE_TOKEN: "local-service-token",
+        OPERATOR_ID: "operator-local",
+        OPERATOR_EMAIL: "operator@example.test",
+        COMPOSE_SMOKE_ENABLED: "true",
+      },
+    });
+
+    try {
+      const response = await fetch(`${enabled.baseUrl}/internal/smoke/seed`, {
+        method: "POST",
+        headers: {
+          [enabled.config.serviceToken.headerName]: enabled.config.serviceToken.token,
+        },
+      });
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ ok: true, projectId: "compose-smoke" });
+    } finally {
+      await enabled.close();
+    }
+  });
+
+  test("internal smoke fixture seed is idempotent and status reports control-plane progress", async () => {
+    const { baseUrl, config, database, queue, close } = await startTestApi();
+
+    try {
+      const headers = {
+        "content-type": "application/json",
+        [config.serviceToken.headerName]: config.serviceToken.token,
+      };
+      const firstSeed = await fetch(`${baseUrl}/internal/smoke/seed`, { method: "POST", headers });
+      const firstSeedBody = await firstSeed.json();
+      const secondSeed = await fetch(`${baseUrl}/internal/smoke/seed`, { method: "POST", headers });
+      const secondSeedBody = await secondSeed.json();
+
+      expect(firstSeed.status).toBe(200);
+      expect(firstSeedBody).toMatchObject({
+        ok: true,
+        projectId: "compose-smoke",
+        taskId: "compose-smoke-task-1",
+        created: { project: true, task: true },
+        project: { id: "compose-smoke", slug: "compose-smoke", status: "active" },
+        task: { id: "compose-smoke-task-1", status: "queued" },
+        outbox: { queued: 1, published: 0, failed: 0, total: 1 },
+      });
+      expect(firstSeedBody.queues).toEqual([
+        {
+          projectId: "compose-smoke",
+          kind: "task",
+          queue: "project-tasks.compose-smoke",
+          durable: true,
+        },
+        {
+          projectId: "compose-smoke",
+          kind: "control",
+          queue: "project-control.compose-smoke",
+          durable: true,
+        },
+      ]);
+      expect(secondSeed.status).toBe(200);
+      expect(secondSeedBody).toMatchObject({
+        ok: true,
+        created: { project: false, task: false },
+        outbox: { queued: 1, published: 0, failed: 0, total: 1 },
+      });
+      expect(queue.declaredQueues).toEqual(firstSeedBody.queues);
+
+      const claim = await fetch(`${baseUrl}/internal/orchestrator/tasks/claim-next`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ projectId: "compose-smoke", sessionId: "session_smoke", runtimeProvider: "fake" }),
+      });
+      const claimBody = await claim.json();
+      expect(claimBody).toMatchObject({ ok: true, claimed: true, task: { id: "compose-smoke-task-1" } });
+
+      const bridge = claimBody.session.bridge;
+      const callbackHeaders = {
+        "content-type": "application/json",
+        [bridge.sessionToken.headerName]: bridge.sessionToken.token,
+      };
+      const startupSucceeded = await fetch(`${baseUrl}/internal/orchestrator/sessions/session_smoke/startup-succeeded`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          projectId: "compose-smoke",
+          runtimeSessionId: "runtime_smoke",
+        }),
+      });
+      expect(startupSucceeded.status).toBe(200);
+
+      await expect(
+        postBridgeCallback(baseUrl, "heartbeat", callbackHeaders, {
+          kind: "heartbeat",
+          projectId: "compose-smoke",
+          taskId: "compose-smoke-task-1",
+          sessionId: "session_smoke",
+          observedAt: "2026-05-12T12:00:00.000Z",
+        }),
+      ).resolves.toMatchObject({ status: 200 });
+      await expect(
+        postBridgeCallback(baseUrl, "output", callbackHeaders, {
+          kind: "output",
+          projectId: "compose-smoke",
+          taskId: "compose-smoke-task-1",
+          sessionId: "session_smoke",
+          stream: "stdout",
+          sequence: 1,
+          byteOffset: 0,
+          text: "smoke ok\n",
+        }),
+      ).resolves.toMatchObject({ status: 200 });
+      await expect(
+        postBridgeCallback(baseUrl, "document", callbackHeaders, {
+          kind: "document",
+          projectId: "compose-smoke",
+          taskId: "compose-smoke-task-1",
+          sessionId: "session_smoke",
+          path: "agent-docs/smoke-result.md",
+          title: "smoke-result.md",
+        }),
+      ).resolves.toMatchObject({ status: 200 });
+      await expect(
+        postBridgeCallback(baseUrl, "final_response", callbackHeaders, {
+          kind: "final_response",
+          projectId: "compose-smoke",
+          taskId: "compose-smoke-task-1",
+          sessionId: "session_smoke",
+          text: "Smoke result https://example.test/smoke",
+        }),
+      ).resolves.toMatchObject({ status: 200 });
+      await expect(
+        postBridgeCallback(baseUrl, "completion", callbackHeaders, {
+          kind: "completion",
+          projectId: "compose-smoke",
+          taskId: "compose-smoke-task-1",
+          sessionId: "session_smoke",
+        }),
+      ).resolves.toMatchObject({ status: 200 });
+      await expect(
+        postBridgeCallback(baseUrl, "cleanup", callbackHeaders, {
+          kind: "cleanup",
+          projectId: "compose-smoke",
+          taskId: "compose-smoke-task-1",
+          sessionId: "session_smoke",
+          reason: "smoke completed",
+        }),
+      ).resolves.toMatchObject({ status: 200 });
+
+      const status = await fetch(`${baseUrl}/internal/smoke/status`, { headers });
+      const statusBody = await status.json();
+
+      expect(status.status).toBe(200);
+      expect(statusBody).toMatchObject({
+        ok: true,
+        projectId: "compose-smoke",
+        taskId: "compose-smoke-task-1",
+        task: { id: "compose-smoke-task-1", status: "completed" },
+        sessions: {
+          total: 1,
+          succeeded: 1,
+          latest: {
+            id: "session_smoke",
+            status: "succeeded",
+            runtimeProvider: "fake",
+            runtimeSessionId: "runtime_smoke",
+          },
+        },
+        heartbeat: { fresh: 1, latestAt: "2026-05-12T12:00:00.000Z" },
+        output: { events: 1, totalLineCount: 1 },
+        artifacts: { documents: 1, finalResponseUrls: 1 },
+        finalResponse: { recorded: true, sessions: 1, artifacts: 1 },
+        completion: { completed: true, events: 1 },
+        failure: { failed: false, events: 0 },
+        cleanup: { completed: true, events: 1 },
+      });
+      expect(statusBody.outbox.total).toBeGreaterThan(1);
+      expect(database.sqlite.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM tasks WHERE project_id = 'compose-smoke'").get()?.count).toBe(1);
     } finally {
       await close();
     }
@@ -1167,10 +1401,28 @@ async function postReconcile(
   });
 }
 
-async function startTestApi(options: { readonly outboxPublisherLoop?: OutboxPublisherLoop } = {}): Promise<{
+async function postBridgeCallback(
+  baseUrl: string,
+  kind: string,
+  headers: HeadersInit,
+  body: Readonly<Record<string, unknown>>,
+): Promise<Response> {
+  return fetch(`${baseUrl}/callbacks/${kind}`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+}
+
+async function startTestApi(options: {
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly outboxPublisherLoop?: OutboxPublisherLoop;
+  readonly queue?: RabbitMqAdapter;
+} = {}): Promise<{
   readonly baseUrl: string;
   readonly config: ReturnType<typeof loadConfig>;
   readonly database: ReturnType<typeof openApiDatabase>;
+  readonly queue: RabbitMqAdapter;
   readonly close: () => Promise<void>;
 }> {
   const tempDir = await mkdtemp(join(tmpdir(), "agent-pool-api-app-"));
@@ -1180,10 +1432,12 @@ async function startTestApi(options: { readonly outboxPublisherLoop?: OutboxPubl
     AUTH_MODE: "test",
     HOME: join(tempDir, "home"),
     [API_DATABASE_PATH_ENV]: dbPath,
+    ...options.env,
   };
   const config = loadConfig(env);
   const database = openApiDatabase(env);
-  const app = createApiApp({ config, database, outboxPublisherLoop: options.outboxPublisherLoop });
+  const queue = options.queue ?? createRabbitMqAdapter(config.rabbitmq);
+  const app = createApiApp({ config, database, queue, outboxPublisherLoop: options.outboxPublisherLoop });
   const server = app.listen(0);
   const address = server.address();
 
@@ -1195,6 +1449,7 @@ async function startTestApi(options: { readonly outboxPublisherLoop?: OutboxPubl
     baseUrl: `http://127.0.0.1:${address.port}`,
     config,
     database,
+    queue,
     async close() {
       await new Promise<void>((resolve, reject) => {
         server.close((error?: Error) => {

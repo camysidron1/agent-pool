@@ -2,14 +2,17 @@ import express, { type Express, type Request, type Response, type NextFunction }
 
 import { verifyServiceTokenValue } from "@agent-pool/auth";
 import { type AppConfig, loadConfig } from "@agent-pool/config";
-import { createCanonicalStateServices } from "@agent-pool/db";
 import { createRabbitMqAdapter, type RabbitMqAdapter } from "@agent-pool/queue";
 import { SHARED_PACKAGE_NAME } from "@agent-pool/shared";
 import { createStorageAdapter, type StorageAdapter } from "@agent-pool/storage";
 
+import { createApiBackendServices } from "./backend-services";
 import type { ApiDatabaseConnection } from "./database";
 import { createOutboxPublisher, type OutboxPublisher } from "./outbox-publisher";
 import type { OutboxPublisherLoop } from "./outbox-publisher-loop";
+import { isSmokeFixtureEnabled, readSmokeFixtureStatus, seedSmokeFixture } from "./smoke-fixture";
+
+type ApiBackendServices = ReturnType<typeof createApiBackendServices>;
 
 export type ApiAppOptions = {
   readonly config?: AppConfig;
@@ -27,7 +30,7 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
   const storage = options.storage ?? createStorageAdapter(config.storage);
   const outboxPublisher = options.outboxPublisher ?? (database ? createOutboxPublisher({ database, queue }) : null);
   const outboxPublisherLoop = options.outboxPublisherLoop ?? null;
-  const services = database ? createCanonicalStateServices(database.sqlite) : null;
+  const services = database ? createApiBackendServices({ database, queue }) : null;
   const app = express();
   const requireInternalServiceToken = createInternalServiceTokenMiddleware(config);
 
@@ -92,6 +95,33 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
         runtimeProvider: config.controlPlane.runtimeProvider,
       },
     });
+  });
+
+  app.post("/internal/smoke/seed", requireInternalServiceToken, async (_request, response) => {
+    if (!services || !database) {
+      response.status(503).json({ ok: false, error: "database_unavailable" });
+      return;
+    }
+    if (!isSmokeFixtureEnabled(config)) {
+      response.status(404).json({ ok: false, error: "smoke_disabled" });
+      return;
+    }
+
+    const result = await seedSmokeFixture({ config, database, queue, services });
+    response.status(200).json({ ok: true, ...result });
+  });
+
+  app.get("/internal/smoke/status", requireInternalServiceToken, (_request, response) => {
+    if (!database) {
+      response.status(503).json({ ok: false, error: "database_unavailable" });
+      return;
+    }
+    if (!isSmokeFixtureEnabled(config)) {
+      response.status(404).json({ ok: false, error: "smoke_disabled" });
+      return;
+    }
+
+    response.status(200).json({ ok: true, ...readSmokeFixtureStatus({ config, database }) });
   });
 
   app.post("/internal/orchestrator/tasks/claim-next", requireInternalServiceToken, (request, response) => {
@@ -238,7 +268,7 @@ function createInternalServiceTokenMiddleware(config: AppConfig) {
 
 function respondWithCommandReport(
   response: Response,
-  services: ReturnType<typeof createCanonicalStateServices> | null,
+  services: ApiBackendServices | null,
   request: Request,
   report: "started" | "succeeded" | "failed",
 ): void {
@@ -284,7 +314,7 @@ function respondWithCommandReport(
 
 function respondWithStartupReport(
   response: Response,
-  services: ReturnType<typeof createCanonicalStateServices> | null,
+  services: ApiBackendServices | null,
   request: Request,
   report: "succeeded" | "failed",
 ): void {
@@ -331,7 +361,7 @@ function respondWithStartupReport(
 
 function respondWithSessionHeartbeat(
   response: Response,
-  services: ReturnType<typeof createCanonicalStateServices> | null,
+  services: ApiBackendServices | null,
   request: Request,
 ): void {
   if (!services) {
@@ -373,7 +403,7 @@ function respondWithSessionHeartbeat(
 
 function respondWithReconcile(
   response: Response,
-  services: ReturnType<typeof createCanonicalStateServices> | null,
+  services: ApiBackendServices | null,
   request: Request,
 ): void {
   if (!services) {
@@ -407,7 +437,7 @@ function respondWithReconcile(
 
 function respondWithBridgeCallback(
   response: Response,
-  services: ReturnType<typeof createCanonicalStateServices> | null,
+  services: ApiBackendServices | null,
   request: Request,
 ): void {
   if (!services) {
