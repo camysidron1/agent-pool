@@ -9,13 +9,17 @@ services:
       API_PORT: "3000"
       API_PUBLIC_URL: http://localhost:3000
       API_INTERNAL_URL: http://api:3000
+      BRIDGE_CALLBACK_BASE_URL: http://api:3000
       AGENT_POOL_WEB_SANDBOX_DB_PATH: /data/web-sandbox.db
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      RABBITMQ_MANAGEMENT_URL: http://guest:guest@rabbitmq:15672
       RABBITMQ_PROJECT_TASK_QUEUE_PREFIX: project-tasks
       RABBITMQ_PROJECT_CONTROL_QUEUE_PREFIX: project-control
       STORAGE_ADAPTER: blob
       STORAGE_BUCKET: agent-pool-local
       STORAGE_LOCAL_ROOT: /data/storage
+      COMPOSE_SMOKE_ENABLED: "true"
+      COMPOSE_SMOKE_PROJECT_ID: compose-smoke
     ports:
       - "3000:3000"
     volumes:
@@ -27,6 +31,11 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:3000/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   orchestrator:
     image: oven/bun:1.2.23
@@ -39,12 +48,17 @@ services:
       ORCHESTRATOR_PUBLIC_URL: http://localhost:3001
       ORCHESTRATOR_BACKEND_INTERNAL_URL: http://api:3000
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      RABBITMQ_MANAGEMENT_URL: http://guest:guest@rabbitmq:15672
       RABBITMQ_PROJECT_TASK_QUEUE_PREFIX: project-tasks
       RABBITMQ_PROJECT_CONTROL_QUEUE_PREFIX: project-control
       STORAGE_ADAPTER: blob
       STORAGE_BUCKET: agent-pool-local
       STORAGE_LOCAL_ROOT: /workspace/.agent-pool/web-sandbox/storage
-      RUNTIME_PROVIDER: stub
+      RUNTIME_PROVIDER: fake
+      COMPOSE_SMOKE_ENABLED: "true"
+      COMPOSE_SMOKE_PROJECT_ID: compose-smoke
+      CONTROL_PLANE_WORKER_POLL_INTERVAL_MS: "1000"
+      CONTROL_PLANE_RECONCILE_INTERVAL_MS: "5000"
     ports:
       - "3001:3001"
     volumes:
@@ -52,11 +66,16 @@ services:
       - bun-cache:/root/.bun
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
       minio:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:3001/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
@@ -96,8 +115,15 @@ services:
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
     depends_on:
-      - api
-      - orchestrator
+      api:
+        condition: service_healthy
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:9090/-/healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
 volumes:
   api-data:
