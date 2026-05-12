@@ -27,6 +27,7 @@ export type ComposeSmokeCliOptions = {
   readonly cwd?: string;
   readonly write?: (text: string) => void;
   readonly runCommand?: (command: readonly string[], options: { readonly cwd: string }) => Promise<void>;
+  readonly runCommandOutput?: (command: readonly string[], options: { readonly cwd: string }) => Promise<string>;
   readonly fetch?: typeof fetch;
   readonly sleep?: (ms: number) => Promise<void>;
   readonly now?: () => number;
@@ -78,7 +79,11 @@ export function createComposeSmokePlan(input: Partial<ParsedComposeSmokeArgs> & 
       },
       {
         label: "tear down compose stack",
-        command: ["docker", "compose", "-f", composeFile, "-p", projectName, "down", "-v", "--remove-orphans"],
+        command: ["docker", "compose", "-f", composeFile, "-p", projectName, "down", "--timeout", "15", "-v", "--remove-orphans"],
+      },
+      {
+        label: "collect compose logs",
+        command: ["docker", "compose", "-f", composeFile, "-p", projectName, "logs", "--no-color", "--tail", "200"],
       },
     ],
     readiness: [
@@ -103,7 +108,10 @@ export async function runComposeSmokeCli(args: readonly string[] = process.argv.
   }
 
   const runCommand = options.runCommand ?? runSubprocess;
+  const runCommandOutput = options.runCommandOutput ?? runSubprocessOutput;
   const fetchImpl = options.fetch ?? fetch;
+  let exitCode = 0;
+  let failure: unknown = null;
 
   try {
     await runCommand(plan.commands[0].command, { cwd });
@@ -112,12 +120,27 @@ export async function runComposeSmokeCli(args: readonly string[] = process.argv.
     const status = await waitForSmokeCompletion(plan, fetchImpl, options);
     const prometheus = await waitForPrometheusVerification(plan, fetchImpl, options);
     write(`${JSON.stringify({ ok: true, status, prometheus }, null, 2)}\n`);
-    return 0;
+  } catch (error) {
+    exitCode = 1;
+    failure = error;
+    const diagnostics = await collectFailureDiagnostics(plan, fetchImpl, runCommandOutput, cwd);
+    write(`${JSON.stringify({ ok: false, error: errorMessage(error), diagnostics }, null, 2)}\n`);
   } finally {
     if (plan.teardown) {
-      await runCommand(plan.commands[1].command, { cwd });
+      try {
+        await runCommand(plan.commands[1].command, { cwd });
+      } catch (error) {
+        if (failure) {
+          write(`${JSON.stringify({ ok: false, teardownError: errorMessage(error) }, null, 2)}\n`);
+        } else {
+          exitCode = 1;
+          write(`${JSON.stringify({ ok: false, error: errorMessage(error) }, null, 2)}\n`);
+        }
+      }
     }
   }
+
+  return exitCode;
 }
 
 export function parseComposeSmokeArgs(args: readonly string[]): ParsedComposeSmokeArgs {
@@ -336,6 +359,53 @@ async function waitForPrometheusVerification(
   throw new Error(`timed out waiting for Prometheus verification: ${lastError}`);
 }
 
+export type SmokeFailureDiagnostics = {
+  readonly statusSnapshot: unknown;
+  readonly logs: string;
+  readonly logCommand: readonly string[];
+};
+
+export async function collectFailureDiagnostics(
+  plan: ComposeSmokePlan,
+  fetchImpl: typeof fetch,
+  runCommandOutput: (command: readonly string[], options: { readonly cwd: string }) => Promise<string>,
+  cwd: string,
+): Promise<SmokeFailureDiagnostics> {
+  const statusSnapshot = await fetchSmokeStatusSnapshot(plan, fetchImpl);
+  const logCommand = plan.commands.find((command) => command.label === "collect compose logs")?.command ?? [];
+  const logs = logCommand.length > 0
+    ? await runCommandOutput(logCommand, { cwd }).catch((error) => `failed to collect compose logs: ${errorMessage(error)}`)
+    : "compose log command unavailable";
+
+  return {
+    statusSnapshot,
+    logs,
+    logCommand,
+  };
+}
+
+async function fetchSmokeStatusSnapshot(plan: ComposeSmokePlan, fetchImpl: typeof fetch): Promise<unknown> {
+  try {
+    const response = await fetchImpl(`${plan.apiUrl}/internal/smoke/status`, {
+      headers: {
+        "x-agent-pool-service-token": plan.serviceToken,
+      },
+    });
+    const text = await response.text();
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      body: parseJsonOrText(text),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: errorMessage(error),
+    };
+  }
+}
+
 async function fetchPrometheusTargets(url: string, fetchImpl: typeof fetch): Promise<PrometheusVerification["targets"]> {
   const response = await fetchImpl(url);
   if (!response.ok) {
@@ -413,6 +483,26 @@ async function runSubprocess(command: readonly string[], options: { readonly cwd
   }
 }
 
+async function runSubprocessOutput(command: readonly string[], options: { readonly cwd: string }): Promise<string> {
+  const process = Bun.spawn(command, {
+    cwd: options.cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [status, stdout, stderr] = await Promise.all([
+    process.exited,
+    new Response(process.stdout).text(),
+    new Response(process.stderr).text(),
+  ]);
+  const output = [stdout, stderr].filter(Boolean).join("\n");
+
+  if (status !== 0) {
+    throw new Error(`command failed (${status}): ${command.join(" ")}${output ? `\n${output}` : ""}`);
+  }
+
+  return output;
+}
+
 function readFlagValue(args: readonly string[], index: number, flag: string): string {
   const value = args[index];
   if (!value) throw new Error(`${flag} requires a value`);
@@ -433,6 +523,18 @@ function trimTrailingSlash(value: string): string {
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseJsonOrText(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 if (import.meta.main) {

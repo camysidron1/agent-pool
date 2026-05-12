@@ -27,7 +27,8 @@ describe("compose smoke runner", () => {
     expect(plan.timeoutMs).toBe(42_000);
     expect(plan.commands.map((command) => command.command.join(" "))).toEqual([
       "docker compose -f /repo/deploy/compose/docker-compose.yml -p agent-pool-test up -d --wait",
-      "docker compose -f /repo/deploy/compose/docker-compose.yml -p agent-pool-test down -v --remove-orphans",
+      "docker compose -f /repo/deploy/compose/docker-compose.yml -p agent-pool-test down --timeout 15 -v --remove-orphans",
+      "docker compose -f /repo/deploy/compose/docker-compose.yml -p agent-pool-test logs --no-color --tail 200",
     ]);
     expect(JSON.stringify(plan)).not.toContain(".agent-pool/data/agent-pool.db");
     expect(plan.readiness.map((endpoint) => endpoint.label)).toEqual([
@@ -64,6 +65,7 @@ describe("compose smoke runner", () => {
       commands: [
         { label: "boot compose stack" },
         { label: "tear down compose stack" },
+        { label: "collect compose logs" },
       ],
       readiness: [
         { label: "api health" },
@@ -163,5 +165,45 @@ describe("compose smoke runner", () => {
       "/api/v1/query?query=agent_pool_orchestrator_task_consumer_runs_total",
       "/api/v1/query?query=agent_pool_orchestrator_task_claim_total",
     ]);
+  });
+
+  test("captures failure diagnostics and still tears down without masking the original error", async () => {
+    const writes: string[] = [];
+    const commands: string[] = [];
+    const code = await runComposeSmokeCli(["--timeout-ms", "1000"], {
+      cwd: "/repo",
+      write: (text) => writes.push(text),
+      runCommand: async (command) => {
+        commands.push(command.join(" "));
+        if (command.includes("up")) {
+          throw new Error("compose boot failed");
+        }
+      },
+      runCommandOutput: async (command) => {
+        expect(command.join(" ")).toBe(
+          "docker compose -f /repo/deploy/compose/docker-compose.yml -p agent-pool-compose-smoke logs --no-color --tail 200",
+        );
+        return "api-1 | startup failed\norchestrator-1 | waiting";
+      },
+      fetch: async (input) => {
+        expect(String(input)).toBe("http://127.0.0.1:3000/internal/smoke/status");
+        return Response.json({ ok: true, task: { status: "queued" } });
+      },
+    });
+    const payloads = writes.map((write) => JSON.parse(write));
+
+    expect(code).toBe(1);
+    expect(commands).toEqual([
+      "docker compose -f /repo/deploy/compose/docker-compose.yml -p agent-pool-compose-smoke up -d --wait",
+      "docker compose -f /repo/deploy/compose/docker-compose.yml -p agent-pool-compose-smoke down --timeout 15 -v --remove-orphans",
+    ]);
+    expect(payloads[0]).toMatchObject({
+      ok: false,
+      error: "compose boot failed",
+      diagnostics: {
+        statusSnapshot: { ok: true, status: 200, body: { ok: true, task: { status: "queued" } } },
+        logs: "api-1 | startup failed\norchestrator-1 | waiting",
+      },
+    });
   });
 });
