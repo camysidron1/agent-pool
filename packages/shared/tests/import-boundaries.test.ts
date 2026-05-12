@@ -35,6 +35,22 @@ const RULES: readonly BoundaryRule[] = [
     ],
     forbiddenImports: ["@agent-pool/db"],
   },
+  {
+    name: "session bridge stays isolated from app, backend db, and runtime provider code",
+    roots: ["packages/session-bridge/src"],
+    forbiddenImports: [
+      "@agent-pool/db",
+      "@agent-pool/runtime",
+      "apps/api",
+      "apps/web",
+      "apps/orchestrator",
+      "../../apps/api",
+      "../../apps/web",
+      "../../apps/orchestrator",
+      "../db",
+      "../runtime",
+    ],
+  },
 ];
 
 describe("import boundaries", () => {

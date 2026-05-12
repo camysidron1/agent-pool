@@ -17,6 +17,7 @@
       "@agent-pool/db": ["packages/db/src/index.ts"],
       "@agent-pool/queue": ["packages/queue/src/index.ts"],
       "@agent-pool/runtime": ["packages/runtime/src/index.ts"],
+      "@agent-pool/session-bridge": ["packages/session-bridge/src/index.ts"],
       "@agent-pool/shared": ["packages/shared/src/index.ts"],
       "@agent-pool/storage": ["packages/storage/src/index.ts"]
     }
@@ -32,6 +33,7 @@
     "packages/db/src/**/*.ts",
     "packages/queue/src/**/*.ts",
     "packages/runtime/src/**/*.ts",
+    "packages/session-bridge/src/**/*.ts",
     "packages/shared/src/**/*.ts",
     "packages/storage/src/**/*.ts"
   ]
