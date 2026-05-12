@@ -137,6 +137,15 @@ export {
   type BridgeEventDeadLetterRecord,
 } from "./event-buffer";
 export {
+  createBridgeFinalResponseCapture,
+  extractFinalResponseUrls,
+  type BridgeFinalResponseCapture,
+  type BridgeFinalResponseCaptureInput,
+  type BridgeFinalResponseCaptureOptions,
+  type BridgeFinalResponseCaptureResult,
+  type BridgeTranscriptMessage,
+} from "./final-response";
+export {
   createBridgeHeartbeatLoop,
   type BridgeHeartbeatFailure,
   type BridgeHeartbeatLoop,
