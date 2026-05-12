@@ -158,6 +158,12 @@ export {
   type BridgeOutputFailure,
 } from "./output-capture";
 export {
+  createBridgeSteeringPoller,
+  type BridgeSteeringPoller,
+  type BridgeSteeringPollerOptions,
+  type BridgeSteeringPollOnceResult,
+} from "./steering-poller";
+export {
   createTestBridgeCallbackServer,
   type TestBridgeCallbackServer,
   type TestBridgeCallbackServerOptions,
