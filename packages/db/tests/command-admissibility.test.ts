@@ -81,6 +81,73 @@ describe("command admissibility helpers", () => {
     }
   });
 
+  test("atomically claims queued commands in creation order and returns no-work when drained", () => {
+    const database = createSeededMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      const first = services.requestCommand({
+        id: "command_stop",
+        projectId: "project_a",
+        taskId: "task_running",
+        sessionId: "session_running",
+        type: "stop",
+        payload: { reason: "manual" },
+      });
+      const second = services.requestCommand({ id: "command_cancel", projectId: "project_a", taskId: "task_queued", type: "cancel" });
+      expect(first.ok).toBe(true);
+      expect(second.ok).toBe(true);
+
+      const claimed = services.claimNextCommand({ projectId: "project_a" });
+      const next = services.claimNextCommand({ projectId: "project_a" });
+      const noWork = services.claimNextCommand({ projectId: "project_a" });
+
+      expect(claimed).toMatchObject({
+        ok: true,
+        command: {
+          id: "command_stop",
+          projectId: "project_a",
+          taskId: "task_running",
+          sessionId: "session_running",
+          type: "stop",
+          status: "running",
+          payload: { reason: "manual" },
+        },
+        event: { projectId: "project_a", type: "command.claimed" },
+        outbox: { projectId: "project_a", routingKey: "project.project_a.control" },
+      });
+      expect(next).toMatchObject({ ok: true, command: { id: "command_cancel", status: "running", payload: {} } });
+      expect(noWork).toEqual({ ok: false, reason: "no_queued_command" });
+      expect(
+        database.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM orchestrator_commands WHERE id = 'command_cancel' AND status = 'running'").get()
+          ?.count,
+      ).toBe(1);
+    } finally {
+      database.close();
+    }
+  });
+
+  test("repeated command claims never duplicate the same queued command", () => {
+    const database = createSeededMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      const requested = services.requestCommand({ id: "command_cancel", projectId: "project_a", taskId: "task_queued", type: "cancel" });
+      expect(requested.ok).toBe(true);
+
+      const first = services.claimNextCommand({ projectId: "project_a" });
+      const second = services.claimNextCommand({ projectId: "project_a" });
+
+      expect(first).toMatchObject({ ok: true, command: { id: "command_cancel" } });
+      expect(second).toEqual({ ok: false, reason: "no_queued_command" });
+      expect(countRows(database, "orchestrator_commands")).toBe(1);
+      expect(countRows(database, "events")).toBe(2);
+      expect(countRows(database, "outbox")).toBe(2);
+    } finally {
+      database.close();
+    }
+  });
+
   test("rejects missing command scope", () => {
     const database = createSeededMemoryDatabase();
 
