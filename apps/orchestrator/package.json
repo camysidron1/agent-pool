@@ -18,6 +18,7 @@
     "@agent-pool/auth": "workspace:*",
     "@agent-pool/config": "workspace:*",
     "@agent-pool/queue": "workspace:*",
+    "@agent-pool/runtime": "workspace:*",
     "@agent-pool/shared": "workspace:*",
     "@agent-pool/storage": "workspace:*"
   }

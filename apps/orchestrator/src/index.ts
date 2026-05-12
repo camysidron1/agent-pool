@@ -73,6 +73,10 @@ export {
   type ReconciliationScheduler,
 } from "./reconciliation-loop";
 export {
+  createRuntimeStarter,
+  type RuntimeStarterOptions,
+} from "./runtime-starter";
+export {
   runTaskQueueConsumerOnce,
   type TaskQueueConsumerBackend,
   type TaskQueueConsumerOptions,
