@@ -19,7 +19,7 @@ const RULES: readonly BoundaryRule[] = [
   {
     name: "orchestrator does not import backend-owned db package",
     roots: ["apps/orchestrator/src"],
-    forbiddenImports: ["@agent-pool/db"],
+    forbiddenImports: ["@agent-pool/db", "bun:sqlite", "drizzle-orm"],
   },
   {
     name: "non-api production source does not import backend-owned db package",
@@ -33,7 +33,7 @@ const RULES: readonly BoundaryRule[] = [
       "packages/shared/src",
       "packages/storage/src",
     ],
-    forbiddenImports: ["@agent-pool/db"],
+    forbiddenImports: ["@agent-pool/db", "bun:sqlite", "drizzle-orm"],
   },
   {
     name: "session bridge stays isolated from app, backend db, and runtime provider code",
@@ -67,7 +67,44 @@ describe("import boundaries", () => {
       expect(violations).toEqual([]);
     });
   }
+
+  test("non-api production source does not construct or open the backend database", async () => {
+    const roots = [
+      "apps/orchestrator/src",
+      "apps/web/src",
+      "packages/auth/src",
+      "packages/config/src",
+      "packages/queue/src",
+      "packages/runtime/src",
+      "packages/session-bridge/src",
+      "packages/shared/src",
+      "packages/storage/src",
+    ];
+    const violations: string[] = [];
+
+    for (const root of roots) {
+      for (const filePath of await listSourceFiles(root)) {
+        const contents = await readFile(filePath, "utf8");
+
+        for (const pattern of DB_CONNECTION_PATTERNS) {
+          if (pattern.pattern.test(contents)) {
+            violations.push(`${relative(process.cwd(), filePath)} contains ${pattern.name}`);
+          }
+        }
+      }
+    }
+
+    expect(violations.sort()).toEqual([]);
+  });
 });
+
+const DB_CONNECTION_PATTERNS: readonly { readonly name: string; readonly pattern: RegExp }[] = [
+  { name: "openWebSandboxDatabase", pattern: /\bopenWebSandboxDatabase\s*\(/ },
+  { name: "createWebSandboxDatabaseConfig", pattern: /\bcreateWebSandboxDatabaseConfig\s*\(/ },
+  { name: "migrateWebSandboxDatabase", pattern: /\bmigrateWebSandboxDatabase\s*\(/ },
+  { name: "createDrizzleDatabase", pattern: /\bcreateDrizzleDatabase\s*\(/ },
+  { name: "new Database", pattern: /\bnew\s+Database\s*\(/ },
+];
 
 async function collectViolations(rule: BoundaryRule): Promise<string[]> {
   const violations: string[] = [];

@@ -726,6 +726,243 @@ describe("API service skeleton", () => {
     }
   });
 
+  test("bridge duplicate callbacks are idempotent or safely rejected without duplicate state mutation", async () => {
+    const { baseUrl, config, database, close } = await startTestApi();
+
+    async function claimTask(taskId: string, sessionId: string) {
+      const response = await fetch(`${baseUrl}/internal/orchestrator/tasks/claim-next`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+        body: JSON.stringify({ projectId: "project_duplicates", sessionId, runtimeProvider: "fake" }),
+      });
+      const body = await response.json();
+      expect(body).toMatchObject({ ok: true, claimed: true, task: { id: taskId }, session: { id: sessionId } });
+      return body.session.bridge;
+    }
+
+    async function postCallback(
+      kind: string,
+      bridge: { readonly sessionToken: { readonly headerName: string; readonly token: string } },
+      body: Readonly<Record<string, unknown>>,
+      token = bridge.sessionToken.token,
+    ) {
+      return fetch(`${baseUrl}/callbacks/${kind}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [bridge.sessionToken.headerName]: token,
+        },
+        body: JSON.stringify(body),
+      });
+    }
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      services.createProject({ id: "project_duplicates", slug: "project-duplicates", name: "Duplicates" });
+      services.createTask({ id: "task_complete", projectId: "project_duplicates", title: "Complete" });
+      services.createTask({ id: "task_fail", projectId: "project_duplicates", title: "Fail" });
+
+      const completeBridge = await claimTask("task_complete", "session_complete");
+      expect(
+        services.reportStartupSucceeded({
+          projectId: "project_duplicates",
+          sessionId: "session_complete",
+          runtimeSessionId: "runtime_complete",
+        }),
+      ).toMatchObject({ ok: true });
+
+      const heartbeatBody = {
+        kind: "heartbeat",
+        projectId: "project_duplicates",
+        taskId: "task_complete",
+        sessionId: "session_complete",
+        observedAt: "2026-05-12T12:00:00.000Z",
+      };
+      const outputBody = {
+        kind: "output",
+        projectId: "project_duplicates",
+        taskId: "task_complete",
+        sessionId: "session_complete",
+        stream: "stdout",
+        sequence: 1,
+        byteOffset: 0,
+        text: "hello\n",
+        observedAt: "2026-05-12T12:00:01.000Z",
+      };
+      const documentBody = {
+        kind: "document",
+        projectId: "project_duplicates",
+        taskId: "task_complete",
+        sessionId: "session_complete",
+        path: "agent-docs/result.md",
+        title: "result.md",
+        contentType: "text/markdown",
+        sizeBytes: 6,
+      };
+      const finalResponseBody = {
+        kind: "final_response",
+        projectId: "project_duplicates",
+        taskId: "task_complete",
+        sessionId: "session_complete",
+        text: "Done https://example.test/duplicate",
+        metadata: { model: "fake" },
+        urlCandidates: ["https://example.test/duplicate"],
+      };
+      const completionBody = {
+        kind: "completion",
+        projectId: "project_duplicates",
+        taskId: "task_complete",
+        sessionId: "session_complete",
+        observedAt: "2026-05-12T12:00:02.000Z",
+      };
+      const cleanupBody = {
+        kind: "cleanup",
+        projectId: "project_duplicates",
+        taskId: "task_complete",
+        sessionId: "session_complete",
+        reason: "completed",
+      };
+
+      const heartbeat = await postCallback("heartbeat", completeBridge, heartbeatBody);
+      const duplicateHeartbeat = await postCallback("heartbeat", completeBridge, heartbeatBody);
+      const output = await postCallback("output", completeBridge, outputBody);
+      const duplicateOutput = await postCallback("output", completeBridge, outputBody);
+      const invalidOutput = await postCallback(
+        "output",
+        completeBridge,
+        { ...outputBody, sequence: 2, byteOffset: 6, text: "bad\n" },
+        "wrong-token",
+      );
+      const document = await postCallback("document", completeBridge, documentBody);
+      const duplicateDocument = await postCallback("document", completeBridge, documentBody);
+      const finalResponse = await postCallback("final_response", completeBridge, finalResponseBody);
+      const duplicateFinalResponse = await postCallback("final_response", completeBridge, finalResponseBody);
+      const completion = await postCallback("completion", completeBridge, completionBody);
+      const duplicateCompletion = await postCallback("completion", completeBridge, completionBody);
+      const cleanup = await postCallback("cleanup", completeBridge, cleanupBody);
+      const duplicateCleanup = await postCallback("cleanup", completeBridge, cleanupBody);
+
+      expect(heartbeat.status).toBe(200);
+      expect(duplicateHeartbeat.status).toBe(409);
+      expect(await duplicateHeartbeat.json()).toMatchObject({
+        ok: false,
+        error: { code: "invalid_state", message: "duplicate heartbeat callback for session_complete" },
+      });
+      expect(output.status).toBe(200);
+      expect(duplicateOutput.status).toBe(409);
+      expect(await duplicateOutput.json()).toMatchObject({
+        ok: false,
+        error: { code: "invalid_state", message: "duplicate output callback for stdout sequence 1" },
+      });
+      expect(invalidOutput.status).toBe(403);
+      expect(document.status).toBe(200);
+      expect(duplicateDocument.status).toBe(200);
+      expect(await duplicateDocument.json()).toMatchObject({ ok: true, idempotent: true });
+      expect(finalResponse.status).toBe(200);
+      expect(duplicateFinalResponse.status).toBe(200);
+      expect(await duplicateFinalResponse.json()).toMatchObject({
+        ok: true,
+        artifacts: [],
+        event: { type: "session.final_response.idempotent" },
+      });
+      expect(completion.status).toBe(200);
+      expect(duplicateCompletion.status).toBe(200);
+      expect(await duplicateCompletion.json()).toMatchObject({
+        ok: true,
+        idempotent: true,
+        event: { type: "session.completed.idempotent" },
+      });
+      expect(cleanup.status).toBe(200);
+      expect(duplicateCleanup.status).toBe(200);
+      expect(await duplicateCleanup.json()).toMatchObject({
+        ok: true,
+        idempotent: true,
+        event: { type: "session.cleanup.idempotent" },
+      });
+      expect(
+        database.sqlite
+          .query<{ type: string; count: number }, []>(
+            `
+              SELECT type, COUNT(*) AS count
+              FROM events
+              WHERE project_id = 'project_duplicates' AND session_id = 'session_complete'
+                AND type IN ('session.heartbeat', 'session.output', 'session.completed', 'session.completed.idempotent', 'session.cleanup', 'session.cleanup.idempotent')
+              GROUP BY type
+              ORDER BY type
+            `,
+          )
+          .all(),
+      ).toEqual([
+        { type: "session.cleanup", count: 1 },
+        { type: "session.cleanup.idempotent", count: 1 },
+        { type: "session.completed", count: 1 },
+        { type: "session.completed.idempotent", count: 1 },
+        { type: "session.heartbeat", count: 1 },
+        { type: "session.output", count: 1 },
+      ]);
+      expect(
+        database.sqlite
+          .query<{ kind: string; count: number }, []>(
+            "SELECT kind, COUNT(*) AS count FROM artifacts WHERE project_id = 'project_duplicates' GROUP BY kind ORDER BY kind",
+          )
+          .all(),
+      ).toEqual([
+        { kind: "document", count: 1 },
+        { kind: "final_response_url", count: 1 },
+      ]);
+      expect(
+        database.sqlite
+          .query<{ byte_offset: number; line_count: number }, []>(
+            "SELECT byte_offset, line_count FROM log_streams WHERE project_id = 'project_duplicates' AND session_id = 'session_complete'",
+          )
+          .get(),
+      ).toEqual({ byte_offset: 6, line_count: 1 });
+
+      const failBridge = await claimTask("task_fail", "session_fail");
+      expect(
+        services.reportStartupSucceeded({
+          projectId: "project_duplicates",
+          sessionId: "session_fail",
+          runtimeSessionId: "runtime_fail",
+        }),
+      ).toMatchObject({ ok: true });
+      const failureBody = {
+        kind: "failure",
+        projectId: "project_duplicates",
+        taskId: "task_fail",
+        sessionId: "session_fail",
+        errorMessage: "runtime failed",
+      };
+      const failure = await postCallback("failure", failBridge, failureBody);
+      const duplicateFailure = await postCallback("failure", failBridge, failureBody);
+
+      expect(failure.status).toBe(200);
+      expect(duplicateFailure.status).toBe(200);
+      expect(await duplicateFailure.json()).toMatchObject({
+        ok: true,
+        idempotent: true,
+        event: { type: "session.failed.idempotent" },
+      });
+      expect(
+        database.sqlite
+          .query<{ session_status: string; task_status: string }, []>(
+            `
+              SELECT s.status AS session_status, t.status AS task_status
+              FROM sessions s
+              JOIN tasks t ON t.project_id = s.project_id AND t.id = s.task_id
+              WHERE s.project_id = 'project_duplicates' AND s.id = 'session_fail'
+            `,
+          )
+          .get(),
+      ).toEqual({ session_status: "failed", task_status: "failed" });
+    } finally {
+      await close();
+    }
+  });
+
   test("internal orchestrator endpoints are not exposed as public routes and validate bodies", async () => {
     const { baseUrl, config, close } = await startTestApi();
 

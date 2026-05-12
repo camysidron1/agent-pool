@@ -866,6 +866,12 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
           error: { code: "invalid_state", message: `output requires active session; got ${current.status}` },
         };
       }
+      if (hasOutputSequence(database, input)) {
+        return {
+          ok: false,
+          error: { code: "invalid_state", message: `duplicate output callback for ${input.stream} sequence ${input.sequence}` },
+        };
+      }
 
       return transaction(database, () => {
         const output = upsertLogStream(database, input);
@@ -1107,6 +1113,20 @@ function upsertLogStream(database: WebSandboxSqliteDatabase, input: RecordSessio
     byteOffset,
     lineCount,
   };
+}
+
+function hasOutputSequence(database: WebSandboxSqliteDatabase, input: RecordSessionOutputInput): boolean {
+  const rows = database
+    .query<{ payload_json: string }, [string, string, string]>(
+      "SELECT payload_json FROM events WHERE project_id = ? AND session_id = ? AND task_id = ? AND type = 'session.output'",
+    )
+    .all(input.projectId, input.sessionId, input.taskId);
+
+  return rows.some((row) => {
+    const payload = parseJsonObject(row.payload_json);
+
+    return payload.stream === input.stream && payload.sequence === input.sequence;
+  });
 }
 
 function byteLength(value: string): number {
@@ -1695,6 +1715,12 @@ function reportSessionHeartbeat(database: WebSandboxSqliteDatabase, input: Sessi
       return {
         ok: false,
         error: { code: "invalid_state", message: `heartbeat requires active session; got ${current.status}` },
+      } as const;
+    }
+    if (input.observedAt?.trim() && current.heartbeat_status === "fresh" && current.last_heartbeat_at === observedAt) {
+      return {
+        ok: false,
+        error: { code: "invalid_state", message: `duplicate heartbeat callback for ${input.sessionId}` },
       } as const;
     }
 
