@@ -1,3 +1,14 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, normalize, relative } from "node:path";
+
+import {
+  createBridgeRunner,
+  type BridgeLogStreamKind,
+  type BridgeRunnerRunOnceResult,
+  type BridgeScheduler,
+} from "@agent-pool/session-bridge";
+
 export type RuntimeProviderKind = "fake" | "e2b" | "docker";
 
 export type RuntimeClock = {
@@ -36,6 +47,16 @@ export type RuntimeSessionHandle = {
   readonly metadata?: Readonly<Record<string, unknown>>;
 };
 
+export type FakeRuntimeOutput = {
+  readonly stream?: BridgeLogStreamKind;
+  readonly text: string;
+};
+
+export type FakeRuntimeDocumentFixture = {
+  readonly path: string;
+  readonly contents: string;
+};
+
 export interface RuntimeProvider {
   readonly kind: RuntimeProviderKind;
   startSession(request: RuntimeSessionRequest): Promise<RuntimeSessionHandle>;
@@ -45,20 +66,39 @@ export interface RuntimeProvider {
 export type FakeRuntimeScenario = {
   readonly startup?: "success" | "failure";
   readonly startupErrorMessage?: string;
+  readonly runtime?: "success" | "failure";
+  readonly runtimeErrorMessage?: string;
   readonly runtimeSessionId?: string;
+  readonly output?: readonly FakeRuntimeOutput[];
+  readonly documents?: readonly FakeRuntimeDocumentFixture[];
+  readonly finalResponseText?: string;
+  readonly finalResponseMetadata?: Readonly<Record<string, unknown>>;
+  readonly completionMetadata?: Readonly<Record<string, unknown>>;
+  readonly failureMetadata?: Readonly<Record<string, unknown>>;
+  readonly cleanupReason?: string;
+  readonly cleanupMetadata?: Readonly<Record<string, unknown>>;
   readonly metadata?: Readonly<Record<string, unknown>>;
 };
 
 export type FakeRuntimeProviderOptions = {
   readonly clock?: RuntimeClock;
+  readonly fetch?: typeof fetch;
+  readonly scheduler?: BridgeScheduler;
   readonly sessionIdFactory?: () => string;
   readonly workspaceRoot?: string;
   readonly scenario?: FakeRuntimeScenario;
 };
 
+export type FakeRuntimeBridgeRunRecord = {
+  readonly workspaceRoot: string;
+  readonly status: "success" | "failure";
+  readonly result: BridgeRunnerRunOnceResult;
+};
+
 export type FakeRuntimeSessionRecord = {
   readonly request: RuntimeSessionRequest;
   readonly handle: RuntimeSessionHandle;
+  readonly bridgeRun?: FakeRuntimeBridgeRunRecord;
 };
 
 export type FakeRuntimeProviderState = {
@@ -118,18 +158,30 @@ export function createFakeRuntimeProvider(options: FakeRuntimeProviderOptions = 
       if (scenario.startup === "failure") {
         throw new Error(scenario.startupErrorMessage ?? "fake runtime startup failed");
       }
+      const runtimeSessionId = scenario.runtimeSessionId ?? sessionIdFactory();
+      const workspaceRoot = resolveFakeWorkspaceRoot(request, options, runtimeSessionId);
 
       const handle: RuntimeSessionHandle = {
         provider: "fake",
-        sessionId: scenario.runtimeSessionId ?? sessionIdFactory(),
+        sessionId: runtimeSessionId,
         projectId: request.projectId,
         taskId: request.taskId,
-        workspaceRoot: request.workspaceRoot ?? request.bridge?.workspaceRoot ?? options.workspaceRoot,
+        workspaceRoot,
         startedAt: clock.now().toISOString(),
         metadata: scenario.metadata,
       };
+      const bridgeRun = request.bridge
+        ? await runFakeBridgeSession({
+            request,
+            workspaceRoot: workspaceRoot ?? resolveRequiredFakeWorkspaceRoot(runtimeSessionId),
+            scenario,
+            clock,
+            fetch: options.fetch,
+            scheduler: options.scheduler,
+          })
+        : undefined;
 
-      started = [...started, { request, handle }];
+      started = [...started, { request, handle, bridgeRun }];
       active = [...active, handle];
       return handle;
     },
@@ -164,5 +216,151 @@ function sequentialRuntimeSessionIdFactory(prefix: string): () => string {
   return () => {
     sequence += 1;
     return `${prefix}-${sequence}`;
+  };
+}
+
+async function runFakeBridgeSession(options: {
+  readonly request: RuntimeSessionRequest;
+  readonly workspaceRoot: string;
+  readonly scenario: FakeRuntimeScenario;
+  readonly clock: RuntimeClock;
+  readonly fetch?: typeof fetch;
+  readonly scheduler?: BridgeScheduler;
+}): Promise<FakeRuntimeBridgeRunRecord> {
+  if (!options.request.bridge) {
+    throw new Error("fake bridge session requires bridge options");
+  }
+
+  await prepareFakeWorkspace(options.workspaceRoot, options.request.taskId, options.scenario);
+
+  const status = options.scenario.runtime ?? "success";
+  const runner = createBridgeRunner({
+    session: options.request.bridge,
+    fetch: options.fetch ?? createOfflineBridgeFetch(),
+    workspaceRoot: options.workspaceRoot,
+    clock: options.clock,
+    scheduler: options.scheduler,
+  });
+  const result = await runner.runOnce({
+    output: readFakeRuntimeOutput(options.scenario),
+    finalResponseText:
+      status === "success"
+        ? options.scenario.finalResponseText ?? `Fake runtime completed ${options.request.taskId}.`
+        : undefined,
+    finalResponseMetadata: status === "success" ? options.scenario.finalResponseMetadata : undefined,
+    completion:
+      status === "success"
+        ? {
+            metadata: options.scenario.completionMetadata ?? options.scenario.metadata,
+          }
+        : undefined,
+    failure:
+      status === "failure"
+        ? {
+            errorMessage: options.scenario.runtimeErrorMessage ?? "fake runtime failed",
+            metadata: options.scenario.failureMetadata ?? options.scenario.metadata,
+          }
+        : undefined,
+    cleanup: {
+      reason:
+        options.scenario.cleanupReason ??
+        (status === "failure" ? "fake runtime failed" : "fake runtime completed"),
+      metadata: options.scenario.cleanupMetadata,
+    },
+  });
+
+  return {
+    workspaceRoot: options.workspaceRoot,
+    status,
+    result,
+  };
+}
+
+function readFakeRuntimeOutput(scenario: FakeRuntimeScenario): readonly { readonly stream: BridgeLogStreamKind; readonly text: string }[] {
+  return (scenario.output ?? [{ stream: "system", text: "fake runtime started\n" }]).map((chunk) => ({
+    stream: chunk.stream ?? "system",
+    text: chunk.text,
+  }));
+}
+
+async function prepareFakeWorkspace(
+  workspaceRoot: string,
+  taskId: string,
+  scenario: FakeRuntimeScenario,
+): Promise<void> {
+  const documents = scenario.documents ?? defaultFakeDocuments(taskId);
+
+  await mkdir(workspaceRoot, { recursive: true });
+  for (const document of documents) {
+    const path = resolveWorkspaceRelativePath(workspaceRoot, document.path);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, document.contents, "utf8");
+  }
+}
+
+function defaultFakeDocuments(taskId: string): readonly FakeRuntimeDocumentFixture[] {
+  return [
+    {
+      path: "agent-docs/fake-runtime-result.md",
+      contents: `# Fake runtime result\n\nTask: ${taskId}\n`,
+    },
+    {
+      path: "shared-docs/fake-runtime-summary.json",
+      contents: `${JSON.stringify({ provider: "fake", taskId }, null, 2)}\n`,
+    },
+  ];
+}
+
+function resolveWorkspaceRelativePath(workspaceRoot: string, path: string): string {
+  if (isAbsolute(path)) {
+    throw new Error(`fake runtime document path must be relative: ${path}`);
+  }
+
+  const normalized = normalize(path);
+  if (normalized === ".." || normalized.startsWith("../") || normalized.includes("/../")) {
+    throw new Error(`fake runtime document path escapes workspace: ${path}`);
+  }
+  if (!normalized.startsWith("agent-docs/") && !normalized.startsWith("shared-docs/")) {
+    throw new Error(`fake runtime document path must be under agent-docs or shared-docs: ${path}`);
+  }
+
+  const absolute = join(workspaceRoot, normalized);
+  const back = relative(workspaceRoot, absolute);
+  if (back === ".." || back.startsWith("../") || isAbsolute(back)) {
+    throw new Error(`fake runtime document path escapes workspace: ${path}`);
+  }
+
+  return absolute;
+}
+
+function resolveFakeWorkspaceRoot(
+  request: RuntimeSessionRequest,
+  options: FakeRuntimeProviderOptions,
+  runtimeSessionId: string,
+): string | undefined {
+  return request.workspaceRoot ?? request.bridge?.workspaceRoot ?? options.workspaceRoot ?? (request.bridge ? resolveRequiredFakeWorkspaceRoot(runtimeSessionId) : undefined);
+}
+
+function resolveRequiredFakeWorkspaceRoot(runtimeSessionId: string): string {
+  return join(tmpdir(), "agent-pool-fake-runtime", runtimeSessionId.replace(/[^a-zA-Z0-9._-]/g, "_"));
+}
+
+function createOfflineBridgeFetch(): typeof fetch {
+  return async (input, init) => {
+    const request = new Request(input, init);
+    if (request.method !== "POST") {
+      return Response.json({ ok: false, error: "method_not_allowed" }, { status: 405 });
+    }
+
+    const url = new URL(request.url);
+    if (url.pathname === "/steering/poll") {
+      return Response.json({ ok: true, messages: [] });
+    }
+
+    if (url.pathname.startsWith("/callbacks/")) {
+      return Response.json({ ok: true, accepted: true });
+    }
+
+    return Response.json({ ok: false, error: "not_found" }, { status: 404 });
   };
 }
