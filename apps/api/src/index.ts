@@ -22,6 +22,7 @@ export {
   createOutboxPublisher,
   type FailedOutboxRecord,
   type OutboxPublisherOptions,
+  type OutboxPublisher,
   type PublishQueuedOutboxOptions,
   type PublishQueuedOutboxResult,
   type PublishedOutboxRecord,

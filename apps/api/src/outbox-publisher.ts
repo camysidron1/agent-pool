@@ -30,6 +30,8 @@ export type PublishQueuedOutboxResult = {
   readonly failed: readonly FailedOutboxRecord[];
 };
 
+export type OutboxPublisher = ReturnType<typeof createOutboxPublisher>;
+
 type QueuedOutboxRow = {
   readonly id: string;
   readonly project_id: string;
@@ -128,4 +130,3 @@ function parseJsonObject(value: string): Readonly<Record<string, unknown>> {
   const parsed: unknown = JSON.parse(value);
   return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
 }
-

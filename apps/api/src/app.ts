@@ -8,12 +8,14 @@ import { SHARED_PACKAGE_NAME } from "@agent-pool/shared";
 import { createStorageAdapter, type StorageAdapter } from "@agent-pool/storage";
 
 import type { ApiDatabaseConnection } from "./database";
+import { createOutboxPublisher, type OutboxPublisher } from "./outbox-publisher";
 
 export type ApiAppOptions = {
   readonly config?: AppConfig;
   readonly database?: ApiDatabaseConnection;
   readonly queue?: RabbitMqAdapter;
   readonly storage?: StorageAdapter;
+  readonly outboxPublisher?: OutboxPublisher;
 };
 
 export function createApiApp(options: ApiAppOptions = {}): Express {
@@ -21,6 +23,7 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
   const database = options.database;
   const queue = options.queue ?? createRabbitMqAdapter(config.rabbitmq);
   const storage = options.storage ?? createStorageAdapter(config.storage);
+  const outboxPublisher = options.outboxPublisher ?? (database ? createOutboxPublisher({ database, queue }) : null);
   const services = database ? createCanonicalStateServices(database.sqlite) : null;
   const app = express();
   const requireInternalServiceToken = createInternalServiceTokenMiddleware(config);
@@ -42,6 +45,11 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
           kind: queue.kind,
           connected: queue.connected,
         },
+        outboxPublisher: {
+          initialized: Boolean(outboxPublisher),
+          queuedOutbox: database ? countOutboxRows(database, "queued") : 0,
+          failedOutbox: database ? countOutboxRows(database, "failed") : 0,
+        },
         storage: {
           kind: storage.kind,
           bucket: storage.bucket,
@@ -61,6 +69,7 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
       },
       adapters: {
         queue: queue.kind,
+        outboxPublisher: Boolean(outboxPublisher),
         storage: storage.kind,
       },
     });
@@ -144,7 +153,7 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
       .status(200)
       .type("text/plain")
       .send(
-        `# metrics placeholder for agent-pool-api\nagent_pool_api_info{shared_package="${SHARED_PACKAGE_NAME}"} 1\nagent_pool_api_database_connected ${database ? 1 : 0}\nagent_pool_api_database_applied_migrations ${database?.appliedMigrations.length ?? 0}\nagent_pool_api_queue_adapter_initialized 1\nagent_pool_api_storage_adapter_initialized 1\n`,
+        `# metrics placeholder for agent-pool-api\nagent_pool_api_info{shared_package="${SHARED_PACKAGE_NAME}"} 1\nagent_pool_api_database_connected ${database ? 1 : 0}\nagent_pool_api_database_applied_migrations ${database?.appliedMigrations.length ?? 0}\nagent_pool_api_queue_adapter_initialized 1\nagent_pool_api_outbox_publisher_initialized ${outboxPublisher ? 1 : 0}\nagent_pool_api_outbox_queued ${database ? countOutboxRows(database, "queued") : 0}\nagent_pool_api_outbox_failed ${database ? countOutboxRows(database, "failed") : 0}\nagent_pool_api_storage_adapter_initialized 1\n`,
       );
   });
 
@@ -363,4 +372,9 @@ function readOptionalString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function countOutboxRows(database: ApiDatabaseConnection, status: "queued" | "failed"): number {
+  const row = database.sqlite.query<{ count: number }, [string]>("SELECT COUNT(*) AS count FROM outbox WHERE status = ?").get(status);
+  return row?.count ?? 0;
 }
