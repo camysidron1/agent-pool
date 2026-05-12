@@ -126,6 +126,10 @@ export {
   type BridgeCallbackClientOptions,
 } from "./callback-client";
 export {
+  discoverBridgeDocuments,
+  type BridgeDocumentDiscoveryOptions,
+} from "./document-discovery";
+export {
   createBridgeEventBuffer,
   type BridgeEventBuffer,
   type BridgeEventBufferFlushResult,
