@@ -5,6 +5,7 @@ import type {
   BackendInternalHttpResult,
   ClaimNextCommandResponse,
 } from "./backend-client";
+import type { OrchestratorMetricsRecorder } from "./metrics";
 import { createQueueDecisionPolicy, type QueueDecisionPolicy } from "./queue-policy";
 
 export type ControlQueueConsumerBackend = Pick<
@@ -30,6 +31,7 @@ export type ControlQueueConsumerOptions = {
   readonly backend: ControlQueueConsumerBackend;
   readonly commandHandler?: CommandHandler;
   readonly queuePolicy?: QueueDecisionPolicy;
+  readonly metrics?: OrchestratorMetricsRecorder;
 };
 
 export type ControlQueueConsumerRunResult = QueueDrainResult & {
@@ -114,7 +116,7 @@ export async function runControlQueueConsumerOnce(
     return queuePolicy.ack();
   });
 
-  return {
+  const result = {
     ...drain,
     claimed,
     noWork,
@@ -122,6 +124,9 @@ export async function runControlQueueConsumerOnce(
     commandsSucceeded,
     commandsFailed,
   };
+
+  options.metrics?.recordControlConsumerRun(result);
+  return result;
 }
 
 export function unsupportedCommandHandler(request: CommandHandlingRequest): CommandHandlingResult {

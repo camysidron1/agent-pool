@@ -6,6 +6,7 @@ import type {
   ClaimNextTaskResponse,
 } from "./backend-client";
 import type { CapacityLimiter } from "./capacity";
+import type { OrchestratorMetricsRecorder } from "./metrics";
 import { createQueueDecisionPolicy, type QueueDecisionPolicy } from "./queue-policy";
 
 export type TaskQueueConsumerBackend = Pick<
@@ -38,6 +39,7 @@ export type TaskQueueConsumerOptions = {
   readonly capacityLimiter?: CapacityLimiter;
   readonly capacityRetryDelayMs?: number;
   readonly queuePolicy?: QueueDecisionPolicy;
+  readonly metrics?: OrchestratorMetricsRecorder;
 };
 
 export type TaskQueueConsumerRunResult = QueueDrainResult & {
@@ -125,13 +127,16 @@ export async function runTaskQueueConsumerOnce(
     }
   });
 
-  return {
+  const result = {
     ...drain,
     claimed,
     noWork,
     startupsSucceeded,
     startupsFailed,
   };
+
+  options.metrics?.recordTaskConsumerRun(result);
+  return result;
 }
 
 function isClaimNextTaskResponse(

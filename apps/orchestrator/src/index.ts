@@ -48,6 +48,13 @@ export {
   type OrchestratorServerOptions,
 } from "./server";
 export {
+  createOrchestratorMetrics,
+  renderOrchestratorMetrics,
+  type OrchestratorMetricsCounters,
+  type OrchestratorMetricsRecorder,
+  type RenderOrchestratorMetricsOptions,
+} from "./metrics";
+export {
   createQueueDecisionPolicy,
   type QueueDecisionPolicy,
   type QueueDecisionPolicyOptions,

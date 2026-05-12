@@ -34,7 +34,7 @@ describe("API service skeleton", () => {
       expect(body.database.appliedMigrations).toBeGreaterThan(0);
       expect(body.adapters).toMatchObject({
         queue: { kind: "rabbitmq", connected: false },
-        outboxPublisher: { initialized: true, queuedOutbox: 0, failedOutbox: 0 },
+        outboxPublisher: { initialized: true, queuedOutbox: 0, publishedOutbox: 0, failedOutbox: 0 },
         storage: { kind: "local" },
       });
     } finally {
@@ -409,6 +409,7 @@ describe("API service skeleton", () => {
       expect(text).toContain("agent_pool_api_queue_adapter_initialized 1");
       expect(text).toContain("agent_pool_api_outbox_publisher_initialized 1");
       expect(text).toContain("agent_pool_api_outbox_queued 0");
+      expect(text).toContain("agent_pool_api_outbox_published 0");
       expect(text).toContain("agent_pool_api_outbox_failed 0");
       expect(text).toContain("agent_pool_api_storage_adapter_initialized 1");
     } finally {

@@ -48,6 +48,7 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
         outboxPublisher: {
           initialized: Boolean(outboxPublisher),
           queuedOutbox: database ? countOutboxRows(database, "queued") : 0,
+          publishedOutbox: database ? countOutboxRows(database, "published") : 0,
           failedOutbox: database ? countOutboxRows(database, "failed") : 0,
         },
         storage: {
@@ -153,7 +154,7 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
       .status(200)
       .type("text/plain")
       .send(
-        `# metrics placeholder for agent-pool-api\nagent_pool_api_info{shared_package="${SHARED_PACKAGE_NAME}"} 1\nagent_pool_api_database_connected ${database ? 1 : 0}\nagent_pool_api_database_applied_migrations ${database?.appliedMigrations.length ?? 0}\nagent_pool_api_queue_adapter_initialized 1\nagent_pool_api_outbox_publisher_initialized ${outboxPublisher ? 1 : 0}\nagent_pool_api_outbox_queued ${database ? countOutboxRows(database, "queued") : 0}\nagent_pool_api_outbox_failed ${database ? countOutboxRows(database, "failed") : 0}\nagent_pool_api_storage_adapter_initialized 1\n`,
+        `# metrics placeholder for agent-pool-api\nagent_pool_api_info{shared_package="${SHARED_PACKAGE_NAME}"} 1\nagent_pool_api_database_connected ${database ? 1 : 0}\nagent_pool_api_database_applied_migrations ${database?.appliedMigrations.length ?? 0}\nagent_pool_api_queue_adapter_initialized 1\nagent_pool_api_outbox_publisher_initialized ${outboxPublisher ? 1 : 0}\nagent_pool_api_outbox_queued ${database ? countOutboxRows(database, "queued") : 0}\nagent_pool_api_outbox_published ${database ? countOutboxRows(database, "published") : 0}\nagent_pool_api_outbox_failed ${database ? countOutboxRows(database, "failed") : 0}\nagent_pool_api_storage_adapter_initialized 1\n`,
       );
   });
 
@@ -374,7 +375,7 @@ function readOptionalString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function countOutboxRows(database: ApiDatabaseConnection, status: "queued" | "failed"): number {
+function countOutboxRows(database: ApiDatabaseConnection, status: "queued" | "published" | "failed"): number {
   const row = database.sqlite.query<{ count: number }, [string]>("SELECT COUNT(*) AS count FROM outbox WHERE status = ?").get(status);
   return row?.count ?? 0;
 }

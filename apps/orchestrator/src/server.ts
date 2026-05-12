@@ -3,10 +3,15 @@ import { createRabbitMqAdapter, type RabbitMqAdapter } from "@agent-pool/queue";
 import { DEFAULT_PROJECT_TASK_QUEUE } from "@agent-pool/shared";
 import { createStorageAdapter, type StorageAdapter } from "@agent-pool/storage";
 
+import type { CapacityLimiter } from "./capacity";
+import { createOrchestratorMetrics, renderOrchestratorMetrics, type OrchestratorMetricsRecorder } from "./metrics";
+
 export type OrchestratorServerOptions = {
   readonly config?: AppConfig;
   readonly queue?: RabbitMqAdapter;
   readonly storage?: StorageAdapter;
+  readonly capacityLimiter?: CapacityLimiter;
+  readonly metrics?: OrchestratorMetricsRecorder;
 };
 
 export type BunServe = (options: {
@@ -20,6 +25,7 @@ export function createOrchestratorFetchHandler(
   const config = options.config ?? loadConfig();
   const queue = options.queue ?? createRabbitMqAdapter(config.rabbitmq);
   const storage = options.storage ?? createStorageAdapter(config.storage);
+  const metrics = options.metrics ?? createOrchestratorMetrics();
 
   return (request: Request): Response => {
     const url = new URL(request.url);
@@ -44,14 +50,11 @@ export function createOrchestratorFetchHandler(
     }
 
     if (url.pathname === "/metrics") {
-      return new Response(
-        `# metrics placeholder for agent-pool-orchestrator\nagent_pool_orchestrator_info{task_queue="${DEFAULT_PROJECT_TASK_QUEUE}"} 1\nagent_pool_orchestrator_backend_internal_configured 1\nagent_pool_orchestrator_queue_adapter_initialized 1\nagent_pool_orchestrator_storage_adapter_initialized 1\n`,
-        {
-          headers: {
-            "content-type": "text/plain; charset=utf-8",
-          },
+      return new Response(renderOrchestratorMetrics({ taskQueueName: DEFAULT_PROJECT_TASK_QUEUE, queue, capacityLimiter: options.capacityLimiter, metrics }), {
+        headers: {
+          "content-type": "text/plain; charset=utf-8",
         },
-      );
+      });
     }
 
     return Response.json({ error: "not found" }, { status: 404 });

@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
 import { loadConfig } from "@agent-pool/config";
+import { createRabbitMqAdapter } from "@agent-pool/queue";
 
 import { checkBackendInternalHealth, createBackendInternalApiClient } from "../src/backend-client";
+import { createCapacityLimiter } from "../src/capacity";
+import { createOrchestratorMetrics } from "../src/metrics";
 import { createOrchestratorFetchHandler } from "../src/server";
 
 describe("orchestrator service skeleton", () => {
@@ -26,7 +29,21 @@ describe("orchestrator service skeleton", () => {
   });
 
   test("metrics exposes backend internal configuration gauge", async () => {
-    const handler = createOrchestratorFetchHandler({ config: loadConfig({ AUTH_MODE: "test" }) });
+    const queue = createRabbitMqAdapter(loadConfig({ AUTH_MODE: "test" }).rabbitmq);
+    const capacityLimiter = createCapacityLimiter({ maxConcurrent: 2, initialActive: 1 });
+    const metrics = createOrchestratorMetrics({
+      taskConsumerRuns: 2,
+      controlConsumerRuns: 1,
+      taskClaims: 3,
+      commandClaims: 4,
+      queueAcked: 5,
+      queueRetried: 6,
+      queueDeadLettered: 7,
+      reconcileRuns: 8,
+      reconcileFailures: 1,
+    });
+    queue.publishProjectTaskHint("project_a", { taskId: "task_1" });
+    const handler = createOrchestratorFetchHandler({ config: loadConfig({ AUTH_MODE: "test" }), queue, capacityLimiter, metrics });
     const response = handler(new Request("http://orchestrator.test/metrics"));
     const text = await response.text();
 
@@ -35,6 +52,19 @@ describe("orchestrator service skeleton", () => {
     expect(text).toContain("agent_pool_orchestrator_backend_internal_configured 1");
     expect(text).toContain("agent_pool_orchestrator_queue_adapter_initialized 1");
     expect(text).toContain("agent_pool_orchestrator_storage_adapter_initialized 1");
+    expect(text).toContain("agent_pool_orchestrator_queue_pending 1");
+    expect(text).toContain("agent_pool_orchestrator_queue_ack_total 5");
+    expect(text).toContain("agent_pool_orchestrator_queue_retry_total 6");
+    expect(text).toContain("agent_pool_orchestrator_queue_dead_letter_total 7");
+    expect(text).toContain("agent_pool_orchestrator_task_consumer_runs_total 2");
+    expect(text).toContain("agent_pool_orchestrator_control_consumer_runs_total 1");
+    expect(text).toContain("agent_pool_orchestrator_task_claim_total 3");
+    expect(text).toContain("agent_pool_orchestrator_command_claim_total 4");
+    expect(text).toContain("agent_pool_orchestrator_capacity_active 1");
+    expect(text).toContain("agent_pool_orchestrator_capacity_max 2");
+    expect(text).toContain("agent_pool_orchestrator_capacity_available 1");
+    expect(text).toContain("agent_pool_orchestrator_reconcile_runs_total 8");
+    expect(text).toContain("agent_pool_orchestrator_reconcile_failures_total 1");
   });
 
   test("backend internal health client sends service-token auth and handles success", async () => {

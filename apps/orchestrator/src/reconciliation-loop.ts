@@ -4,6 +4,7 @@ import type {
   ClaimNextTaskResponse,
   ReconcileResponse,
 } from "./backend-client";
+import type { OrchestratorMetricsRecorder } from "./metrics";
 
 export type ReconciliationBackend = Pick<
   BackendInternalApiClient,
@@ -26,6 +27,7 @@ export type ReconciliationOptions = {
   readonly staleAfterMs?: number;
   readonly lostAfterMs?: number;
   readonly runtimeProvider?: string;
+  readonly metrics?: OrchestratorMetricsRecorder;
 };
 
 export type ReconciliationOnceResult = {
@@ -66,7 +68,7 @@ export async function runReconciliationOnce(options: ReconciliationOptions): Pro
   });
 
   if (!reconcile.ok || !isReconcileResponse(reconcile.body)) {
-    return {
+    const result = {
       ok: false,
       reconcileStatus: reconcile.status,
       staleCount: 0,
@@ -76,6 +78,9 @@ export async function runReconciliationOnce(options: ReconciliationOptions): Pro
       commandClaimed: false,
       commandNoWork: false,
     };
+
+    options.metrics?.recordReconciliationRun(result);
+    return result;
   }
 
   const taskClaim = await options.backend.claimNextTask({
@@ -84,7 +89,7 @@ export async function runReconciliationOnce(options: ReconciliationOptions): Pro
   });
   const commandClaim = await options.backend.claimNextCommand({ projectId: options.projectId });
 
-  return {
+  const result = {
     ok: taskClaim.ok && commandClaim.ok,
     reconcileStatus: reconcile.status,
     staleCount: reconcile.body.stale.length,
@@ -94,6 +99,9 @@ export async function runReconciliationOnce(options: ReconciliationOptions): Pro
     commandClaimed: isClaimNextCommandResponse(commandClaim.body) && commandClaim.body.claimed,
     commandNoWork: isClaimNextCommandResponse(commandClaim.body) && !commandClaim.body.claimed,
   };
+
+  options.metrics?.recordReconciliationRun(result);
+  return result;
 }
 
 export function createReconciliationLoop(options: ReconciliationLoopOptions): ReconciliationLoop {
