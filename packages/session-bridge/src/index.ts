@@ -164,6 +164,14 @@ export {
   type BridgeOutputFailure,
 } from "./output-capture";
 export {
+  createBridgeRunner,
+  type BridgeRunner,
+  type BridgeRunnerOptions,
+  type BridgeRunnerOutputInput,
+  type BridgeRunnerRunOnceInput,
+  type BridgeRunnerRunOnceResult,
+} from "./runner";
+export {
   createBridgeSteeringPoller,
   type BridgeSteeringPoller,
   type BridgeSteeringPollerOptions,
