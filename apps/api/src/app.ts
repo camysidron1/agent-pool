@@ -93,7 +93,30 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
       outbox: result.outbox,
     });
   });
-  app.post("/internal/orchestrator/commands/claim-next", requireInternalServiceToken, sendNotImplemented);
+  app.post("/internal/orchestrator/commands/claim-next", requireInternalServiceToken, (request, response) => {
+    if (!services) {
+      response.status(503).json({ ok: false, error: "database_unavailable" });
+      return;
+    }
+
+    const body = parseObjectBody(request.body);
+    const result = services.claimNextCommand({
+      projectId: readOptionalString(body.projectId),
+    });
+
+    if (!result.ok) {
+      response.status(200).json({ ok: true, claimed: false, reason: result.reason });
+      return;
+    }
+
+    response.status(200).json({
+      ok: true,
+      claimed: true,
+      command: result.command,
+      event: result.event,
+      outbox: result.outbox,
+    });
+  });
   app.post("/internal/orchestrator/commands/:commandId/started", requireInternalServiceToken, sendNotImplemented);
   app.post("/internal/orchestrator/commands/:commandId/succeeded", requireInternalServiceToken, sendNotImplemented);
   app.post("/internal/orchestrator/commands/:commandId/failed", requireInternalServiceToken, sendNotImplemented);
