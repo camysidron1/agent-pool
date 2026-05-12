@@ -126,5 +126,9 @@ export {
   type RecordFinalAssistantResponseInput,
   type RequestCommandResult,
   type SessionRecord,
+  type StartupReportInput,
+  type StartupReportResult,
+  type StartupReportSessionRecord,
+  type StartupReportTaskRecord,
   type TaskRecord,
 } from "./services";

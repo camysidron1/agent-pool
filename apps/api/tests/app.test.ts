@@ -68,7 +68,7 @@ describe("API service skeleton", () => {
     }
   });
 
-  test("internal orchestrator namespace requires service-token auth and exposes structured placeholders", async () => {
+  test("internal orchestrator namespace requires service-token auth", async () => {
     const { baseUrl, config, close } = await startTestApi();
 
     try {
@@ -90,12 +90,10 @@ describe("API service skeleton", () => {
       expect(await missing.json()).toMatchObject({ ok: false, reason: "missing" });
       expect(invalid.status).toBe(403);
       expect(await invalid.json()).toMatchObject({ ok: false, reason: "invalid" });
-      expect(ok.status).toBe(501);
+      expect(ok.status).toBe(400);
       expect(await ok.json()).toMatchObject({
         ok: false,
-        error: "internal_orchestrator_endpoint_not_implemented",
-        method: "POST",
-        path: "/internal/orchestrator/sessions/session_1/startup-succeeded",
+        error: "missing_project_id",
       });
     } finally {
       await close();
@@ -233,6 +231,60 @@ describe("API service skeleton", () => {
     }
   });
 
+  test("startup report endpoints transition claimed sessions and handle safe duplicates idempotently", async () => {
+    const { baseUrl, config, database, close } = await startTestApi();
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      services.createTask({ id: "task_success", projectId: "project_a", title: "Success task" });
+      services.createTask({ id: "task_failure", projectId: "project_a", title: "Failure task" });
+      expect(services.claimNextTask({ projectId: "project_a", sessionId: "session_success" })).toMatchObject({ ok: true });
+      services.createSessionAttempt({ id: "session_failure", projectId: "project_a", taskId: "task_failure", status: "starting" });
+      database.sqlite.query("UPDATE tasks SET status = 'running' WHERE id = 'task_failure'").run();
+
+      const succeeded = await postStartupReport(baseUrl, config, "session_success", "succeeded", {
+        projectId: "project_a",
+        runtimeSessionId: "runtime_success",
+      });
+      const duplicateSucceeded = await postStartupReport(baseUrl, config, "session_success", "succeeded", {
+        projectId: "project_a",
+        runtimeSessionId: "runtime_success",
+      });
+      const failed = await postStartupReport(baseUrl, config, "session_failure", "failed", {
+        projectId: "project_a",
+        errorMessage: "provider image failed",
+      });
+      const duplicateFailed = await postStartupReport(baseUrl, config, "session_failure", "failed", {
+        projectId: "project_a",
+        errorMessage: "provider image failed",
+      });
+
+      expect(succeeded.status).toBe(200);
+      expect(await succeeded.json()).toMatchObject({
+        ok: true,
+        idempotent: false,
+        session: { id: "session_success", status: "running", runtimeSessionId: "runtime_success" },
+        task: { id: "task_success", status: "running" },
+        event: { type: "session.startup_succeeded" },
+      });
+      expect(duplicateSucceeded.status).toBe(200);
+      expect(await duplicateSucceeded.json()).toMatchObject({ ok: true, idempotent: true, session: { id: "session_success", status: "running" } });
+      expect(failed.status).toBe(200);
+      expect(await failed.json()).toMatchObject({
+        ok: true,
+        idempotent: false,
+        session: { id: "session_failure", status: "failed" },
+        task: { id: "task_failure", status: "blocked" },
+        event: { type: "session.startup_failed" },
+      });
+      expect(duplicateFailed.status).toBe(200);
+      expect(await duplicateFailed.json()).toMatchObject({ ok: true, idempotent: true, session: { id: "session_failure", status: "failed" } });
+    } finally {
+      await close();
+    }
+  });
+
   test("internal orchestrator placeholder endpoints are not exposed as public routes", async () => {
     const { baseUrl, config, close } = await startTestApi();
 
@@ -249,7 +301,7 @@ describe("API service skeleton", () => {
           [config.serviceToken.headerName]: config.serviceToken.token,
         },
       });
-      const startupReport = await fetch(`${baseUrl}/internal/orchestrator/sessions/session_1/startup-failed`, {
+      const heartbeat = await fetch(`${baseUrl}/internal/orchestrator/sessions/session_1/heartbeat`, {
         method: "POST",
         headers: {
           [config.serviceToken.headerName]: config.serviceToken.token,
@@ -265,8 +317,8 @@ describe("API service skeleton", () => {
       expect(publicRoute.status).toBe(404);
       expect(missingCommandProject.status).toBe(400);
       expect(await missingCommandProject.json()).toMatchObject({ error: "missing_project_id" });
-      expect(startupReport.status).toBe(501);
-      expect(await startupReport.json()).toMatchObject({ error: "internal_orchestrator_endpoint_not_implemented" });
+      expect(heartbeat.status).toBe(501);
+      expect(await heartbeat.json()).toMatchObject({ error: "internal_orchestrator_endpoint_not_implemented" });
       expect(reconcile.status).toBe(501);
       expect(await reconcile.json()).toMatchObject({ error: "internal_orchestrator_endpoint_not_implemented" });
     } finally {
@@ -301,6 +353,23 @@ async function postCommandReport(
   body: Readonly<Record<string, unknown>>,
 ): Promise<Response> {
   return fetch(`${baseUrl}/internal/orchestrator/commands/${commandId}/${report}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      [config.serviceToken.headerName]: config.serviceToken.token,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+async function postStartupReport(
+  baseUrl: string,
+  config: ReturnType<typeof loadConfig>,
+  sessionId: string,
+  report: "succeeded" | "failed",
+  body: Readonly<Record<string, unknown>>,
+): Promise<Response> {
+  return fetch(`${baseUrl}/internal/orchestrator/sessions/${sessionId}/startup-${report}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",

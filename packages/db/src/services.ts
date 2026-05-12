@@ -156,6 +156,38 @@ export type ClaimNextTaskResult =
     }
   | { readonly ok: false; readonly reason: "no_eligible_task" };
 
+export type StartupReportInput = {
+  readonly projectId: string;
+  readonly sessionId: string;
+  readonly runtimeSessionId?: string | null;
+  readonly errorMessage?: string | null;
+};
+
+export type StartupReportSessionRecord = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly status: "running" | "failed";
+  readonly runtimeSessionId: string | null;
+};
+
+export type StartupReportTaskRecord = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly status: "running" | "blocked";
+};
+
+export type StartupReportResult =
+  | {
+      readonly ok: true;
+      readonly idempotent: boolean;
+      readonly session: StartupReportSessionRecord;
+      readonly task: StartupReportTaskRecord;
+      readonly event?: EventRecord;
+      readonly outbox?: OutboxRecord;
+    }
+  | { readonly ok: false; readonly error: { readonly code: "not_found" | "invalid_state" | "conflict"; readonly message: string } };
+
 export type RecordFinalAssistantResponseInput = {
   readonly projectId: string;
   readonly sessionId: string;
@@ -378,6 +410,14 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
 
     reportCommandFailed(input: CommandReportInput): CommandReportResult {
       return reportCommandTransition(database, input, "failed");
+    },
+
+    reportStartupSucceeded(input: StartupReportInput): StartupReportResult {
+      return reportStartupSucceeded(database, input);
+    },
+
+    reportStartupFailed(input: StartupReportInput): StartupReportResult {
+      return reportStartupFailed(database, input);
     },
 
     requestCommand(input: RequestCommandInput): RequestCommandResult {
@@ -739,6 +779,203 @@ function readCommandState(
       "SELECT id, project_id, task_id, session_id, type, status, error_message FROM orchestrator_commands WHERE project_id = ? AND id = ?",
     )
     .get(projectId, commandId);
+}
+
+function reportStartupSucceeded(database: WebSandboxSqliteDatabase, input: StartupReportInput): StartupReportResult {
+  return transaction(database, () => {
+    const current = readStartupSessionState(database, input.projectId, input.sessionId);
+    const runtimeSessionId = input.runtimeSessionId?.trim() || null;
+
+    if (!current) {
+      return { ok: false, error: { code: "not_found", message: `session not found: ${input.sessionId}` } } as const;
+    }
+
+    if (current.status === "running") {
+      if (runtimeSessionId && current.runtime_session_id && current.runtime_session_id !== runtimeSessionId) {
+        return {
+          ok: false,
+          error: { code: "conflict", message: `session ${input.sessionId} already has a different runtime session id` },
+        } as const;
+      }
+
+      return {
+        ok: true,
+        idempotent: true,
+        session: startupSessionRecord(current, "running"),
+        task: startupTaskRecord(current, "running"),
+      } as const;
+    }
+
+    if (current.status !== "starting") {
+      return {
+        ok: false,
+        error: { code: "invalid_state", message: `startup success requires starting session; got ${current.status}` },
+      } as const;
+    }
+
+    const nextRuntimeSessionId = runtimeSessionId ?? current.runtime_session_id;
+    database
+      .query(
+        "UPDATE sessions SET status = 'running', runtime_session_id = ?, started_at = COALESCE(started_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), ended_at = NULL WHERE project_id = ? AND id = ?",
+      )
+      .run(nextRuntimeSessionId, input.projectId, input.sessionId);
+    database
+      .query("UPDATE tasks SET status = 'running', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ?")
+      .run(current.project_id, current.task_id);
+
+    const updated = readStartupSessionState(database, input.projectId, input.sessionId);
+    if (!updated) throw new Error(`reported startup session disappeared: ${input.sessionId}`);
+
+    const { event, outbox } = appendStartupReportEvent(database, updated, "session.startup_succeeded", {
+      runtimeSessionId: nextRuntimeSessionId,
+    });
+
+    return {
+      ok: true,
+      idempotent: false,
+      session: startupSessionRecord(updated, "running"),
+      task: startupTaskRecord(updated, "running"),
+      event,
+      outbox,
+    } as const;
+  });
+}
+
+function reportStartupFailed(database: WebSandboxSqliteDatabase, input: StartupReportInput): StartupReportResult {
+  return transaction(database, () => {
+    const current = readStartupSessionState(database, input.projectId, input.sessionId);
+    const errorMessage = input.errorMessage?.trim() || "startup failed without details";
+
+    if (!current) {
+      return { ok: false, error: { code: "not_found", message: `session not found: ${input.sessionId}` } } as const;
+    }
+
+    if (current.status === "failed") {
+      const existingMessage = readStartupFailureMessage(database, input.projectId, input.sessionId);
+      if (existingMessage && existingMessage !== errorMessage) {
+        return {
+          ok: false,
+          error: { code: "conflict", message: `session ${input.sessionId} already failed with different startup details` },
+        } as const;
+      }
+
+      return {
+        ok: true,
+        idempotent: true,
+        session: startupSessionRecord(current, "failed"),
+        task: startupTaskRecord(current, "blocked"),
+      } as const;
+    }
+
+    if (current.status !== "starting") {
+      return {
+        ok: false,
+        error: { code: "invalid_state", message: `startup failure requires starting session; got ${current.status}` },
+      } as const;
+    }
+
+    database
+      .query("UPDATE sessions SET status = 'failed', ended_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ?")
+      .run(input.projectId, input.sessionId);
+    database
+      .query("UPDATE tasks SET status = 'blocked', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ?")
+      .run(current.project_id, current.task_id);
+
+    const updated = readStartupSessionState(database, input.projectId, input.sessionId);
+    if (!updated) throw new Error(`reported startup session disappeared: ${input.sessionId}`);
+
+    const { event, outbox } = appendStartupReportEvent(database, updated, "session.startup_failed", { errorMessage });
+
+    return {
+      ok: true,
+      idempotent: false,
+      session: startupSessionRecord(updated, "failed"),
+      task: startupTaskRecord(updated, "blocked"),
+      event,
+      outbox,
+    } as const;
+  });
+}
+
+function appendStartupReportEvent(
+  database: WebSandboxSqliteDatabase,
+  session: StartupSessionState,
+  type: "session.startup_succeeded" | "session.startup_failed",
+  extraPayload: Readonly<Record<string, unknown>>,
+): { readonly event: EventRecord; readonly outbox: OutboxRecord } {
+  const event = appendEvent(database, {
+    projectId: session.project_id,
+    taskId: session.task_id,
+    sessionId: session.id,
+    type,
+    payload: { sessionId: session.id, taskId: session.task_id, ...extraPayload },
+  });
+  const outbox = enqueueOutbox(database, {
+    projectId: session.project_id,
+    eventId: event.id,
+    routingKey: projectRoutingKey(session.project_id, "control"),
+    payload: { eventId: event.id, sessionId: session.id, type: event.type },
+  });
+
+  return { event, outbox };
+}
+
+type StartupSessionState = {
+  readonly id: string;
+  readonly project_id: string;
+  readonly task_id: string;
+  readonly status: string;
+  readonly runtime_session_id: string | null;
+  readonly task_status: string;
+};
+
+function readStartupSessionState(database: WebSandboxSqliteDatabase, projectId: string, sessionId: string): StartupSessionState | null {
+  return database
+    .query<StartupSessionState, [string, string]>(
+      `
+        SELECT s.id, s.project_id, s.task_id, s.status, s.runtime_session_id, t.status AS task_status
+        FROM sessions s
+        JOIN tasks t ON t.project_id = s.project_id AND t.id = s.task_id
+        WHERE s.project_id = ? AND s.id = ?
+      `,
+    )
+    .get(projectId, sessionId);
+}
+
+function readStartupFailureMessage(database: WebSandboxSqliteDatabase, projectId: string, sessionId: string): string | null {
+  const row = database
+    .query<{ payload_json: string }, [string, string]>(
+      `
+        SELECT payload_json
+        FROM events
+        WHERE project_id = ? AND session_id = ? AND type = 'session.startup_failed'
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT 1
+      `,
+    )
+    .get(projectId, sessionId);
+
+  if (!row) return null;
+  const payload = parseJsonObject(row.payload_json);
+  return typeof payload.errorMessage === "string" ? payload.errorMessage : null;
+}
+
+function startupSessionRecord(session: StartupSessionState, status: "running" | "failed"): StartupReportSessionRecord {
+  return {
+    id: session.id,
+    projectId: session.project_id,
+    taskId: session.task_id,
+    status,
+    runtimeSessionId: session.runtime_session_id,
+  };
+}
+
+function startupTaskRecord(session: StartupSessionState, status: "running" | "blocked"): StartupReportTaskRecord {
+  return {
+    id: session.task_id,
+    projectId: session.project_id,
+    status,
+  };
 }
 
 function commandReportRecord(

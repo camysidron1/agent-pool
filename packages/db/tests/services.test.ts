@@ -142,6 +142,134 @@ describe("canonical state services", () => {
     }
   });
 
+  test("reports startup success idempotently for claimed sessions", () => {
+    const database = createMigratedMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      services.createTask({ id: "task_1", projectId: "project_a", title: "First" });
+      const claim = services.claimNextTask({ projectId: "project_a", sessionId: "session_1", runtimeProvider: "test-provider" });
+      expect(claim).toMatchObject({ ok: true, session: { status: "starting" } });
+
+      const started = services.reportStartupSucceeded({
+        projectId: "project_a",
+        sessionId: "session_1",
+        runtimeSessionId: "runtime_session_1",
+      });
+      const duplicate = services.reportStartupSucceeded({
+        projectId: "project_a",
+        sessionId: "session_1",
+        runtimeSessionId: "runtime_session_1",
+      });
+
+      expect(started).toMatchObject({
+        ok: true,
+        idempotent: false,
+        session: { id: "session_1", status: "running", runtimeSessionId: "runtime_session_1" },
+        task: { id: "task_1", status: "running" },
+        event: { type: "session.startup_succeeded" },
+        outbox: { routingKey: "project.project_a.control" },
+      });
+      expect(duplicate).toMatchObject({
+        ok: true,
+        idempotent: true,
+        session: { id: "session_1", status: "running", runtimeSessionId: "runtime_session_1" },
+      });
+      expect(database.query<{ status: string; runtime_session_id: string | null }, []>("SELECT status, runtime_session_id FROM sessions WHERE id = 'session_1'").get()).toEqual({
+        status: "running",
+        runtime_session_id: "runtime_session_1",
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  test("reports startup failure by failing the session and blocking the task with an event reason", () => {
+    const database = createMigratedMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      services.createTask({ id: "task_1", projectId: "project_a", title: "First" });
+      const claim = services.claimNextTask({ projectId: "project_a", sessionId: "session_1" });
+      expect(claim).toMatchObject({ ok: true, session: { status: "starting" } });
+
+      const failed = services.reportStartupFailed({
+        projectId: "project_a",
+        sessionId: "session_1",
+        errorMessage: "runtime boot timed out",
+      });
+      const duplicate = services.reportStartupFailed({
+        projectId: "project_a",
+        sessionId: "session_1",
+        errorMessage: "runtime boot timed out",
+      });
+      const conflictingDuplicate = services.reportStartupFailed({
+        projectId: "project_a",
+        sessionId: "session_1",
+        errorMessage: "different reason",
+      });
+
+      expect(failed).toMatchObject({
+        ok: true,
+        idempotent: false,
+        session: { id: "session_1", status: "failed" },
+        task: { id: "task_1", status: "blocked" },
+        event: { type: "session.startup_failed" },
+        outbox: { routingKey: "project.project_a.control" },
+      });
+      expect(duplicate).toMatchObject({ ok: true, idempotent: true, session: { id: "session_1", status: "failed" } });
+      expect(conflictingDuplicate).toEqual({
+        ok: false,
+        error: { code: "conflict", message: "session session_1 already failed with different startup details" },
+      });
+      expect(database.query<{ status: string }, []>("SELECT status FROM tasks WHERE id = 'task_1'").get()).toEqual({
+        status: "blocked",
+      });
+      expect(JSON.parse(database.query<{ payload_json: string }, []>("SELECT payload_json FROM events WHERE type = 'session.startup_failed'").get()?.payload_json ?? "{}")).toMatchObject({
+        errorMessage: "runtime boot timed out",
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  test("rejects unsafe startup report transitions", () => {
+    const database = createMigratedMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      services.createTask({ id: "task_queued", projectId: "project_a", title: "Queued" });
+      services.createTask({ id: "task_starting", projectId: "project_a", title: "Starting" });
+      services.createSessionAttempt({ id: "session_queued", projectId: "project_a", taskId: "task_queued" });
+
+      expect(services.reportStartupSucceeded({ projectId: "project_a", sessionId: "missing" })).toEqual({
+        ok: false,
+        error: { code: "not_found", message: "session not found: missing" },
+      });
+      expect(services.reportStartupSucceeded({ projectId: "project_a", sessionId: "session_queued" })).toEqual({
+        ok: false,
+        error: { code: "invalid_state", message: "startup success requires starting session; got queued" },
+      });
+
+      const claim = services.claimNextTask({ projectId: "project_a", sessionId: "session_starting" });
+      expect(claim).toMatchObject({ ok: true });
+      services.reportStartupSucceeded({ projectId: "project_a", sessionId: "session_starting", runtimeSessionId: "runtime_1" });
+      expect(services.reportStartupFailed({ projectId: "project_a", sessionId: "session_starting", errorMessage: "too late" })).toEqual({
+        ok: false,
+        error: { code: "invalid_state", message: "startup failure requires starting session; got running" },
+      });
+      expect(services.reportStartupSucceeded({ projectId: "project_a", sessionId: "session_starting", runtimeSessionId: "runtime_2" })).toEqual({
+        ok: false,
+        error: { code: "conflict", message: "session session_starting already has a different runtime session id" },
+      });
+    } finally {
+      database.close();
+    }
+  });
+
   test("appends structured event payloads", () => {
     const database = createMigratedMemoryDatabase();
 
