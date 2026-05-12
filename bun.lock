@@ -24,6 +24,7 @@
         "@agent-pool/auth": "workspace:*",
         "@agent-pool/config": "workspace:*",
         "@agent-pool/queue": "workspace:*",
+        "@agent-pool/runtime": "workspace:*",
         "@agent-pool/shared": "workspace:*",
         "@agent-pool/storage": "workspace:*",
       },
@@ -77,6 +78,16 @@
     "packages/runtime": {
       "name": "@agent-pool/runtime",
       "version": "0.0.0",
+      "dependencies": {
+        "@agent-pool/session-bridge": "workspace:*",
+      },
+    },
+    "packages/session-bridge": {
+      "name": "@agent-pool/session-bridge",
+      "version": "0.0.0",
+      "dependencies": {
+        "@agent-pool/shared": "workspace:*",
+      },
     },
     "packages/shared": {
       "name": "@agent-pool/shared",
@@ -104,6 +115,8 @@
     "@agent-pool/queue": ["@agent-pool/queue@workspace:packages/queue"],
 
     "@agent-pool/runtime": ["@agent-pool/runtime@workspace:packages/runtime"],
+
+    "@agent-pool/session-bridge": ["@agent-pool/session-bridge@workspace:packages/session-bridge"],
 
     "@agent-pool/shared": ["@agent-pool/shared@workspace:packages/shared"],
 
