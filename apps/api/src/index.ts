@@ -18,6 +18,14 @@ export {
   type ApiDatabaseConnection,
   type ApiDatabaseEnv,
 } from "./database";
+export {
+  createOutboxPublisher,
+  type FailedOutboxRecord,
+  type OutboxPublisherOptions,
+  type PublishQueuedOutboxOptions,
+  type PublishQueuedOutboxResult,
+  type PublishedOutboxRecord,
+} from "./outbox-publisher";
 
 if (isDirectRun()) {
   const env = readProcessEnv();
