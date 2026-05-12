@@ -285,7 +285,75 @@ describe("API service skeleton", () => {
     }
   });
 
-  test("internal orchestrator placeholder endpoints are not exposed as public routes", async () => {
+  test("heartbeat and reconcile endpoints update session heartbeat state", async () => {
+    const { baseUrl, config, database, close } = await startTestApi();
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      services.createTask({ id: "task_stale", projectId: "project_a", title: "Stale task" });
+      services.createTask({ id: "task_lost", projectId: "project_a", title: "Lost task" });
+      services.createTask({ id: "task_fresh", projectId: "project_a", title: "Fresh task" });
+      expect(services.claimNextTask({ projectId: "project_a", sessionId: "session_stale" })).toMatchObject({ ok: true });
+      expect(services.reportStartupSucceeded({ projectId: "project_a", sessionId: "session_stale" })).toMatchObject({ ok: true });
+      expect(services.claimNextTask({ projectId: "project_a", sessionId: "session_lost" })).toMatchObject({ ok: true });
+      expect(services.reportStartupSucceeded({ projectId: "project_a", sessionId: "session_lost" })).toMatchObject({ ok: true });
+      expect(services.claimNextTask({ projectId: "project_a", sessionId: "session_fresh" })).toMatchObject({ ok: true });
+      expect(services.reportStartupSucceeded({ projectId: "project_a", sessionId: "session_fresh" })).toMatchObject({ ok: true });
+
+      const heartbeat = await postSessionHeartbeat(baseUrl, config, "session_fresh", {
+        projectId: "project_a",
+        observedAt: "2026-01-01T00:01:30.000Z",
+      });
+      database.sqlite
+        .query(
+          `
+            UPDATE sessions
+            SET last_heartbeat_at = CASE id
+              WHEN 'session_lost' THEN '2026-01-01T00:00:00.000Z'
+              WHEN 'session_stale' THEN '2026-01-01T00:00:30.000Z'
+              ELSE last_heartbeat_at
+            END
+          `,
+        )
+        .run();
+      const reconcile = await postReconcile(baseUrl, config, {
+        projectId: "project_a",
+        lostBefore: "2026-01-01T00:00:00.000Z",
+        staleBefore: "2026-01-01T00:01:00.000Z",
+        now: "2026-01-01T00:02:00.000Z",
+      });
+
+      expect(heartbeat.status).toBe(200);
+      expect(await heartbeat.json()).toMatchObject({
+        ok: true,
+        session: { id: "session_fresh", heartbeatStatus: "fresh", lastHeartbeatAt: "2026-01-01T00:01:30.000Z" },
+        event: { type: "session.heartbeat" },
+      });
+      expect(reconcile.status).toBe(200);
+      expect(await reconcile.json()).toMatchObject({
+        ok: true,
+        stale: [{ id: "session_stale", heartbeatStatus: "stale" }],
+        lost: [{ id: "session_lost", status: "failed", heartbeatStatus: "lost" }],
+      });
+      expect(
+        database.sqlite
+          .query<{ session_status: string; heartbeat_status: string; task_status: string }, []>(
+            `
+              SELECT s.status AS session_status, s.heartbeat_status, t.status AS task_status
+              FROM sessions s
+              JOIN tasks t ON t.project_id = s.project_id AND t.id = s.task_id
+              WHERE s.id = 'session_lost'
+            `,
+          )
+          .get(),
+      ).toEqual({ session_status: "failed", heartbeat_status: "lost", task_status: "blocked" });
+    } finally {
+      await close();
+    }
+  });
+
+  test("internal orchestrator endpoints are not exposed as public routes and validate bodies", async () => {
     const { baseUrl, config, close } = await startTestApi();
 
     try {
@@ -301,13 +369,13 @@ describe("API service skeleton", () => {
           [config.serviceToken.headerName]: config.serviceToken.token,
         },
       });
-      const heartbeat = await fetch(`${baseUrl}/internal/orchestrator/sessions/session_1/heartbeat`, {
+      const missingHeartbeatProject = await fetch(`${baseUrl}/internal/orchestrator/sessions/session_1/heartbeat`, {
         method: "POST",
         headers: {
           [config.serviceToken.headerName]: config.serviceToken.token,
         },
       });
-      const reconcile = await fetch(`${baseUrl}/internal/orchestrator/reconcile`, {
+      const missingReconcileThresholds = await fetch(`${baseUrl}/internal/orchestrator/reconcile`, {
         method: "POST",
         headers: {
           [config.serviceToken.headerName]: config.serviceToken.token,
@@ -317,10 +385,10 @@ describe("API service skeleton", () => {
       expect(publicRoute.status).toBe(404);
       expect(missingCommandProject.status).toBe(400);
       expect(await missingCommandProject.json()).toMatchObject({ error: "missing_project_id" });
-      expect(heartbeat.status).toBe(501);
-      expect(await heartbeat.json()).toMatchObject({ error: "internal_orchestrator_endpoint_not_implemented" });
-      expect(reconcile.status).toBe(501);
-      expect(await reconcile.json()).toMatchObject({ error: "internal_orchestrator_endpoint_not_implemented" });
+      expect(missingHeartbeatProject.status).toBe(400);
+      expect(await missingHeartbeatProject.json()).toMatchObject({ error: "missing_project_id" });
+      expect(missingReconcileThresholds.status).toBe(400);
+      expect(await missingReconcileThresholds.json()).toMatchObject({ error: "missing_reconcile_thresholds" });
     } finally {
       await close();
     }
@@ -370,6 +438,37 @@ async function postStartupReport(
   body: Readonly<Record<string, unknown>>,
 ): Promise<Response> {
   return fetch(`${baseUrl}/internal/orchestrator/sessions/${sessionId}/startup-${report}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      [config.serviceToken.headerName]: config.serviceToken.token,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+async function postSessionHeartbeat(
+  baseUrl: string,
+  config: ReturnType<typeof loadConfig>,
+  sessionId: string,
+  body: Readonly<Record<string, unknown>>,
+): Promise<Response> {
+  return fetch(`${baseUrl}/internal/orchestrator/sessions/${sessionId}/heartbeat`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      [config.serviceToken.headerName]: config.serviceToken.token,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+async function postReconcile(
+  baseUrl: string,
+  config: ReturnType<typeof loadConfig>,
+  body: Readonly<Record<string, unknown>>,
+): Promise<Response> {
+  return fetch(`${baseUrl}/internal/orchestrator/reconcile`, {
     method: "POST",
     headers: {
       "content-type": "application/json",

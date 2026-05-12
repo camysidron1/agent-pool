@@ -188,6 +188,57 @@ export type StartupReportResult =
     }
   | { readonly ok: false; readonly error: { readonly code: "not_found" | "invalid_state" | "conflict"; readonly message: string } };
 
+export type SessionHeartbeatInput = {
+  readonly projectId: string;
+  readonly sessionId: string;
+  readonly observedAt?: string | null;
+};
+
+export type SessionHeartbeatRecord = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly status: "starting" | "running";
+  readonly heartbeatStatus: "fresh";
+  readonly lastHeartbeatAt: string;
+  readonly staleAt: null;
+  readonly lostAt: null;
+};
+
+export type SessionHeartbeatResult =
+  | {
+      readonly ok: true;
+      readonly session: SessionHeartbeatRecord;
+      readonly event: EventRecord;
+      readonly outbox: OutboxRecord;
+    }
+  | { readonly ok: false; readonly error: { readonly code: "not_found" | "invalid_state"; readonly message: string } };
+
+export type HeartbeatReconcileInput = {
+  readonly projectId?: string | null;
+  readonly staleBefore: string;
+  readonly lostBefore: string;
+  readonly now?: string | null;
+};
+
+export type ReconciledHeartbeatSessionRecord = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly status: "starting" | "running" | "failed";
+  readonly heartbeatStatus: "stale" | "lost";
+  readonly lastHeartbeatAt: string | null;
+  readonly heartbeatBasisAt: string;
+};
+
+export type HeartbeatReconcileResult = {
+  readonly ok: true;
+  readonly stale: readonly ReconciledHeartbeatSessionRecord[];
+  readonly lost: readonly ReconciledHeartbeatSessionRecord[];
+  readonly events: readonly EventRecord[];
+  readonly outbox: readonly OutboxRecord[];
+};
+
 export type RecordFinalAssistantResponseInput = {
   readonly projectId: string;
   readonly sessionId: string;
@@ -418,6 +469,14 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
 
     reportStartupFailed(input: StartupReportInput): StartupReportResult {
       return reportStartupFailed(database, input);
+    },
+
+    reportSessionHeartbeat(input: SessionHeartbeatInput): SessionHeartbeatResult {
+      return reportSessionHeartbeat(database, input);
+    },
+
+    reconcileLostSessions(input: HeartbeatReconcileInput): HeartbeatReconcileResult {
+      return reconcileLostSessions(database, input);
     },
 
     requestCommand(input: RequestCommandInput): RequestCommandResult {
@@ -976,6 +1035,263 @@ function startupTaskRecord(session: StartupSessionState, status: "running" | "bl
     projectId: session.project_id,
     status,
   };
+}
+
+function reportSessionHeartbeat(database: WebSandboxSqliteDatabase, input: SessionHeartbeatInput): SessionHeartbeatResult {
+  return transaction(database, () => {
+    const current = readHeartbeatSessionState(database, input.projectId, input.sessionId);
+    const observedAt = input.observedAt?.trim() || readDatabaseTimestamp(database);
+
+    if (!current) {
+      return { ok: false, error: { code: "not_found", message: `session not found: ${input.sessionId}` } } as const;
+    }
+    if (!isActiveSessionStatus(current.status)) {
+      return {
+        ok: false,
+        error: { code: "invalid_state", message: `heartbeat requires active session; got ${current.status}` },
+      } as const;
+    }
+
+    database
+      .query(
+        "UPDATE sessions SET last_heartbeat_at = ?, heartbeat_status = 'fresh', stale_at = NULL, lost_at = NULL WHERE project_id = ? AND id = ?",
+      )
+      .run(observedAt, input.projectId, input.sessionId);
+
+    const updated = readHeartbeatSessionState(database, input.projectId, input.sessionId);
+    if (!updated || !isActiveSessionStatus(updated.status)) {
+      throw new Error(`reported heartbeat session disappeared: ${input.sessionId}`);
+    }
+
+    const event = appendEvent(database, {
+      projectId: updated.project_id,
+      taskId: updated.task_id,
+      sessionId: updated.id,
+      type: "session.heartbeat",
+      payload: { sessionId: updated.id, taskId: updated.task_id, observedAt },
+    });
+    const outbox = enqueueOutbox(database, {
+      projectId: updated.project_id,
+      eventId: event.id,
+      routingKey: projectRoutingKey(updated.project_id, "events"),
+      payload: { eventId: event.id, sessionId: updated.id, type: event.type },
+    });
+
+    return {
+      ok: true,
+      session: heartbeatSessionRecord(updated),
+      event,
+      outbox,
+    } as const;
+  });
+}
+
+function reconcileLostSessions(database: WebSandboxSqliteDatabase, input: HeartbeatReconcileInput): HeartbeatReconcileResult {
+  const now = input.now?.trim() || readDatabaseTimestamp(database);
+  const projectId = input.projectId?.trim() || null;
+  const staleBefore = input.staleBefore.trim();
+  const lostBefore = input.lostBefore.trim();
+
+  return transaction(database, () => {
+    const events: EventRecord[] = [];
+    const outboxRows: OutboxRecord[] = [];
+    const lost = selectLostHeartbeatCandidates(database, projectId, lostBefore).map((candidate) => {
+      database
+        .query(
+          "UPDATE sessions SET status = 'failed', heartbeat_status = 'lost', stale_at = COALESCE(stale_at, ?), lost_at = ?, ended_at = COALESCE(ended_at, ?) WHERE project_id = ? AND id = ? AND status IN ('starting', 'running') AND heartbeat_status != 'lost'",
+        )
+        .run(now, now, now, candidate.project_id, candidate.id);
+      database
+        .query("UPDATE tasks SET status = 'blocked', updated_at = ? WHERE project_id = ? AND id = ? AND status = 'running'")
+        .run(now, candidate.project_id, candidate.task_id);
+
+      const { event, outbox } = appendHeartbeatReconcileEvent(database, candidate, "session.lost", {
+        reason: "heartbeat_lost",
+        lastHeartbeatAt: candidate.last_heartbeat_at,
+        heartbeatBasisAt: candidate.heartbeat_basis_at,
+        lostBefore,
+        markedAt: now,
+      });
+      events.push(event);
+      outboxRows.push(outbox);
+
+      return reconciledHeartbeatSessionRecord(candidate, "failed", "lost");
+    });
+
+    const stale = selectStaleHeartbeatCandidates(database, projectId, staleBefore, lostBefore).map((candidate) => {
+      database
+        .query(
+          "UPDATE sessions SET heartbeat_status = 'stale', stale_at = COALESCE(stale_at, ?) WHERE project_id = ? AND id = ? AND status IN ('starting', 'running') AND heartbeat_status = 'fresh'",
+        )
+        .run(now, candidate.project_id, candidate.id);
+
+      const { event, outbox } = appendHeartbeatReconcileEvent(database, candidate, "session.stale", {
+        lastHeartbeatAt: candidate.last_heartbeat_at,
+        heartbeatBasisAt: candidate.heartbeat_basis_at,
+        staleBefore,
+        markedAt: now,
+      });
+      events.push(event);
+      outboxRows.push(outbox);
+
+      return reconciledHeartbeatSessionRecord(candidate, candidate.status, "stale");
+    });
+
+    return { ok: true, stale, lost, events, outbox: outboxRows } as const;
+  });
+}
+
+type HeartbeatSessionState = {
+  readonly id: string;
+  readonly project_id: string;
+  readonly task_id: string;
+  readonly status: string;
+  readonly heartbeat_status: string;
+  readonly last_heartbeat_at: string | null;
+  readonly stale_at: string | null;
+  readonly lost_at: string | null;
+};
+
+type HeartbeatReconcileCandidate = {
+  readonly id: string;
+  readonly project_id: string;
+  readonly task_id: string;
+  readonly status: "starting" | "running";
+  readonly heartbeat_status: string;
+  readonly last_heartbeat_at: string | null;
+  readonly heartbeat_basis_at: string;
+};
+
+function readHeartbeatSessionState(database: WebSandboxSqliteDatabase, projectId: string, sessionId: string): HeartbeatSessionState | null {
+  return database
+    .query<HeartbeatSessionState, [string, string]>(
+      "SELECT id, project_id, task_id, status, heartbeat_status, last_heartbeat_at, stale_at, lost_at FROM sessions WHERE project_id = ? AND id = ?",
+    )
+    .get(projectId, sessionId);
+}
+
+function selectLostHeartbeatCandidates(
+  database: WebSandboxSqliteDatabase,
+  projectId: string | null,
+  lostBefore: string,
+): HeartbeatReconcileCandidate[] {
+  return database
+    .query<HeartbeatReconcileCandidate, [string | null, string | null, string]>(
+      `
+        SELECT
+          s.id,
+          s.project_id,
+          s.task_id,
+          s.status,
+          s.heartbeat_status,
+          s.last_heartbeat_at,
+          COALESCE(s.last_heartbeat_at, s.started_at, s.created_at) AS heartbeat_basis_at
+        FROM sessions s
+        JOIN tasks t ON t.project_id = s.project_id AND t.id = s.task_id
+        WHERE s.status IN ('starting', 'running')
+          AND s.heartbeat_status != 'lost'
+          AND (? IS NULL OR s.project_id = ?)
+          AND COALESCE(s.last_heartbeat_at, s.started_at, s.created_at) <= ?
+        ORDER BY heartbeat_basis_at ASC, s.created_at ASC, s.id ASC
+      `,
+    )
+    .all(projectId, projectId, lostBefore);
+}
+
+function selectStaleHeartbeatCandidates(
+  database: WebSandboxSqliteDatabase,
+  projectId: string | null,
+  staleBefore: string,
+  lostBefore: string,
+): HeartbeatReconcileCandidate[] {
+  return database
+    .query<HeartbeatReconcileCandidate, [string | null, string | null, string, string]>(
+      `
+        SELECT
+          s.id,
+          s.project_id,
+          s.task_id,
+          s.status,
+          s.heartbeat_status,
+          s.last_heartbeat_at,
+          COALESCE(s.last_heartbeat_at, s.started_at, s.created_at) AS heartbeat_basis_at
+        FROM sessions s
+        JOIN tasks t ON t.project_id = s.project_id AND t.id = s.task_id
+        WHERE s.status IN ('starting', 'running')
+          AND s.heartbeat_status = 'fresh'
+          AND (? IS NULL OR s.project_id = ?)
+          AND COALESCE(s.last_heartbeat_at, s.started_at, s.created_at) <= ?
+          AND COALESCE(s.last_heartbeat_at, s.started_at, s.created_at) > ?
+        ORDER BY heartbeat_basis_at ASC, s.created_at ASC, s.id ASC
+      `,
+    )
+    .all(projectId, projectId, staleBefore, lostBefore);
+}
+
+function appendHeartbeatReconcileEvent(
+  database: WebSandboxSqliteDatabase,
+  session: HeartbeatReconcileCandidate,
+  type: "session.stale" | "session.lost",
+  extraPayload: Readonly<Record<string, unknown>>,
+): { readonly event: EventRecord; readonly outbox: OutboxRecord } {
+  const event = appendEvent(database, {
+    projectId: session.project_id,
+    taskId: session.task_id,
+    sessionId: session.id,
+    type,
+    payload: { sessionId: session.id, taskId: session.task_id, ...extraPayload },
+  });
+  const outbox = enqueueOutbox(database, {
+    projectId: session.project_id,
+    eventId: event.id,
+    routingKey: projectRoutingKey(session.project_id, "control"),
+    payload: { eventId: event.id, sessionId: session.id, type: event.type },
+  });
+
+  return { event, outbox };
+}
+
+function heartbeatSessionRecord(session: HeartbeatSessionState): SessionHeartbeatRecord {
+  if (!isActiveSessionStatus(session.status) || session.last_heartbeat_at === null) {
+    throw new Error(`session heartbeat record is not active/fresh: ${session.id}`);
+  }
+
+  return {
+    id: session.id,
+    projectId: session.project_id,
+    taskId: session.task_id,
+    status: session.status,
+    heartbeatStatus: "fresh",
+    lastHeartbeatAt: session.last_heartbeat_at,
+    staleAt: null,
+    lostAt: null,
+  };
+}
+
+function reconciledHeartbeatSessionRecord(
+  session: HeartbeatReconcileCandidate,
+  status: "starting" | "running" | "failed",
+  heartbeatStatus: "stale" | "lost",
+): ReconciledHeartbeatSessionRecord {
+  return {
+    id: session.id,
+    projectId: session.project_id,
+    taskId: session.task_id,
+    status,
+    heartbeatStatus,
+    lastHeartbeatAt: session.last_heartbeat_at,
+    heartbeatBasisAt: session.heartbeat_basis_at,
+  };
+}
+
+function isActiveSessionStatus(status: string): status is "starting" | "running" {
+  return status === "starting" || status === "running";
+}
+
+function readDatabaseTimestamp(database: WebSandboxSqliteDatabase): string {
+  const row = database.query<{ now: string }, []>("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AS now").get();
+  if (!row) throw new Error("failed to read database timestamp");
+  return row.now;
 }
 
 function commandReportRecord(

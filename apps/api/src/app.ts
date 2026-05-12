@@ -132,8 +132,12 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
   app.post("/internal/orchestrator/sessions/:sessionId/startup-failed", requireInternalServiceToken, (request, response) => {
     respondWithStartupReport(response, services, request, "failed");
   });
-  app.post("/internal/orchestrator/sessions/:sessionId/heartbeat", requireInternalServiceToken, sendNotImplemented);
-  app.post("/internal/orchestrator/reconcile", requireInternalServiceToken, sendNotImplemented);
+  app.post("/internal/orchestrator/sessions/:sessionId/heartbeat", requireInternalServiceToken, (request, response) => {
+    respondWithSessionHeartbeat(response, services, request);
+  });
+  app.post("/internal/orchestrator/reconcile", requireInternalServiceToken, (request, response) => {
+    respondWithReconcile(response, services, request);
+  });
 
   app.get("/metrics", (_request, response) => {
     response
@@ -275,6 +279,82 @@ function respondWithStartupReport(
   });
 }
 
+function respondWithSessionHeartbeat(
+  response: Response,
+  services: ReturnType<typeof createCanonicalStateServices> | null,
+  request: Request,
+): void {
+  if (!services) {
+    response.status(503).json({ ok: false, error: "database_unavailable" });
+    return;
+  }
+
+  const sessionId = request.params?.sessionId;
+  if (!sessionId) {
+    response.status(400).json({ ok: false, error: "missing_session_id" });
+    return;
+  }
+
+  const body = parseObjectBody(request.body);
+  const projectId = readOptionalString(body.projectId);
+  if (!projectId) {
+    response.status(400).json({ ok: false, error: "missing_project_id" });
+    return;
+  }
+
+  const result = services.reportSessionHeartbeat({
+    projectId,
+    sessionId,
+    observedAt: readOptionalString(body.observedAt),
+  });
+
+  if (!result.ok) {
+    response.status(result.error.code === "not_found" ? 404 : 409).json({ ok: false, error: result.error });
+    return;
+  }
+
+  response.status(200).json({
+    ok: true,
+    session: result.session,
+    event: result.event,
+    outbox: result.outbox,
+  });
+}
+
+function respondWithReconcile(
+  response: Response,
+  services: ReturnType<typeof createCanonicalStateServices> | null,
+  request: Request,
+): void {
+  if (!services) {
+    response.status(503).json({ ok: false, error: "database_unavailable" });
+    return;
+  }
+
+  const body = parseObjectBody(request.body);
+  const staleBefore = readOptionalString(body.staleBefore);
+  const lostBefore = readOptionalString(body.lostBefore);
+  if (!staleBefore || !lostBefore) {
+    response.status(400).json({ ok: false, error: "missing_reconcile_thresholds" });
+    return;
+  }
+
+  const result = services.reconcileLostSessions({
+    projectId: readOptionalString(body.projectId),
+    staleBefore,
+    lostBefore,
+    now: readOptionalString(body.now),
+  });
+
+  response.status(200).json({
+    ok: true,
+    stale: result.stale,
+    lost: result.lost,
+    events: result.events,
+    outbox: result.outbox,
+  });
+}
+
 function parseObjectBody(body: unknown): Record<string, unknown> {
   return body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
 }
@@ -283,13 +363,4 @@ function readOptionalString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function sendNotImplemented(request: Request, response: Response): void {
-  response.status(501).json({
-    ok: false,
-    error: "internal_orchestrator_endpoint_not_implemented",
-    method: request.method,
-    path: request.path,
-  });
 }

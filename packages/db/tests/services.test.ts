@@ -270,6 +270,163 @@ describe("canonical state services", () => {
     }
   });
 
+  test("records session heartbeats and clears stale markers", () => {
+    const database = createMigratedMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      services.createTask({ id: "task_1", projectId: "project_a", title: "First" });
+      expect(services.claimNextTask({ projectId: "project_a", sessionId: "session_1" })).toMatchObject({ ok: true });
+      expect(services.reportStartupSucceeded({ projectId: "project_a", sessionId: "session_1" })).toMatchObject({ ok: true });
+      database
+        .query(
+          "UPDATE sessions SET heartbeat_status = 'stale', last_heartbeat_at = '2026-01-01T00:00:30.000Z', stale_at = '2026-01-01T00:01:00.000Z' WHERE id = 'session_1'",
+        )
+        .run();
+
+      const heartbeat = services.reportSessionHeartbeat({
+        projectId: "project_a",
+        sessionId: "session_1",
+        observedAt: "2026-01-01T00:02:00.000Z",
+      });
+
+      expect(heartbeat).toMatchObject({
+        ok: true,
+        session: {
+          id: "session_1",
+          status: "running",
+          heartbeatStatus: "fresh",
+          lastHeartbeatAt: "2026-01-01T00:02:00.000Z",
+          staleAt: null,
+          lostAt: null,
+        },
+        event: { type: "session.heartbeat" },
+        outbox: { routingKey: "project.project_a.events" },
+      });
+      expect(
+        database
+          .query<
+            { last_heartbeat_at: string | null; heartbeat_status: string; stale_at: string | null; lost_at: string | null },
+            []
+          >("SELECT last_heartbeat_at, heartbeat_status, stale_at, lost_at FROM sessions WHERE id = 'session_1'")
+          .get(),
+      ).toEqual({
+        last_heartbeat_at: "2026-01-01T00:02:00.000Z",
+        heartbeat_status: "fresh",
+        stale_at: null,
+        lost_at: null,
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  test("reconciles stale and lost sessions deterministically without provider calls", () => {
+    const database = createMigratedMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      services.createTask({ id: "task_stale", projectId: "project_a", title: "Stale" });
+      services.createTask({ id: "task_lost", projectId: "project_a", title: "Lost" });
+      services.createTask({ id: "task_fresh", projectId: "project_a", title: "Fresh" });
+      expect(services.claimNextTask({ projectId: "project_a", sessionId: "session_stale" })).toMatchObject({ ok: true });
+      expect(services.reportStartupSucceeded({ projectId: "project_a", sessionId: "session_stale" })).toMatchObject({ ok: true });
+      expect(services.claimNextTask({ projectId: "project_a", sessionId: "session_lost" })).toMatchObject({ ok: true });
+      expect(services.reportStartupSucceeded({ projectId: "project_a", sessionId: "session_lost" })).toMatchObject({ ok: true });
+      expect(services.claimNextTask({ projectId: "project_a", sessionId: "session_fresh" })).toMatchObject({ ok: true });
+      expect(services.reportStartupSucceeded({ projectId: "project_a", sessionId: "session_fresh" })).toMatchObject({ ok: true });
+      database
+        .query(
+          `
+            UPDATE sessions
+            SET last_heartbeat_at = CASE id
+              WHEN 'session_lost' THEN '2026-01-01T00:00:00.000Z'
+              WHEN 'session_stale' THEN '2026-01-01T00:00:30.000Z'
+              ELSE '2026-01-01T00:01:30.000Z'
+            END
+          `,
+        )
+        .run();
+
+      const result = services.reconcileLostSessions({
+        projectId: "project_a",
+        lostBefore: "2026-01-01T00:00:00.000Z",
+        staleBefore: "2026-01-01T00:01:00.000Z",
+        now: "2026-01-01T00:02:00.000Z",
+      });
+      const repeated = services.reconcileLostSessions({
+        projectId: "project_a",
+        lostBefore: "2026-01-01T00:00:00.000Z",
+        staleBefore: "2026-01-01T00:01:00.000Z",
+        now: "2026-01-01T00:03:00.000Z",
+      });
+
+      expect(result.stale).toEqual([
+        {
+          id: "session_stale",
+          projectId: "project_a",
+          taskId: "task_stale",
+          status: "running",
+          heartbeatStatus: "stale",
+          lastHeartbeatAt: "2026-01-01T00:00:30.000Z",
+          heartbeatBasisAt: "2026-01-01T00:00:30.000Z",
+        },
+      ]);
+      expect(result.lost).toEqual([
+        {
+          id: "session_lost",
+          projectId: "project_a",
+          taskId: "task_lost",
+          status: "failed",
+          heartbeatStatus: "lost",
+          lastHeartbeatAt: "2026-01-01T00:00:00.000Z",
+          heartbeatBasisAt: "2026-01-01T00:00:00.000Z",
+        },
+      ]);
+      expect(result.events.map((event) => event.type).sort()).toEqual(["session.lost", "session.stale"]);
+      expect(result.outbox).toHaveLength(2);
+      expect(repeated.stale).toEqual([]);
+      expect(repeated.lost).toEqual([]);
+      expect(
+        database
+          .query<
+            { id: string; status: string; heartbeat_status: string; stale_at: string | null; lost_at: string | null },
+            []
+          >(
+            "SELECT id, status, heartbeat_status, stale_at, lost_at FROM sessions WHERE id IN ('session_stale', 'session_lost') ORDER BY id",
+          )
+          .all(),
+      ).toEqual([
+        {
+          id: "session_lost",
+          status: "failed",
+          heartbeat_status: "lost",
+          stale_at: "2026-01-01T00:02:00.000Z",
+          lost_at: "2026-01-01T00:02:00.000Z",
+        },
+        {
+          id: "session_stale",
+          status: "running",
+          heartbeat_status: "stale",
+          stale_at: "2026-01-01T00:02:00.000Z",
+          lost_at: null,
+        },
+      ]);
+      expect(database.query<{ status: string }, []>("SELECT status FROM tasks WHERE id = 'task_lost'").get()).toEqual({
+        status: "blocked",
+      });
+      expect(
+        database
+          .query<{ count: number }, []>("SELECT COUNT(*) AS count FROM events WHERE type IN ('session.stale', 'session.lost')")
+          .get()?.count,
+      ).toBe(2);
+    } finally {
+      database.close();
+    }
+  });
+
   test("appends structured event payloads", () => {
     const database = createMigratedMemoryDatabase();
 

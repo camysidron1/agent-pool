@@ -12,6 +12,7 @@ import {
   INITIAL_MIGRATION_ID,
   MIGRATION_TABLE_NAME,
   ORCHESTRATOR_COMMAND_SCHEMA_MIGRATION_ID,
+  SESSION_HEARTBEAT_SCHEMA_MIGRATION_ID,
   SESSION_SCHEMA_MIGRATION_ID,
   STORAGE_LOG_SCHEMA_MIGRATION_ID,
   createDrizzleDatabase,
@@ -63,6 +64,10 @@ describe("web/sandbox database migration harness", () => {
           id: FINAL_RESPONSE_SCHEMA_MIGRATION_ID,
           description: "Add final assistant response persistence fields",
         },
+        {
+          id: SESSION_HEARTBEAT_SCHEMA_MIGRATION_ID,
+          description: "Add session heartbeat reconciliation fields",
+        },
       ]);
 
       const database = new Database(dbPath, { readonly: true, strict: true });
@@ -94,6 +99,7 @@ describe("web/sandbox database migration harness", () => {
         CHAT_STEERING_NOTE_SCHEMA_MIGRATION_ID,
         STORAGE_LOG_SCHEMA_MIGRATION_ID,
         FINAL_RESPONSE_SCHEMA_MIGRATION_ID,
+        SESSION_HEARTBEAT_SCHEMA_MIGRATION_ID,
       ]);
       expect(second.applied).toEqual([]);
     } finally {

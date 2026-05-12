@@ -10,6 +10,9 @@ export type DbTaskStatus = (typeof taskStatusValues)[number];
 export const sessionStatusValues = ["queued", "starting", "running", "succeeded", "failed", "canceled"] as const;
 export type SessionStatus = (typeof sessionStatusValues)[number];
 
+export const heartbeatStatusValues = ["fresh", "stale", "lost"] as const;
+export type HeartbeatStatus = (typeof heartbeatStatusValues)[number];
+
 export const sessionSnapshotKindValues = ["manual", "retry_base", "system"] as const;
 export type SessionSnapshotKind = (typeof sessionSnapshotKindValues)[number];
 
@@ -127,11 +130,16 @@ export const sessions = sqliteTable(
     finalResponseText: text("final_response_text"),
     finalResponseMetadataJson: text("final_response_metadata_json"),
     finalResponseRecordedAt: text("final_response_recorded_at"),
+    lastHeartbeatAt: text("last_heartbeat_at"),
+    heartbeatStatus: text("heartbeat_status", { enum: heartbeatStatusValues }).notNull().default("fresh"),
+    staleAt: text("stale_at"),
+    lostAt: text("lost_at"),
   },
   (table) => [
     uniqueIndex("sessions_project_task_attempt_unique").on(table.projectId, table.taskId, table.attemptNumber),
     uniqueIndex("sessions_project_id_unique").on(table.projectId, table.id),
     index("sessions_project_status_idx").on(table.projectId, table.status),
+    index("sessions_heartbeat_status_idx").on(table.projectId, table.heartbeatStatus, table.lastHeartbeatAt),
     foreignKey({
       name: "sessions_task_fk",
       columns: [table.projectId, table.taskId],

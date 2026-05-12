@@ -44,6 +44,7 @@ export const ARTIFACT_EVENT_OUTBOX_SCHEMA_MIGRATION_ID = "0004_artifact_event_ou
 export const CHAT_STEERING_NOTE_SCHEMA_MIGRATION_ID = "0005_chat_steering_note_schema" as const;
 export const STORAGE_LOG_SCHEMA_MIGRATION_ID = "0006_storage_log_schema" as const;
 export const FINAL_RESPONSE_SCHEMA_MIGRATION_ID = "0007_final_response_schema" as const;
+export const SESSION_HEARTBEAT_SCHEMA_MIGRATION_ID = "0008_session_heartbeat_schema" as const;
 
 export const WEB_SANDBOX_MIGRATIONS: readonly SqlMigration[] = [
   {
@@ -316,6 +317,17 @@ export const WEB_SANDBOX_MIGRATIONS: readonly SqlMigration[] = [
       "ALTER TABLE sessions ADD COLUMN final_response_text TEXT",
       "ALTER TABLE sessions ADD COLUMN final_response_metadata_json TEXT",
       "ALTER TABLE sessions ADD COLUMN final_response_recorded_at TEXT",
+    ],
+  },
+  {
+    id: SESSION_HEARTBEAT_SCHEMA_MIGRATION_ID,
+    description: "Add session heartbeat reconciliation fields",
+    sql: [
+      "ALTER TABLE sessions ADD COLUMN last_heartbeat_at TEXT",
+      "ALTER TABLE sessions ADD COLUMN heartbeat_status TEXT NOT NULL DEFAULT 'fresh' CHECK (heartbeat_status IN ('fresh', 'stale', 'lost'))",
+      "ALTER TABLE sessions ADD COLUMN stale_at TEXT",
+      "ALTER TABLE sessions ADD COLUMN lost_at TEXT",
+      "CREATE INDEX IF NOT EXISTS sessions_heartbeat_status_idx ON sessions (project_id, heartbeat_status, last_heartbeat_at)",
     ],
   },
 ] as const;
