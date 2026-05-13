@@ -16,6 +16,13 @@ export function createBridgeCallbackClient(options: BridgeCallbackClientOptions)
 
   return {
     postEvent: (event) => postJson(fetchImpl, options.session, `/callbacks/${event.kind}`, event),
+    reportSteeringDelivery: (input) =>
+      postJson(fetchImpl, options.session, "/steering/report", {
+        ...bridgeSessionBody(options.session),
+        steeringMessageId: input.steeringMessageId,
+        status: input.status,
+        errorMessage: input.errorMessage ?? null,
+      }),
     async pollSteering(): Promise<BridgeSteeringPollResult> {
       const result = await postJson(fetchImpl, options.session, "/steering/poll", bridgeSessionBody(options.session));
 

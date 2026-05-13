@@ -101,6 +101,7 @@ export type BridgeCallbackResult =
 export type BridgeCallbackClient = {
   readonly postEvent: (event: BridgeCallbackEvent) => Promise<BridgeCallbackResult>;
   readonly pollSteering: () => Promise<BridgeSteeringPollResult>;
+  readonly reportSteeringDelivery: (input: BridgeSteeringDeliveryReportInput) => Promise<BridgeCallbackResult>;
 };
 
 export type BridgeScheduler = {
@@ -123,6 +124,12 @@ export type BridgeSteeringMessage = {
 export type BridgeSteeringPollResult =
   | { readonly ok: true; readonly messages: readonly BridgeSteeringMessage[] }
   | { readonly ok: false; readonly status: number; readonly errorMessage: string };
+
+export type BridgeSteeringDeliveryReportInput = {
+  readonly steeringMessageId: string;
+  readonly status: "delivered" | "failed";
+  readonly errorMessage?: string | null;
+};
 
 export type BridgeHarnessCommand =
   | { readonly kind: "steering"; readonly message: BridgeSteeringMessage }

@@ -77,6 +77,8 @@ describe("Phase 5 session bridge package smoke", () => {
       documentsPosted: 2,
       steeringFetched: 2,
       steeringHandled: 2,
+      steeringReported: 2,
+      steeringReportFailures: 0,
       finalResponsePosted: true,
       completionPosted: false,
       failurePosted: false,
@@ -124,6 +126,24 @@ describe("Phase 5 session bridge package smoke", () => {
     expect(server.steeringPolls).toEqual([
       { projectId: "proj_phase5", taskId: "task_phase5", sessionId: "session_phase5" },
       { projectId: "proj_phase5", taskId: "task_phase5", sessionId: "session_phase5" },
+    ]);
+    expect(server.steeringReports).toEqual([
+      {
+        projectId: "proj_phase5",
+        taskId: "task_phase5",
+        sessionId: "session_phase5",
+        steeringMessageId: "steer_1",
+        status: "delivered",
+        errorMessage: null,
+      },
+      {
+        projectId: "proj_phase5",
+        taskId: "task_phase5",
+        sessionId: "session_phase5",
+        steeringMessageId: "interrupt_1",
+        status: "delivered",
+        errorMessage: null,
+      },
     ]);
   });
 

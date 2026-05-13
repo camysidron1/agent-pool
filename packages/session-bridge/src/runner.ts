@@ -52,6 +52,8 @@ export type BridgeRunnerRunOnceResult = {
   readonly documentsPosted: number;
   readonly steeringFetched: number;
   readonly steeringHandled: number;
+  readonly steeringReported: number;
+  readonly steeringReportFailures: number;
   readonly finalResponsePosted: boolean;
   readonly completionPosted: boolean;
   readonly failurePosted: boolean;
@@ -123,6 +125,8 @@ export function createBridgeRunner(options: BridgeRunnerOptions): BridgeRunner {
       let outputPosted = 0;
       let documentsPosted = 0;
       let steeringHandled = 0;
+      let steeringReported = 0;
+      let steeringReportFailures = 0;
       let finalResponsePosted = false;
       let completionPosted = false;
       let failurePosted = false;
@@ -151,6 +155,16 @@ export function createBridgeRunner(options: BridgeRunnerOptions): BridgeRunner {
           });
           for (const output of result.output ?? []) {
             await postOrBuffer(client, eventBuffer, output);
+          }
+          const report = await client.reportSteeringDelivery({
+            steeringMessageId: message.id,
+            status: result.ok ? "delivered" : "failed",
+            errorMessage: result.ok ? null : result.errorMessage,
+          });
+          if (report.ok) {
+            steeringReported += 1;
+          } else {
+            steeringReportFailures += 1;
           }
           steeringHandled += 1;
         }
@@ -186,6 +200,8 @@ export function createBridgeRunner(options: BridgeRunnerOptions): BridgeRunner {
         documentsPosted,
         steeringFetched: steering.ok ? steering.fetched : 0,
         steeringHandled,
+        steeringReported,
+        steeringReportFailures,
         finalResponsePosted,
         completionPosted,
         failurePosted,

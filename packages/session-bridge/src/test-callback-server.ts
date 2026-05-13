@@ -7,17 +7,20 @@ import type {
 export type TestBridgeCallbackServerOptions = {
   readonly sessionToken: BridgeSessionToken;
   readonly steeringMessages?: readonly BridgeSteeringMessage[];
+  readonly failSteeringReports?: boolean;
 };
 
 export type TestBridgeCallbackServer = {
   readonly fetch: typeof fetch;
   readonly events: readonly BridgeCallbackEvent[];
   readonly steeringPolls: readonly unknown[];
+  readonly steeringReports: readonly unknown[];
 };
 
 export function createTestBridgeCallbackServer(options: TestBridgeCallbackServerOptions): TestBridgeCallbackServer {
   const events: BridgeCallbackEvent[] = [];
   const steeringPolls: unknown[] = [];
+  const steeringReports: unknown[] = [];
   const fetchImpl = async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]): Promise<Response> => {
     const request = new Request(input, init);
     const auth = verifySessionToken(request, options.sessionToken);
@@ -41,6 +44,15 @@ export function createTestBridgeCallbackServer(options: TestBridgeCallbackServer
       return Response.json({ ok: true, messages: options.steeringMessages ?? [] });
     }
 
+    if (url.pathname === "/steering/report") {
+      steeringReports.push(body);
+      if (options.failSteeringReports) {
+        return Response.json({ ok: false, error: "steering_report_failed" }, { status: 503 });
+      }
+
+      return Response.json({ ok: true, accepted: true });
+    }
+
     if (url.pathname.startsWith("/callbacks/")) {
       if (!isBridgeCallbackEvent(body)) {
         return Response.json({ ok: false, error: "invalid_callback_event" }, { status: 400 });
@@ -59,6 +71,9 @@ export function createTestBridgeCallbackServer(options: TestBridgeCallbackServer
     },
     get steeringPolls(): readonly unknown[] {
       return [...steeringPolls];
+    },
+    get steeringReports(): readonly unknown[] {
+      return [...steeringReports];
     },
     fetch: fetchImpl as typeof fetch,
   };

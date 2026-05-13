@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   createBridgeRunner,
   createTestBridgeCallbackServer,
+  type BridgeMockHarness,
   type BridgeSessionOptions,
 } from "../src";
 
@@ -47,6 +48,8 @@ describe("bridge runner", () => {
       documentsPosted: 1,
       steeringFetched: 1,
       steeringHandled: 1,
+      steeringReported: 1,
+      steeringReportFailures: 0,
       finalResponsePosted: true,
       completionPosted: false,
       failurePosted: false,
@@ -62,6 +65,16 @@ describe("bridge runner", () => {
       "final_response",
     ]);
     expect(runner.harness.state.handledSteering).toEqual([{ id: "steer_1", body: "continue" }]);
+    expect(server.steeringReports).toEqual([
+      {
+        projectId: "project_a",
+        taskId: "task_1",
+        sessionId: "session_1",
+        steeringMessageId: "steer_1",
+        status: "delivered",
+        errorMessage: null,
+      },
+    ]);
   });
 
   test("exposes explicit start and stop lifecycle through the heartbeat loop", () => {
@@ -119,6 +132,47 @@ describe("bridge runner", () => {
       bufferPending: 0,
     });
     expect(server.events.map((event) => event.kind)).toEqual(["heartbeat", "completion", "failure", "cleanup"]);
+  });
+
+  test("reports failed steering apply results without importing backend services", async () => {
+    const session = testSession();
+    const server = createTestBridgeCallbackServer({
+      sessionToken: session.sessionToken,
+      steeringMessages: [{ id: "steer_fail", body: "apply this" }],
+    });
+    const failingHarness: BridgeMockHarness = {
+      state: { generation: 1, handledSteering: [], restartCount: 0 },
+      handleCommand: () => ({
+        ok: false,
+        errorMessage: "steering apply failed",
+        output: [],
+      }),
+    };
+    const runner = createBridgeRunner({
+      session,
+      fetch: server.fetch,
+      clock: { now: () => new Date("2026-05-12T12:00:00.000Z") },
+      harness: failingHarness,
+    });
+
+    const result = await runner.runOnce({ output: [] });
+
+    expect(result).toMatchObject({
+      steeringFetched: 1,
+      steeringHandled: 1,
+      steeringReported: 1,
+      steeringReportFailures: 0,
+    });
+    expect(server.steeringReports).toEqual([
+      {
+        projectId: "project_a",
+        taskId: "task_1",
+        sessionId: "session_1",
+        steeringMessageId: "steer_fail",
+        status: "failed",
+        errorMessage: "steering apply failed",
+      },
+    ]);
   });
 });
 

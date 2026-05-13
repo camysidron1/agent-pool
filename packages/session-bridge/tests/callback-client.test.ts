@@ -79,6 +79,30 @@ describe("session bridge callback client", () => {
     ]);
   });
 
+  test("reports steering delivery with session-token auth and scope", async () => {
+    const session = testSession();
+    const server = createTestBridgeCallbackServer({ sessionToken: session.sessionToken });
+    const client = createBridgeCallbackClient({ session, fetch: server.fetch });
+
+    const result = await client.reportSteeringDelivery({
+      steeringMessageId: "steer_1",
+      status: "failed",
+      errorMessage: "apply failed",
+    });
+
+    expect(result).toEqual({ ok: true, status: 200, body: { ok: true, accepted: true } });
+    expect(server.steeringReports).toEqual([
+      {
+        projectId: "project_a",
+        taskId: "task_1",
+        sessionId: "session_1",
+        steeringMessageId: "steer_1",
+        status: "failed",
+        errorMessage: "apply failed",
+      },
+    ]);
+  });
+
   test("rejects missing and invalid session tokens deterministically", async () => {
     const session = testSession();
     const server = createTestBridgeCallbackServer({ sessionToken: session.sessionToken });
