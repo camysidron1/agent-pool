@@ -526,6 +526,84 @@ describe("API service skeleton", () => {
     }
   });
 
+  test("public API errors and mutation responses use safe deterministic shapes", async () => {
+    const { baseUrl, config, database, close } = await startTestApi();
+
+    try {
+      const firstProject = await postPublic(baseUrl, config, "/projects", {
+        slug: "error-shapes",
+        name: "Error Shapes",
+      });
+      const firstProjectBody = await firstProject.json();
+      const projectId = firstProjectBody.project.id;
+      expect(firstProject.status).toBe(201);
+
+      const duplicateProject = await postPublic(baseUrl, config, "/projects", {
+        slug: "error-shapes",
+        name: "Duplicate",
+      });
+      expect(duplicateProject.status).toBe(409);
+      expect(await duplicateProject.json()).toEqual({
+        ok: false,
+        error: { code: "conflict", message: "resource already exists" },
+      });
+
+      const missingTitle = await postPublic(baseUrl, config, `/projects/${projectId}/tasks`, {});
+      expect(missingTitle.status).toBe(400);
+      expect(await missingTitle.json()).toEqual({
+        ok: false,
+        error: { code: "validation_error", message: "title is required" },
+      });
+
+      const missingProject = await postPublic(baseUrl, config, "/projects/missing_project/tasks", {
+        title: "No project",
+      });
+      expect(missingProject.status).toBe(404);
+      expect(await missingProject.json()).toEqual({
+        ok: false,
+        error: { code: "not_found", message: "project not found: missing_project" },
+      });
+
+      const services = createCanonicalStateServices(database.sqlite);
+      const task = services.createTask({ id: "task_error_running", projectId, title: "Running task" }).task;
+      expect(services.claimNextTask({ projectId, sessionId: "session_error_running" })).toMatchObject({ ok: true });
+      expect(services.reportStartupSucceeded({ projectId, sessionId: "session_error_running" })).toMatchObject({ ok: true });
+
+      const invalidDispatch = await postPublic(baseUrl, config, `/projects/${projectId}/tasks/${task.id}/dispatch`, {});
+      expect(invalidDispatch.status).toBe(409);
+      expect(await invalidDispatch.json()).toEqual({
+        ok: false,
+        error: { code: "invalid_state", message: "start requires queued task; got running" },
+      });
+      expect(database.sqlite.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM orchestrator_commands").get()?.count).toBe(0);
+
+      const otherProject = services.createProject({ id: "project_other_scope", slug: "other-scope", name: "Other Scope" });
+      const otherTask = services.createTask({ id: "task_other_scope", projectId: otherProject.id, title: "Other" }).task;
+      expect(services.claimNextTask({ projectId: otherProject.id, sessionId: "session_other_scope" })).toMatchObject({ ok: true });
+      const crossScope = await fetch(`${baseUrl}/api/public/projects/${projectId}/tasks/${task.id}/sessions/session_other_scope`, {
+        headers: publicHeaders(config),
+      });
+      expect(crossScope.status).toBe(404);
+      expect(await crossScope.json()).toEqual({
+        ok: false,
+        error: { code: "not_found", message: "session not found: session_other_scope" },
+      });
+      expect(otherTask.projectId).toBe(otherProject.id);
+
+      const unsupported = await postPublic(baseUrl, config, `/projects/${projectId}/tasks/${task.id}/sessions/session_error_running/resume`, {});
+      expect(unsupported.status).toBe(501);
+      expect(await unsupported.json()).toEqual({
+        ok: false,
+        error: {
+          code: "unsupported_provider_command",
+          message: "resume is not supported by the configured runtime providers",
+        },
+      });
+    } finally {
+      await close();
+    }
+  });
+
   test("internal orchestrator namespace requires service-token auth", async () => {
     const { baseUrl, config, close } = await startTestApi();
 

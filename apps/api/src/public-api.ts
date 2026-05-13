@@ -147,6 +147,10 @@ export function registerPublicApiRoutes(app: Express, options: PublicApiOptions)
         priority: readOptionalBodyInteger(body.priority),
         runtimeSource: readOptionalRuntimeSource(body.runtimeSource),
       };
+      if (!services.listProjects().some((project) => project.id === projectId)) {
+        response.status(404).json(publicError("not_found", `project not found: ${projectId}`));
+        return;
+      }
       const result = services.createTask(input);
       const detail = services.readTaskDetail({ projectId, taskId: result.task.id });
 
@@ -784,7 +788,18 @@ function readOptionalRuntimeSource(value: unknown): TaskRuntimeSourceMetadata | 
 }
 
 function respondPublicException(response: Response, error: unknown): void {
-  response.status(400).json(publicError("validation_error", error instanceof Error ? error.message : String(error)));
+  const message = error instanceof Error ? error.message : String(error);
+
+  if (/UNIQUE constraint failed/i.test(message)) {
+    response.status(409).json(publicError("conflict", "resource already exists"));
+    return;
+  }
+  if (/FOREIGN KEY constraint failed/i.test(message) || /^project not found:/i.test(message)) {
+    response.status(404).json(publicError("not_found", "referenced resource was not found"));
+    return;
+  }
+
+  response.status(400).json(publicError("validation_error", message));
 }
 
 function readProviderCapabilities(config: AppConfig): readonly {
