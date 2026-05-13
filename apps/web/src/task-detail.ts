@@ -1,4 +1,4 @@
-import type { PublicArtifactSummary, PublicEventSummary, PublicLogStreamSummary, PublicTaskDetail } from "./api";
+import type { JsonRecord, PublicArtifactSummary, PublicEventSummary, PublicLogStreamSummary, PublicSessionSummary, PublicTaskDetail } from "./api";
 import { summarizeLogStream } from "./board";
 
 const ARTIFACT_KIND_ORDER = ["document", "file", "link", "log", "final_response_url"] as const;
@@ -22,6 +22,23 @@ export type ArtifactGroup = {
   readonly kind: string;
   readonly label: string;
   readonly artifacts: readonly PublicArtifactSummary[];
+};
+
+export type AttemptTimelineItem = {
+  readonly session: PublicSessionSummary;
+  readonly isLatest: boolean;
+  readonly title: string;
+  readonly timing: string;
+  readonly heartbeat: string;
+};
+
+export type FinalResultDetail = {
+  readonly recorded: boolean;
+  readonly sessionId: string | null;
+  readonly recordedAt: string | null;
+  readonly text: string | null;
+  readonly metadata: JsonRecord;
+  readonly urls: readonly string[];
 };
 
 export function getRawLogEntries(task: PublicTaskDetail): readonly RawLogEntry[] {
@@ -90,6 +107,34 @@ export function canPreviewArtifact(artifact: PublicArtifactSummary): boolean {
   return artifact.kind === "document";
 }
 
+export function getAttemptTimeline(task: PublicTaskDetail): readonly AttemptTimelineItem[] {
+  const latestSessionId = task.latestSession?.id ?? task.sessions.at(-1)?.id ?? null;
+
+  return [...task.sessions]
+    .sort((left, right) => left.attemptNumber - right.attemptNumber || Date.parse(left.createdAt) - Date.parse(right.createdAt))
+    .map((session) => ({
+      session,
+      isLatest: session.id === latestSessionId,
+      title: `Attempt ${session.attemptNumber}`,
+      timing: formatAttemptTiming(session),
+      heartbeat: formatAttemptHeartbeat(session),
+    }));
+}
+
+export function getFinalResultDetail(task: PublicTaskDetail): FinalResultDetail {
+  const session = [...task.sessions].reverse().find((candidate) => candidate.finalResponseRecordedAt || candidate.finalResponseText) ?? null;
+  const urls = task.artifacts.filter((artifact) => artifact.kind === "final_response_url").map((artifact) => artifact.uri);
+
+  return {
+    recorded: Boolean(session?.finalResponseRecordedAt || session?.finalResponseText || urls.length > 0),
+    sessionId: session?.id ?? null,
+    recordedAt: session?.finalResponseRecordedAt ?? null,
+    text: session?.finalResponseText ?? null,
+    metadata: session?.finalResponseMetadata ?? {},
+    urls,
+  };
+}
+
 function readRawLogEntry(event: PublicEventSummary): RawLogEntry | null {
   const text = readPayloadString(event, "text");
   if (text === null) return null;
@@ -139,4 +184,18 @@ function labelArtifactKind(kind: string): string {
 function readMetadataString(artifact: PublicArtifactSummary, key: string): string | null {
   const value = artifact.metadata[key];
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function formatAttemptTiming(session: PublicSessionSummary): string {
+  if (session.startedAt && session.endedAt) return `${session.startedAt} to ${session.endedAt}`;
+  if (session.startedAt) return `started ${session.startedAt}`;
+  if (session.endedAt) return `ended ${session.endedAt}`;
+  return `created ${session.createdAt}`;
+}
+
+function formatAttemptHeartbeat(session: PublicSessionSummary): string {
+  if (session.lostAt) return `lost ${session.lostAt}`;
+  if (session.staleAt) return `stale ${session.staleAt}`;
+  if (session.lastHeartbeatAt) return `${session.heartbeatStatus} ${session.lastHeartbeatAt}`;
+  return session.heartbeatStatus;
 }

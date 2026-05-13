@@ -62,6 +62,8 @@ import {
   getArtifactHref,
   getArtifactStatus,
   getArtifactTitle,
+  getAttemptTimeline,
+  getFinalResultDetail,
   getRawLogEntries,
   groupArtifacts,
   shouldFollowRawLogScroll,
@@ -863,6 +865,10 @@ function TaskPanel({
             )}
           </section>
 
+          <AttemptTimelineSection detail={detail} />
+
+          <FinalResultSection detail={detail} />
+
           <section className="panel-section" aria-label="Raw logs">
             <h3>Raw Logs</h3>
             <RawLogViewer detail={detail} />
@@ -1021,6 +1027,101 @@ function TaskPanel({
         </div>
       ) : null}
     </aside>
+  );
+}
+
+function AttemptTimelineSection({ detail }: { readonly detail: PublicTaskDetail }) {
+  const attempts = getAttemptTimeline(detail);
+
+  return (
+    <section className="panel-section attempt-timeline-section" aria-label="Attempt timeline">
+      <h3>Attempt Timeline</h3>
+      {attempts.length === 0 ? (
+        <p>No attempts recorded.</p>
+      ) : (
+        <ol className="attempt-timeline">
+          {attempts.map((attempt) => (
+            <li key={attempt.session.id} className={attempt.isLatest ? "attempt-latest" : ""}>
+              <div>
+                <strong>{attempt.title}</strong>
+                {attempt.isLatest ? <span>latest</span> : null}
+              </div>
+              <dl className="attempt-grid">
+                <div>
+                  <dt>Status</dt>
+                  <dd>{attempt.session.status}</dd>
+                </div>
+                <div>
+                  <dt>Provider</dt>
+                  <dd>{attempt.session.runtimeProvider ?? "none"}</dd>
+                </div>
+                <div>
+                  <dt>Timing</dt>
+                  <dd>{attempt.timing}</dd>
+                </div>
+                <div>
+                  <dt>Heartbeat</dt>
+                  <dd>{attempt.heartbeat}</dd>
+                </div>
+              </dl>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+}
+
+function FinalResultSection({ detail }: { readonly detail: PublicTaskDetail }) {
+  const result = getFinalResultDetail(detail);
+
+  return (
+    <section className="panel-section final-result-section" aria-label="Final assistant response">
+      <h3>Final Assistant Response</h3>
+      {result.recorded ? (
+        <>
+          <dl className="detail-grid">
+            <div>
+              <dt>Session</dt>
+              <dd>{result.sessionId ?? "none"}</dd>
+            </div>
+            <div>
+              <dt>Recorded</dt>
+              <dd>{formatTimestamp(result.recordedAt)}</dd>
+            </div>
+            <div>
+              <dt>URLs</dt>
+              <dd>{result.urls.length}</dd>
+            </div>
+          </dl>
+          {result.text ? (
+            <pre className="final-response-text" aria-label="Final response text">
+              {result.text}
+            </pre>
+          ) : (
+            <p>Final response text was not recorded.</p>
+          )}
+          {Object.keys(result.metadata).length > 0 ? (
+            <pre className="final-response-metadata" aria-label="Final response metadata">
+              {JSON.stringify(result.metadata, null, 2)}
+            </pre>
+          ) : null}
+          {result.urls.length > 0 ? (
+            <ul className="artifact-list">
+              {result.urls.map((url) => (
+                <li key={url}>
+                  <a href={url} target="_blank" rel="noreferrer">
+                    {url}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </>
+      ) : (
+        <p>No final response recorded.</p>
+      )}
+    </section>
   );
 }
 

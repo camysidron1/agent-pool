@@ -7,6 +7,8 @@ import {
   getArtifactHref,
   getArtifactStatus,
   getArtifactTitle,
+  getAttemptTimeline,
+  getFinalResultDetail,
   getRawLogEntries,
   groupArtifacts,
   shouldFollowRawLogScroll,
@@ -80,6 +82,41 @@ describe("web task detail helpers", () => {
     expect(getArtifactHref(url)).toBe("https://example.test/result");
     expect(getArtifactHref(file)).toBeNull();
   });
+
+  test("builds attempt timeline and final result details from public task detail", () => {
+    const detail = {
+      ...detailTask(),
+      latestSession: session("session-2", 2, "succeeded", {
+        finalResponseText: "Done: https://example.test/result",
+        finalResponseMetadata: { model: "fake" },
+        finalResponseRecordedAt: "2026-05-13T00:04:00.000Z",
+      }),
+      sessions: [
+        session("session-2", 2, "succeeded", {
+          finalResponseText: "Done: https://example.test/result",
+          finalResponseMetadata: { model: "fake" },
+          finalResponseRecordedAt: "2026-05-13T00:04:00.000Z",
+        }),
+        session("session-1", 1, "failed", { staleAt: "2026-05-13T00:02:00.000Z" }),
+      ],
+      artifacts: [artifact("artifact-url", "final_response_url", "https://example.test/result")],
+    };
+
+    const timeline = getAttemptTimeline(detail);
+    const result = getFinalResultDetail(detail);
+
+    expect(timeline.map((item) => item.session.id)).toEqual(["session-1", "session-2"]);
+    expect(timeline.map((item) => item.title)).toEqual(["Attempt 1", "Attempt 2"]);
+    expect(timeline[1]?.isLatest).toBe(true);
+    expect(timeline[0]?.heartbeat).toContain("stale");
+    expect(result).toMatchObject({
+      recorded: true,
+      sessionId: "session-2",
+      text: "Done: https://example.test/result",
+      metadata: { model: "fake" },
+      urls: ["https://example.test/result"],
+    });
+  });
 });
 
 function outputEvent(id: string, sequence: number, text: string) {
@@ -120,6 +157,38 @@ function detailTask(): PublicTaskDetail {
     logStreams: [],
     steeringMessages: [],
     notes: [],
+  };
+}
+
+function session(
+  id: string,
+  attemptNumber: number,
+  status: string,
+  options: {
+    readonly staleAt?: string | null;
+    readonly finalResponseText?: string | null;
+    readonly finalResponseMetadata?: Readonly<Record<string, unknown>>;
+    readonly finalResponseRecordedAt?: string | null;
+  } = {},
+) {
+  return {
+    id,
+    projectId: "project-a",
+    taskId: "task-a",
+    attemptNumber,
+    status,
+    runtimeProvider: "fake",
+    runtimeSessionId: null,
+    createdAt: "2026-05-13T00:00:00.000Z",
+    startedAt: "2026-05-13T00:01:00.000Z",
+    endedAt: status === "succeeded" || status === "failed" ? "2026-05-13T00:03:00.000Z" : null,
+    finalResponseText: options.finalResponseText ?? null,
+    finalResponseMetadata: options.finalResponseMetadata ?? {},
+    finalResponseRecordedAt: options.finalResponseRecordedAt ?? null,
+    lastHeartbeatAt: "2026-05-13T00:02:30.000Z",
+    heartbeatStatus: options.staleAt ? "stale" : "fresh",
+    staleAt: options.staleAt ?? null,
+    lostAt: null,
   };
 }
 
