@@ -1,0 +1,1417 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Namespace",
+      "metadata": {
+        "name": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "agent-pool-secrets",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "type": "Opaque",
+      "stringData": {
+        "INTERNAL_SERVICE_TOKEN": "<replace-with-random-service-token>",
+        "OPERATOR_ID": "operator-local",
+        "OPERATOR_EMAIL": "operator@example.com",
+        "OPERATOR_DISPLAY_NAME": "Agent Pool Operator",
+        "RABBITMQ_DEFAULT_USER": "agent-pool",
+        "RABBITMQ_DEFAULT_PASS": "<replace-with-rabbitmq-password>",
+        "RABBITMQ_URL": "amqp://agent-pool:<replace-with-rabbitmq-password>@agent-pool-rabbitmq.agent-pool.svc.cluster.local:5672",
+        "RABBITMQ_MANAGEMENT_URL": "http://agent-pool:<replace-with-rabbitmq-password>@agent-pool-rabbitmq.agent-pool.svc.cluster.local:15672",
+        "MINIO_ROOT_USER": "agent-pool",
+        "MINIO_ROOT_PASSWORD": "<replace-with-minio-password>",
+        "E2B_API_KEY": "<optional-e2b-api-key>",
+        "GITHUB_TOKEN": "<optional-github-token>"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "metadata": {
+        "name": "agent-pool-config",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "data": {
+        "AUTH_MODE": "local",
+        "API_PORT": "3000",
+        "API_PUBLIC_URL": "https://agent-pool.example.com",
+        "API_INTERNAL_URL": "http://agent-pool-api.agent-pool.svc.cluster.local:3000",
+        "BRIDGE_CALLBACK_BASE_URL": "http://agent-pool-api.agent-pool.svc.cluster.local:3000",
+        "ORCHESTRATOR_PORT": "3001",
+        "ORCHESTRATOR_PUBLIC_URL": "http://agent-pool-orchestrator.agent-pool.svc.cluster.local:3001",
+        "ORCHESTRATOR_BACKEND_INTERNAL_URL": "http://agent-pool-api.agent-pool.svc.cluster.local:3000",
+        "RABBITMQ_PROJECT_TASK_QUEUE_PREFIX": "project-tasks",
+        "RABBITMQ_PROJECT_CONTROL_QUEUE_PREFIX": "project-control",
+        "STORAGE_ADAPTER": "blob",
+        "STORAGE_BUCKET": "agent-pool-artifacts",
+        "STORAGE_LOCAL_ROOT": "/tmp/agent-pool/storage",
+        "BLOB_ENDPOINT_URL": "http://agent-pool-blob.agent-pool.svc.cluster.local:9000",
+        "BLOB_FORCE_PATH_STYLE": "true",
+        "RUNTIME_PROVIDER": "fake",
+        "COMPOSE_SMOKE_ENABLED": "true",
+        "COMPOSE_SMOKE_PROJECT_ID": "deployed-smoke",
+        "CONTROL_PLANE_WORKER_POLL_INTERVAL_MS": "1000",
+        "CONTROL_PLANE_OUTBOX_PUBLISH_INTERVAL_MS": "1000",
+        "CONTROL_PLANE_RECONCILE_INTERVAL_MS": "5000",
+        "E2B_API_KEY_ENV_NAME": "E2B_API_KEY",
+        "E2B_GITHUB_TOKEN_ENV_NAME": "GITHUB_TOKEN",
+        "E2B_ALLOWED_SECRET_ENV_NAMES": "GITHUB_TOKEN",
+        "E2B_TEMPLATE_ID": "<optional-e2b-template-id>",
+        "E2B_WORKING_DIRECTORY": "/workspace/agent-pool",
+        "E2B_STARTUP_TIMEOUT_MS": "120000",
+        "E2B_CLEANUP_TIMEOUT_MS": "30000"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "metadata": {
+        "name": "agent-pool-prometheus-config",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool-prometheus",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "data": {
+        "prometheus.yml": "global:\n  scrape_interval: 15s\nscrape_configs:\n  - job_name: agent-pool-api\n    metrics_path: /metrics\n    static_configs:\n      - targets:\n          - agent-pool-api.agent-pool.svc.cluster.local:3000\n  - job_name: agent-pool-orchestrator\n    metrics_path: /metrics\n    static_configs:\n      - targets:\n          - agent-pool-orchestrator.agent-pool.svc.cluster.local:3001\n"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolumeClaim",
+      "metadata": {
+        "name": "agent-pool-sqlite",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool-api",
+          "app.kubernetes.io/component": "api",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "spec": {
+        "accessModes": [
+          "ReadWriteOnce"
+        ],
+        "resources": {
+          "requests": {
+            "storage": "10Gi"
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolumeClaim",
+      "metadata": {
+        "name": "agent-pool-sqlite-backups",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool-backup",
+          "app.kubernetes.io/component": "backup",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "spec": {
+        "accessModes": [
+          "ReadWriteOnce"
+        ],
+        "resources": {
+          "requests": {
+            "storage": "20Gi"
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolumeClaim",
+      "metadata": {
+        "name": "agent-pool-rabbitmq-data",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool-rabbitmq",
+          "app.kubernetes.io/component": "queue",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "spec": {
+        "accessModes": [
+          "ReadWriteOnce"
+        ],
+        "resources": {
+          "requests": {
+            "storage": "10Gi"
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolumeClaim",
+      "metadata": {
+        "name": "agent-pool-blob-data",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool-blob",
+          "app.kubernetes.io/component": "blob-storage",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "spec": {
+        "accessModes": [
+          "ReadWriteOnce"
+        ],
+        "resources": {
+          "requests": {
+            "storage": "50Gi"
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolumeClaim",
+      "metadata": {
+        "name": "agent-pool-prometheus-data",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool-prometheus",
+          "app.kubernetes.io/component": "metrics",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "spec": {
+        "accessModes": [
+          "ReadWriteOnce"
+        ],
+        "resources": {
+          "requests": {
+            "storage": "10Gi"
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "agent-pool-api",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool-api",
+          "app.kubernetes.io/component": "api",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "spec": {
+        "selector": {
+          "app.kubernetes.io/name": "agent-pool-api",
+          "app.kubernetes.io/component": "api"
+        },
+        "ports": [
+          {
+            "name": "http",
+            "port": 3000,
+            "targetPort": 3000
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "agent-pool-api",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool-api",
+          "app.kubernetes.io/component": "api",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "spec": {
+        "replicas": 1,
+        "selector": {
+          "matchLabels": {
+            "app.kubernetes.io/name": "agent-pool-api",
+            "app.kubernetes.io/component": "api"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/name": "agent-pool-api",
+              "app.kubernetes.io/component": "api",
+              "app.kubernetes.io/part-of": "agent-pool"
+            },
+            "annotations": {
+              "prometheus.io/scrape": "true",
+              "prometheus.io/path": "/metrics",
+              "prometheus.io/port": "3000"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "api",
+                "image": "agent-pool-api:latest",
+                "imagePullPolicy": "IfNotPresent",
+                "ports": [
+                  {
+                    "name": "http",
+                    "containerPort": 3000
+                  }
+                ],
+                "env": [
+                  {
+                    "name": "AUTH_MODE",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "AUTH_MODE"
+                      }
+                    }
+                  },
+                  {
+                    "name": "API_PORT",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "API_PORT"
+                      }
+                    }
+                  },
+                  {
+                    "name": "API_PUBLIC_URL",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "API_PUBLIC_URL"
+                      }
+                    }
+                  },
+                  {
+                    "name": "API_INTERNAL_URL",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "API_INTERNAL_URL"
+                      }
+                    }
+                  },
+                  {
+                    "name": "BRIDGE_CALLBACK_BASE_URL",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "BRIDGE_CALLBACK_BASE_URL"
+                      }
+                    }
+                  },
+                  {
+                    "name": "AGENT_POOL_WEB_SANDBOX_DB_PATH",
+                    "value": "/var/lib/agent-pool/web-sandbox.db"
+                  },
+                  {
+                    "name": "INTERNAL_SERVICE_TOKEN",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "INTERNAL_SERVICE_TOKEN"
+                      }
+                    }
+                  },
+                  {
+                    "name": "OPERATOR_ID",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "OPERATOR_ID"
+                      }
+                    }
+                  },
+                  {
+                    "name": "OPERATOR_EMAIL",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "OPERATOR_EMAIL"
+                      }
+                    }
+                  },
+                  {
+                    "name": "OPERATOR_DISPLAY_NAME",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "OPERATOR_DISPLAY_NAME"
+                      }
+                    }
+                  },
+                  {
+                    "name": "RABBITMQ_URL",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "RABBITMQ_URL"
+                      }
+                    }
+                  },
+                  {
+                    "name": "RABBITMQ_MANAGEMENT_URL",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "RABBITMQ_MANAGEMENT_URL"
+                      }
+                    }
+                  },
+                  {
+                    "name": "RABBITMQ_PROJECT_TASK_QUEUE_PREFIX",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "RABBITMQ_PROJECT_TASK_QUEUE_PREFIX"
+                      }
+                    }
+                  },
+                  {
+                    "name": "RABBITMQ_PROJECT_CONTROL_QUEUE_PREFIX",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "RABBITMQ_PROJECT_CONTROL_QUEUE_PREFIX"
+                      }
+                    }
+                  },
+                  {
+                    "name": "STORAGE_ADAPTER",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "STORAGE_ADAPTER"
+                      }
+                    }
+                  },
+                  {
+                    "name": "STORAGE_BUCKET",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "STORAGE_BUCKET"
+                      }
+                    }
+                  },
+                  {
+                    "name": "STORAGE_LOCAL_ROOT",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "STORAGE_LOCAL_ROOT"
+                      }
+                    }
+                  },
+                  {
+                    "name": "COMPOSE_SMOKE_ENABLED",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "COMPOSE_SMOKE_ENABLED"
+                      }
+                    }
+                  },
+                  {
+                    "name": "COMPOSE_SMOKE_PROJECT_ID",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "COMPOSE_SMOKE_PROJECT_ID"
+                      }
+                    }
+                  },
+                  {
+                    "name": "CONTROL_PLANE_OUTBOX_PUBLISH_INTERVAL_MS",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "CONTROL_PLANE_OUTBOX_PUBLISH_INTERVAL_MS"
+                      }
+                    }
+                  }
+                ],
+                "volumeMounts": [
+                  {
+                    "name": "sqlite-data",
+                    "mountPath": "/var/lib/agent-pool"
+                  }
+                ],
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/health",
+                    "port": 3000
+                  },
+                  "initialDelaySeconds": 5,
+                  "periodSeconds": 10
+                },
+                "livenessProbe": {
+                  "httpGet": {
+                    "path": "/health",
+                    "port": 3000
+                  },
+                  "initialDelaySeconds": 15,
+                  "periodSeconds": 20
+                }
+              }
+            ],
+            "volumes": [
+              {
+                "name": "sqlite-data",
+                "persistentVolumeClaim": {
+                  "claimName": "agent-pool-sqlite"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "agent-pool-orchestrator",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool-orchestrator",
+          "app.kubernetes.io/component": "orchestrator",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "spec": {
+        "selector": {
+          "app.kubernetes.io/name": "agent-pool-orchestrator",
+          "app.kubernetes.io/component": "orchestrator"
+        },
+        "ports": [
+          {
+            "name": "http",
+            "port": 3001,
+            "targetPort": 3001
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "agent-pool-orchestrator",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool-orchestrator",
+          "app.kubernetes.io/component": "orchestrator",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "spec": {
+        "replicas": 1,
+        "selector": {
+          "matchLabels": {
+            "app.kubernetes.io/name": "agent-pool-orchestrator",
+            "app.kubernetes.io/component": "orchestrator"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/name": "agent-pool-orchestrator",
+              "app.kubernetes.io/component": "orchestrator",
+              "app.kubernetes.io/part-of": "agent-pool"
+            },
+            "annotations": {
+              "prometheus.io/scrape": "true",
+              "prometheus.io/path": "/metrics",
+              "prometheus.io/port": "3001"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "orchestrator",
+                "image": "agent-pool-orchestrator:latest",
+                "imagePullPolicy": "IfNotPresent",
+                "ports": [
+                  {
+                    "name": "http",
+                    "containerPort": 3001
+                  }
+                ],
+                "env": [
+                  {
+                    "name": "AUTH_MODE",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "AUTH_MODE"
+                      }
+                    }
+                  },
+                  {
+                    "name": "INTERNAL_SERVICE_TOKEN",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "INTERNAL_SERVICE_TOKEN"
+                      }
+                    }
+                  },
+                  {
+                    "name": "ORCHESTRATOR_PORT",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "ORCHESTRATOR_PORT"
+                      }
+                    }
+                  },
+                  {
+                    "name": "ORCHESTRATOR_PUBLIC_URL",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "ORCHESTRATOR_PUBLIC_URL"
+                      }
+                    }
+                  },
+                  {
+                    "name": "ORCHESTRATOR_BACKEND_INTERNAL_URL",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "ORCHESTRATOR_BACKEND_INTERNAL_URL"
+                      }
+                    }
+                  },
+                  {
+                    "name": "RABBITMQ_URL",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "RABBITMQ_URL"
+                      }
+                    }
+                  },
+                  {
+                    "name": "RABBITMQ_MANAGEMENT_URL",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "RABBITMQ_MANAGEMENT_URL"
+                      }
+                    }
+                  },
+                  {
+                    "name": "RABBITMQ_PROJECT_TASK_QUEUE_PREFIX",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "RABBITMQ_PROJECT_TASK_QUEUE_PREFIX"
+                      }
+                    }
+                  },
+                  {
+                    "name": "RABBITMQ_PROJECT_CONTROL_QUEUE_PREFIX",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "RABBITMQ_PROJECT_CONTROL_QUEUE_PREFIX"
+                      }
+                    }
+                  },
+                  {
+                    "name": "STORAGE_ADAPTER",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "STORAGE_ADAPTER"
+                      }
+                    }
+                  },
+                  {
+                    "name": "STORAGE_BUCKET",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "STORAGE_BUCKET"
+                      }
+                    }
+                  },
+                  {
+                    "name": "RUNTIME_PROVIDER",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "RUNTIME_PROVIDER"
+                      }
+                    }
+                  },
+                  {
+                    "name": "CONTROL_PLANE_WORKER_POLL_INTERVAL_MS",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "CONTROL_PLANE_WORKER_POLL_INTERVAL_MS"
+                      }
+                    }
+                  },
+                  {
+                    "name": "CONTROL_PLANE_RECONCILE_INTERVAL_MS",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "CONTROL_PLANE_RECONCILE_INTERVAL_MS"
+                      }
+                    }
+                  },
+                  {
+                    "name": "COMPOSE_SMOKE_ENABLED",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "COMPOSE_SMOKE_ENABLED"
+                      }
+                    }
+                  },
+                  {
+                    "name": "E2B_API_KEY_ENV_NAME",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "E2B_API_KEY_ENV_NAME"
+                      }
+                    }
+                  },
+                  {
+                    "name": "E2B_API_KEY",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "E2B_API_KEY",
+                        "optional": true
+                      }
+                    }
+                  },
+                  {
+                    "name": "E2B_TEMPLATE_ID",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "E2B_TEMPLATE_ID",
+                        "optional": true
+                      }
+                    }
+                  },
+                  {
+                    "name": "E2B_GITHUB_TOKEN_ENV_NAME",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "E2B_GITHUB_TOKEN_ENV_NAME"
+                      }
+                    }
+                  },
+                  {
+                    "name": "GITHUB_TOKEN",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "GITHUB_TOKEN",
+                        "optional": true
+                      }
+                    }
+                  },
+                  {
+                    "name": "E2B_ALLOWED_SECRET_ENV_NAMES",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "E2B_ALLOWED_SECRET_ENV_NAMES"
+                      }
+                    }
+                  }
+                ],
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/health",
+                    "port": 3001
+                  },
+                  "initialDelaySeconds": 5,
+                  "periodSeconds": 10
+                },
+                "livenessProbe": {
+                  "httpGet": {
+                    "path": "/health",
+                    "port": 3001
+                  },
+                  "initialDelaySeconds": 15,
+                  "periodSeconds": 20
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "agent-pool-web",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool-web",
+          "app.kubernetes.io/component": "web",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "spec": {
+        "selector": {
+          "app.kubernetes.io/name": "agent-pool-web",
+          "app.kubernetes.io/component": "web"
+        },
+        "ports": [
+          {
+            "name": "http",
+            "port": 8080,
+            "targetPort": 8080
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "agent-pool-web",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool-web",
+          "app.kubernetes.io/component": "web",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "spec": {
+        "replicas": 1,
+        "selector": {
+          "matchLabels": {
+            "app.kubernetes.io/name": "agent-pool-web",
+            "app.kubernetes.io/component": "web"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/name": "agent-pool-web",
+              "app.kubernetes.io/component": "web",
+              "app.kubernetes.io/part-of": "agent-pool"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "web",
+                "image": "agent-pool-web:latest",
+                "imagePullPolicy": "IfNotPresent",
+                "ports": [
+                  {
+                    "name": "http",
+                    "containerPort": 8080
+                  }
+                ],
+                "env": [
+                  {
+                    "name": "PUBLIC_API_BASE_URL",
+                    "value": ""
+                  }
+                ],
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/",
+                    "port": 8080
+                  },
+                  "initialDelaySeconds": 5,
+                  "periodSeconds": 10
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "agent-pool-rabbitmq",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool-rabbitmq",
+          "app.kubernetes.io/component": "queue",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "spec": {
+        "selector": {
+          "app.kubernetes.io/name": "agent-pool-rabbitmq",
+          "app.kubernetes.io/component": "queue"
+        },
+        "ports": [
+          {
+            "name": "amqp",
+            "port": 5672,
+            "targetPort": 5672
+          },
+          {
+            "name": "management",
+            "port": 15672,
+            "targetPort": 15672
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "StatefulSet",
+      "metadata": {
+        "name": "agent-pool-rabbitmq",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool-rabbitmq",
+          "app.kubernetes.io/component": "queue",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "spec": {
+        "serviceName": "agent-pool-rabbitmq",
+        "replicas": 1,
+        "selector": {
+          "matchLabels": {
+            "app.kubernetes.io/name": "agent-pool-rabbitmq",
+            "app.kubernetes.io/component": "queue"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/name": "agent-pool-rabbitmq",
+              "app.kubernetes.io/component": "queue",
+              "app.kubernetes.io/part-of": "agent-pool"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "rabbitmq",
+                "image": "rabbitmq:3.13-management-alpine",
+                "ports": [
+                  {
+                    "name": "amqp",
+                    "containerPort": 5672
+                  },
+                  {
+                    "name": "management",
+                    "containerPort": 15672
+                  }
+                ],
+                "env": [
+                  {
+                    "name": "RABBITMQ_DEFAULT_USER",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "RABBITMQ_DEFAULT_USER"
+                      }
+                    }
+                  },
+                  {
+                    "name": "RABBITMQ_DEFAULT_PASS",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "RABBITMQ_DEFAULT_PASS"
+                      }
+                    }
+                  }
+                ],
+                "volumeMounts": [
+                  {
+                    "name": "rabbitmq-data",
+                    "mountPath": "/var/lib/rabbitmq"
+                  }
+                ],
+                "readinessProbe": {
+                  "exec": {
+                    "command": [
+                      "rabbitmq-diagnostics",
+                      "-q",
+                      "ping"
+                    ]
+                  },
+                  "initialDelaySeconds": 10,
+                  "periodSeconds": 10
+                }
+              }
+            ],
+            "volumes": [
+              {
+                "name": "rabbitmq-data",
+                "persistentVolumeClaim": {
+                  "claimName": "agent-pool-rabbitmq-data"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "agent-pool-blob",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool-blob",
+          "app.kubernetes.io/component": "blob-storage",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "spec": {
+        "selector": {
+          "app.kubernetes.io/name": "agent-pool-blob",
+          "app.kubernetes.io/component": "blob-storage"
+        },
+        "ports": [
+          {
+            "name": "s3",
+            "port": 9000,
+            "targetPort": 9000
+          },
+          {
+            "name": "console",
+            "port": 9001,
+            "targetPort": 9001
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "StatefulSet",
+      "metadata": {
+        "name": "agent-pool-blob",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool-blob",
+          "app.kubernetes.io/component": "blob-storage",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "spec": {
+        "serviceName": "agent-pool-blob",
+        "replicas": 1,
+        "selector": {
+          "matchLabels": {
+            "app.kubernetes.io/name": "agent-pool-blob",
+            "app.kubernetes.io/component": "blob-storage"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/name": "agent-pool-blob",
+              "app.kubernetes.io/component": "blob-storage",
+              "app.kubernetes.io/part-of": "agent-pool"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "minio",
+                "image": "minio/minio:RELEASE.2024-10-13T13-34-11Z",
+                "args": [
+                  "server",
+                  "/data",
+                  "--console-address",
+                  ":9001"
+                ],
+                "ports": [
+                  {
+                    "name": "s3",
+                    "containerPort": 9000
+                  },
+                  {
+                    "name": "console",
+                    "containerPort": 9001
+                  }
+                ],
+                "env": [
+                  {
+                    "name": "MINIO_ROOT_USER",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "MINIO_ROOT_USER"
+                      }
+                    }
+                  },
+                  {
+                    "name": "MINIO_ROOT_PASSWORD",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "MINIO_ROOT_PASSWORD"
+                      }
+                    }
+                  }
+                ],
+                "volumeMounts": [
+                  {
+                    "name": "blob-data",
+                    "mountPath": "/data"
+                  }
+                ],
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/minio/health/ready",
+                    "port": 9000
+                  },
+                  "initialDelaySeconds": 10,
+                  "periodSeconds": 10
+                }
+              }
+            ],
+            "volumes": [
+              {
+                "name": "blob-data",
+                "persistentVolumeClaim": {
+                  "claimName": "agent-pool-blob-data"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "batch/v1",
+      "kind": "Job",
+      "metadata": {
+        "name": "agent-pool-blob-bootstrap",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool-blob-bootstrap",
+          "app.kubernetes.io/component": "blob-storage",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "spec": {
+        "template": {
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/name": "agent-pool-blob-bootstrap",
+              "app.kubernetes.io/component": "blob-storage",
+              "app.kubernetes.io/part-of": "agent-pool"
+            }
+          },
+          "spec": {
+            "restartPolicy": "OnFailure",
+            "containers": [
+              {
+                "name": "mc",
+                "image": "minio/mc:RELEASE.2024-10-08T09-37-26Z",
+                "command": [
+                  "sh",
+                  "-c"
+                ],
+                "args": [
+                  "mc alias set agent-pool http://agent-pool-blob.agent-pool.svc.cluster.local:9000 \"$MINIO_ROOT_USER\" \"$MINIO_ROOT_PASSWORD\" && mc mb --ignore-existing agent-pool/agent-pool-artifacts"
+                ],
+                "env": [
+                  {
+                    "name": "MINIO_ROOT_USER",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "MINIO_ROOT_USER"
+                      }
+                    }
+                  },
+                  {
+                    "name": "MINIO_ROOT_PASSWORD",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "MINIO_ROOT_PASSWORD"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "agent-pool-prometheus",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool-prometheus",
+          "app.kubernetes.io/component": "metrics",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "spec": {
+        "selector": {
+          "app.kubernetes.io/name": "agent-pool-prometheus",
+          "app.kubernetes.io/component": "metrics"
+        },
+        "ports": [
+          {
+            "name": "http",
+            "port": 9090,
+            "targetPort": 9090
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "agent-pool-prometheus",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool-prometheus",
+          "app.kubernetes.io/component": "metrics",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "spec": {
+        "replicas": 1,
+        "selector": {
+          "matchLabels": {
+            "app.kubernetes.io/name": "agent-pool-prometheus",
+            "app.kubernetes.io/component": "metrics"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/name": "agent-pool-prometheus",
+              "app.kubernetes.io/component": "metrics",
+              "app.kubernetes.io/part-of": "agent-pool"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "prometheus",
+                "image": "prom/prometheus:v2.55.1",
+                "args": [
+                  "--config.file=/etc/prometheus/prometheus.yml",
+                  "--storage.tsdb.path=/prometheus",
+                  "--storage.tsdb.retention.time=15d"
+                ],
+                "ports": [
+                  {
+                    "name": "http",
+                    "containerPort": 9090
+                  }
+                ],
+                "volumeMounts": [
+                  {
+                    "name": "prometheus-config",
+                    "mountPath": "/etc/prometheus",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "prometheus-data",
+                    "mountPath": "/prometheus"
+                  }
+                ],
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/-/healthy",
+                    "port": 9090
+                  },
+                  "initialDelaySeconds": 5,
+                  "periodSeconds": 10
+                }
+              }
+            ],
+            "volumes": [
+              {
+                "name": "prometheus-config",
+                "configMap": {
+                  "name": "agent-pool-prometheus-config"
+                }
+              },
+              {
+                "name": "prometheus-data",
+                "persistentVolumeClaim": {
+                  "claimName": "agent-pool-prometheus-data"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "batch/v1",
+      "kind": "CronJob",
+      "metadata": {
+        "name": "agent-pool-sqlite-backup",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool-sqlite-backup",
+          "app.kubernetes.io/component": "backup",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "spec": {
+        "schedule": "17 3 * * *",
+        "successfulJobsHistoryLimit": 3,
+        "failedJobsHistoryLimit": 3,
+        "jobTemplate": {
+          "spec": {
+            "template": {
+              "metadata": {
+                "labels": {
+                  "app.kubernetes.io/name": "agent-pool-sqlite-backup",
+                  "app.kubernetes.io/component": "backup",
+                  "app.kubernetes.io/part-of": "agent-pool"
+                }
+              },
+              "spec": {
+                "restartPolicy": "OnFailure",
+                "containers": [
+                  {
+                    "name": "backup",
+                    "image": "busybox:1.36",
+                    "command": [
+                      "sh",
+                      "-c"
+                    ],
+                    "args": [
+                      "stamp=\"$(date +%Y%m%d%H%M%S)\"; cp /sqlite/web-sandbox.db \"/backups/web-sandbox-${stamp}.db\"; find /backups -name 'web-sandbox-*.db' -mtime +14 -delete"
+                    ],
+                    "volumeMounts": [
+                      {
+                        "name": "sqlite-data",
+                        "mountPath": "/sqlite",
+                        "readOnly": true
+                      },
+                      {
+                        "name": "sqlite-backups",
+                        "mountPath": "/backups"
+                      }
+                    ]
+                  }
+                ],
+                "volumes": [
+                  {
+                    "name": "sqlite-data",
+                    "persistentVolumeClaim": {
+                      "claimName": "agent-pool-sqlite",
+                      "readOnly": true
+                    }
+                  },
+                  {
+                    "name": "sqlite-backups",
+                    "persistentVolumeClaim": {
+                      "claimName": "agent-pool-sqlite-backups"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "Ingress",
+      "metadata": {
+        "name": "agent-pool",
+        "namespace": "agent-pool",
+        "labels": {
+          "app.kubernetes.io/name": "agent-pool",
+          "app.kubernetes.io/part-of": "agent-pool"
+        }
+      },
+      "spec": {
+        "rules": [
+          {
+            "host": "agent-pool.example.com",
+            "http": {
+              "paths": [
+                {
+                  "path": "/api",
+                  "pathType": "Prefix",
+                  "backend": {
+                    "service": {
+                      "name": "agent-pool-api",
+                      "port": {
+                        "number": 3000
+                      }
+                    }
+                  }
+                },
+                {
+                  "path": "/",
+                  "pathType": "Prefix",
+                  "backend": {
+                    "service": {
+                      "name": "agent-pool-web",
+                      "port": {
+                        "number": 8080
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
