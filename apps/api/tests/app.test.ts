@@ -604,6 +604,93 @@ describe("API service skeleton", () => {
     }
   });
 
+  test("public responses SSE and auth boundaries redact backend secrets and DB paths", async () => {
+    const publicSseHub = createPublicSseHub();
+    const { baseUrl, config, database, close } = await startTestApi({ publicSseHub });
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      const project = services.createProject({ id: "project_public_security", slug: "public-security", name: "Public Security" });
+      const task = services.createTask({ id: "task_public_security", projectId: project.id, title: "Security" }).task;
+      services.requestCommand({
+        id: "command_public_security",
+        projectId: project.id,
+        taskId: task.id,
+        type: "start",
+        payload: {
+          serviceToken: config.serviceToken.token,
+          note: "safe note",
+        },
+      });
+      services.appendEvent({
+        id: "event_public_sensitive",
+        projectId: project.id,
+        taskId: task.id,
+        type: "task.sensitive",
+        payload: {
+          serviceToken: config.serviceToken.token,
+          bridgeSessionToken: "bridge-token-sensitive",
+          apiDatabasePath: database.path,
+          legacyDatabasePath: "/Users/cam/.agent-pool/data/agent-pool.db",
+          nested: { githubToken: "ghp_sensitive" },
+        },
+      });
+
+      const detail = await fetch(`${baseUrl}/api/public/projects/${project.id}/tasks/${task.id}`, {
+        headers: publicHeaders(config),
+      });
+      const detailText = await detail.text();
+      expect(detail.status).toBe(200);
+      expect(detailText).toContain("safe note");
+      expect(detailText).toContain("[REDACTED]");
+      expect(detailText).not.toContain(config.serviceToken.token);
+      expect(detailText).not.toContain("bridge-token-sensitive");
+      expect(detailText).not.toContain(database.path);
+      expect(detailText).not.toContain(".agent-pool/data/agent-pool.db");
+      expect(detailText).not.toContain("ghp_sensitive");
+
+      const stream = await readSseUntil(`${baseUrl}/api/public/projects/${project.id}/events`, publicHeaders(config), "task.sensitive");
+      expect(stream.text).toContain("task.sensitive");
+      expect(stream.text).toContain("[REDACTED]");
+      expect(stream.text).not.toContain(config.serviceToken.token);
+      expect(stream.text).not.toContain("bridge-token-sensitive");
+      expect(stream.text).not.toContain(database.path);
+      expect(stream.text).not.toContain(".agent-pool/data/agent-pool.db");
+      await stream.close();
+      await waitForSseClients(publicSseHub, 0);
+
+      expect(
+        services.claimNextTask({
+          projectId: project.id,
+          sessionId: "session_public_security",
+          bridgeSessionToken: "real-bridge-session-token",
+        }),
+      ).toMatchObject({ ok: true });
+      const bridgeWithPublicAuth = await postBridgeCallback(
+        baseUrl,
+        "output",
+        {
+          "content-type": "application/json",
+          "x-agent-pool-operator-id": config.operator.id,
+        },
+        {
+          kind: "output",
+          projectId: project.id,
+          taskId: task.id,
+          sessionId: "session_public_security",
+          stream: "stdout",
+          sequence: 1,
+          byteOffset: 0,
+          text: "should not write\n",
+        },
+      );
+      expect(bridgeWithPublicAuth.status).toBe(401);
+      expect(await bridgeWithPublicAuth.json()).toEqual({ ok: false, error: "invalid_session_token", reason: "missing" });
+    } finally {
+      await close();
+    }
+  });
+
   test("internal orchestrator namespace requires service-token auth", async () => {
     const { baseUrl, config, close } = await startTestApi();
 

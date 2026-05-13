@@ -2602,7 +2602,7 @@ function publicCommandSummary(row: PublicCommandRow): PublicCommandSummary {
     sessionId: row.session_id,
     type: row.type,
     status: row.status,
-    payload: parseJsonObject(row.payload_json),
+    payload: parsePublicJsonObject(row.payload_json),
     errorMessage: row.error_message,
     requestedBy: row.requested_by,
     createdAt: row.created_at,
@@ -2620,7 +2620,7 @@ function publicArtifactSummary(row: PublicArtifactRow): PublicArtifactSummary {
     kind: row.kind,
     uri: row.uri,
     title: row.title,
-    metadata: parseJsonObject(row.metadata_json),
+    metadata: parsePublicJsonObject(row.metadata_json),
     createdAt: row.created_at,
   };
 }
@@ -2633,7 +2633,7 @@ function publicEventSummary(row: PublicEventRow): PublicEventSummary {
     sessionId: row.session_id,
     commandId: row.command_id,
     type: row.type,
-    payload: parseJsonObject(row.payload_json),
+    payload: parsePublicJsonObject(row.payload_json),
     createdAt: row.created_at,
   };
 }
@@ -2782,6 +2782,42 @@ function commandError(code: CommandAdmissibilityError["code"], message: string):
 function parseJsonObject(value: string): Readonly<Record<string, unknown>> {
   const parsed: unknown = JSON.parse(value);
   return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+}
+
+function parsePublicJsonObject(value: string): Readonly<Record<string, unknown>> {
+  return redactPublicValue(parseJsonObject(value)) as Readonly<Record<string, unknown>>;
+}
+
+function redactPublicValue(value: unknown, key = ""): unknown {
+  if (typeof value === "string") {
+    if (isSensitivePublicKey(key) || isSensitivePublicString(value)) return "[REDACTED]";
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => redactPublicValue(item, key));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([entryKey, entryValue]) => [
+        entryKey,
+        redactPublicValue(entryValue, entryKey),
+      ]),
+    );
+  }
+
+  return value;
+}
+
+function isSensitivePublicKey(key: string): boolean {
+  return /token|secret|password|credential/i.test(key);
+}
+
+function isSensitivePublicString(value: string): boolean {
+  return (
+    /github_pat_|ghp_|service-token|bridge-token|session-token|api[_-]?key|password|secret/i.test(value) ||
+    /\.agent-pool\/data\/agent-pool\.db/i.test(value) ||
+    /web-sandbox\.db/i.test(value)
+  );
 }
 
 function transaction<T>(database: WebSandboxSqliteDatabase, run: () => T): T {
