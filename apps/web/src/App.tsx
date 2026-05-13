@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type ChangeEvent, type DragEvent, type FormEvent } from "react";
 
 import { createPublicApiClient, PublicApiError, type PublicProjectSummary, type PublicTaskSummary } from "./api";
 import {
@@ -10,14 +10,18 @@ import {
 } from "./auth";
 import {
   chooseSelectedProjectId,
+  applyTaskColumn,
   applyTaskPriority,
   BOARD_COLUMNS,
+  findTask,
   getPriorityLabel,
+  getSupportedMoveAction,
   groupTasksByColumn,
   PRIORITY_OPTIONS,
   readStoredSelectedProjectId,
   replaceTask,
   saveStoredSelectedProjectId,
+  type BoardColumnId,
 } from "./board";
 
 export type AppProps = {
@@ -39,6 +43,8 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
   const [taskError, setTaskError] = useState<string | null>(null);
   const [taskMutationError, setTaskMutationError] = useState<string | null>(null);
   const [priorityMutations, setPriorityMutations] = useState<ReadonlySet<string>>(() => new Set());
+  const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
+  const [dropTargetColumn, setDropTargetColumn] = useState<string | null>(null);
   const isAuthenticated = operatorId.length > 0;
   const api = useMemo(
     () => (isAuthenticated ? createPublicApiClient({ baseUrl: apiBaseUrl, operatorId }) : null),
@@ -179,6 +185,64 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
     }
   }
 
+  function beginTaskDrag(task: PublicTaskSummary, event: DragEvent<HTMLElement>): void {
+    setDraggedTaskId(task.id);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", task.id);
+  }
+
+  function endTaskDrag(): void {
+    setDraggedTaskId(null);
+    setDropTargetColumn(null);
+  }
+
+  function dragOverColumn(columnId: string, event: DragEvent<HTMLElement>): void {
+    if (!draggedTaskId) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setDropTargetColumn(columnId);
+  }
+
+  async function dropTaskOnColumn(columnId: string, event: DragEvent<HTMLElement>): Promise<void> {
+    event.preventDefault();
+    const taskId = event.dataTransfer.getData("text/plain") || draggedTaskId;
+    endTaskDrag();
+    if (!taskId || !isBoardColumnId(columnId)) return;
+
+    const task = findTask(tasks, taskId);
+    if (!task) return;
+
+    await moveTask(task, columnId);
+  }
+
+  async function moveTask(task: PublicTaskSummary, targetColumn: BoardColumnId): Promise<void> {
+    if (!api || !selectedProjectId) return;
+    const action = getSupportedMoveAction(task, targetColumn);
+    if (!action) {
+      setTaskMutationError("That Kanban move is not available for this task state.");
+      return;
+    }
+
+    const previousTasks = tasks;
+    setTaskMutationError(null);
+    setTasks((current) => applyTaskColumn(current, { taskId: task.id, targetColumn }));
+
+    try {
+      if (action === "unblock") {
+        const response = await api.unblockTask(selectedProjectId, task.id);
+        setTasks((current) => replaceTask(current, response.task));
+        return;
+      }
+
+      await api.backlogTask(selectedProjectId, task.id);
+      const response = await api.updateTaskPriority(selectedProjectId, task.id, -50);
+      setTasks((current) => replaceTask(current, response.task));
+    } catch (error) {
+      setTasks(previousTasks);
+      setTaskMutationError(formatApiError(error));
+    }
+  }
+
   if (!isAuthenticated) {
     return (
       <main className="app-shell auth-shell" aria-labelledby="auth-title">
@@ -269,7 +333,14 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
             {taskLoadState === "ready" && tasks.length > 0 ? (
               <div className="kanban-board" aria-label="Loaded project Kanban board">
                 {BOARD_COLUMNS.map((column) => (
-                  <section key={column.id} className="kanban-column" aria-label={column.title}>
+                  <section
+                    key={column.id}
+                    className={`kanban-column ${dropTargetColumn === column.id ? "kanban-column-drop" : ""}`}
+                    aria-label={column.title}
+                    onDragOver={(event: DragEvent<HTMLElement>) => dragOverColumn(column.id, event)}
+                    onDragLeave={() => setDropTargetColumn(null)}
+                    onDrop={(event: DragEvent<HTMLElement>) => void dropTaskOnColumn(column.id, event)}
+                  >
                     <header className="kanban-column-header">
                       <h3>{column.title}</h3>
                       <span>{groupedTasks[column.id].length}</span>
@@ -277,7 +348,13 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
                     <div className="kanban-card-list">
                       {groupedTasks[column.id].length === 0 ? <p className="column-empty">No tasks</p> : null}
                       {groupedTasks[column.id].map((task) => (
-                        <article key={task.id} className="task-card">
+                        <article
+                          key={task.id}
+                          className="task-card"
+                          draggable
+                          onDragStart={(event: DragEvent<HTMLElement>) => beginTaskDrag(task, event)}
+                          onDragEnd={endTaskDrag}
+                        >
                           <div className="task-card-title">
                             <strong>{task.title}</strong>
                             <span>{task.status}</span>
@@ -325,6 +402,10 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
 }
 
 type LoadState = "idle" | "loading" | "ready" | "error";
+
+function isBoardColumnId(value: string): value is BoardColumnId {
+  return BOARD_COLUMNS.some((column) => column.id === value);
+}
 
 function BoardNotice({ title, body, tone = "neutral" }: { readonly title: string; readonly body: string; readonly tone?: "neutral" | "error" }) {
   return (

@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  applyTaskColumn,
   applyTaskPriority,
   chooseSelectedProjectId,
   getPriorityLabel,
+  getSupportedMoveAction,
   getTaskColumnId,
   groupTasksByColumn,
   readStoredSelectedProjectId,
@@ -74,6 +76,29 @@ describe("web board state", () => {
     expect(getPriorityLabel(100)).toBe("Urgent");
     expect(getPriorityLabel(-50)).toBe("Backlog");
     expect(replaced[1]?.priority).toBe(100);
+  });
+
+  test("allows only supported optimistic Kanban moves", () => {
+    const blocked = task("blocked", 0, 1, "Blocked task", "blocked");
+    const queued = task("queued", 0, 2, "Queued task", "queued");
+    const failed = task("failed", 0, 3, "Failed task", "failed");
+
+    expect(getSupportedMoveAction(blocked, "ready")).toBe("unblock");
+    expect(getSupportedMoveAction(queued, "backlog")).toBe("backlog");
+    expect(getSupportedMoveAction(failed, "ready")).toBeNull();
+    expect(getSupportedMoveAction(queued, "in_progress")).toBeNull();
+  });
+
+  test("applies optimistic column changes without mutating original tasks", () => {
+    const original = [task("blocked", -10, 1, "Blocked task", "blocked"), task("queued", 0, 2, "Queued task", "queued")];
+    const unblocked = applyTaskColumn(original, { taskId: "blocked", targetColumn: "ready" });
+    const backlogged = applyTaskColumn(original, { taskId: "queued", targetColumn: "backlog" });
+
+    expect(original[0]?.status).toBe("blocked");
+    expect(unblocked[0]?.status).toBe("queued");
+    expect(unblocked[0]?.priority).toBe(0);
+    expect(backlogged[1]?.status).toBe("queued");
+    expect(backlogged[1]?.priority).toBe(-50);
   });
 });
 

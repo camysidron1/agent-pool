@@ -127,11 +127,49 @@ export function replaceTask(tasks: readonly PublicTaskSummary[], updatedTask: Pu
   return tasks.map((task) => (task.id === updatedTask.id ? updatedTask : task));
 }
 
+export function findTask(tasks: readonly PublicTaskSummary[], taskId: string): PublicTaskSummary | null {
+  return tasks.find((task) => task.id === taskId) ?? null;
+}
+
 export function applyTaskPriority(
   tasks: readonly PublicTaskSummary[],
   input: { readonly taskId: string; readonly priority: number },
 ): readonly PublicTaskSummary[] {
   return tasks.map((task) => (task.id === input.taskId ? { ...task, priority: input.priority } : task));
+}
+
+export type KanbanMoveAction = "unblock" | "backlog";
+
+export function getSupportedMoveAction(task: PublicTaskSummary, targetColumn: BoardColumnId): KanbanMoveAction | null {
+  const sourceColumn = getTaskColumnId(task);
+
+  if (sourceColumn === "attention" && targetColumn === "ready" && task.status === "blocked") {
+    return "unblock";
+  }
+
+  if (sourceColumn === "ready" && targetColumn === "backlog" && task.status === "queued") {
+    return "backlog";
+  }
+
+  return null;
+}
+
+export function applyTaskColumn(
+  tasks: readonly PublicTaskSummary[],
+  input: { readonly taskId: string; readonly targetColumn: BoardColumnId },
+): readonly PublicTaskSummary[] {
+  return tasks.map((task) => {
+    if (task.id !== input.taskId) return task;
+
+    switch (input.targetColumn) {
+      case "ready":
+        return { ...task, status: "queued", priority: Math.max(0, task.priority) };
+      case "backlog":
+        return { ...task, status: "queued", priority: -50 };
+      default:
+        return task;
+    }
+  });
 }
 
 function normalizeProjectId(value: string | null): string | null {
