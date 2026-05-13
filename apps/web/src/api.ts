@@ -122,11 +122,61 @@ export type PublicLogStreamSummary = {
   readonly updatedAt: string;
 };
 
+export type PublicPlannedUpload = {
+  readonly adapter: string;
+  readonly bucket: string;
+  readonly key: string;
+  readonly localPath: string | null;
+  readonly method: string;
+  readonly contentType: string | null;
+  readonly expiresAt: string | null;
+  readonly headers: JsonRecord;
+  readonly fields: JsonRecord;
+};
+
+export type PublicUploadPlanInput = {
+  readonly taskId?: string | null;
+  readonly sessionId?: string | null;
+  readonly fileName: string;
+  readonly contentType?: string | null;
+};
+
+export type PublicSteeringAttachmentReference = {
+  readonly key: string;
+  readonly bucket?: string | null;
+  readonly fileName?: string | null;
+  readonly contentType?: string | null;
+};
+
+export type PublicSteeringMessageSummary = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly commandId: string;
+  readonly body: string;
+  readonly status: string;
+  readonly errorMessage: string | null;
+  readonly requestedBy: string | null;
+  readonly createdAt: string;
+  readonly deliveredAt: string | null;
+  readonly metadata: JsonRecord;
+};
+
 export type PublicTaskDetail = PublicTaskSummary & {
   readonly sessions: readonly PublicSessionSummary[];
   readonly artifacts: readonly PublicArtifactSummary[];
   readonly events: readonly PublicEventSummary[];
   readonly logStreams: readonly PublicLogStreamSummary[];
+};
+
+export type PublicSteeringMutation = {
+  readonly steering: PublicSteeringMessageSummary;
+  readonly command: PublicCommandSummary;
+  readonly event: PublicEventSummary;
+  readonly outbox: unknown;
+  readonly task: PublicTaskDetail | null;
+  readonly pendingCommands: readonly PublicCommandSummary[];
 };
 
 export class PublicApiError extends Error {
@@ -179,6 +229,21 @@ export function createPublicApiClient(options: PublicApiClientOptions) {
     readTask: (projectId: string, taskId: string) =>
       request<PublicApiSuccess<{ readonly task: PublicTaskDetail }>>(
         `/projects/${encodePath(projectId)}/tasks/${encodePath(taskId)}`,
+      ),
+    planProjectUpload: (projectId: string, input: PublicUploadPlanInput) =>
+      request<PublicApiSuccess<{ readonly upload: PublicPlannedUpload }>>(`/projects/${encodePath(projectId)}/uploads/plan`, {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    steerSession: (
+      projectId: string,
+      taskId: string,
+      sessionId: string,
+      input: { readonly body: string; readonly attachments?: readonly PublicSteeringAttachmentReference[] },
+    ) =>
+      request<PublicApiSuccess<PublicSteeringMutation>>(
+        `/projects/${encodePath(projectId)}/tasks/${encodePath(taskId)}/sessions/${encodePath(sessionId)}/steer`,
+        { method: "POST", body: JSON.stringify(input) },
       ),
     updateTaskPriority: (projectId: string, taskId: string, priority: number) =>
       request<PublicApiSuccess<{ readonly task: PublicTaskSummary; readonly pendingCommands: readonly PublicCommandSummary[] }>>(

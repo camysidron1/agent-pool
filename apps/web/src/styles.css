@@ -69,6 +69,11 @@ button:hover {
   background: #34445f;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 input {
   min-width: 0;
   border: 1px solid #c6cfdb;
@@ -115,6 +120,13 @@ label {
 .form-error {
   color: #a33a2b;
   font-size: 0.9rem;
+  margin: 0;
+}
+
+.form-success {
+  color: #1f7a45;
+  font-size: 0.9rem;
+  font-weight: 700;
   margin: 0;
 }
 
@@ -512,6 +524,55 @@ label {
   overflow-wrap: anywhere;
 }
 
+.steering-form {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.attachment-control {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.attachment-control input {
+  border: 1px solid #c6cfdb;
+  border-radius: 6px;
+  padding: 0.65rem;
+}
+
+.attachment-list {
+  display: grid;
+  gap: 0.45rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.attachment-list li {
+  border: 1px solid #e2e7ee;
+  border-radius: 6px;
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.55rem;
+}
+
+.attachment-list small,
+.steering-state {
+  color: #607084;
+  font-size: 0.8rem;
+}
+
+.steering-actions {
+  align-items: center;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+}
+
+.steering-state {
+  margin: 0;
+}
+
 @media (max-width: 680px) {
   .app-shell {
     padding: 1rem;
@@ -538,5 +599,10 @@ label {
 
   .detail-grid {
     grid-template-columns: 1fr;
+  }
+
+  .steering-actions {
+    align-items: stretch;
+    display: grid;
   }
 }

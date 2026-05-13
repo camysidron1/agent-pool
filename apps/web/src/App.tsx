@@ -9,7 +9,14 @@ import {
   type MouseEvent,
 } from "react";
 
-import { createPublicApiClient, PublicApiError, type PublicProjectSummary, type PublicTaskDetail, type PublicTaskSummary } from "./api";
+import {
+  createPublicApiClient,
+  PublicApiError,
+  type PublicProjectSummary,
+  type PublicSessionSummary,
+  type PublicTaskDetail,
+  type PublicTaskSummary,
+} from "./api";
 import {
   clearStoredOperatorId,
   normalizeOperatorId,
@@ -36,6 +43,7 @@ import {
   type BoardColumnId,
 } from "./board";
 import { shouldRefreshBoardForEvent, subscribeProjectEvents } from "./sse";
+import { getSteeringAvailability, submitSteeringDraft } from "./steering";
 
 export type AppProps = {
   readonly apiBaseUrl?: string;
@@ -354,6 +362,32 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
     event.stopPropagation();
   }
 
+  async function submitTaskSteering(input: {
+    readonly detail: PublicTaskDetail;
+    readonly activeSession: PublicSessionSummary | null;
+    readonly body: string;
+    readonly files: readonly File[];
+  }): Promise<void> {
+    if (!api || !selectedProjectId) {
+      throw new Error("Public API is unavailable.");
+    }
+
+    const response = await submitSteeringDraft({
+      api,
+      projectId: selectedProjectId,
+      task: input.detail,
+      activeSession: input.activeSession,
+      body: input.body,
+      files: input.files,
+    });
+
+    const updatedTask = response.task;
+    if (updatedTask) {
+      setTaskDetail(updatedTask);
+      setTasks((current) => replaceTask(current, updatedTask));
+    }
+  }
+
   if (!isAuthenticated) {
     return (
       <main className="app-shell auth-shell" aria-labelledby="auth-title">
@@ -519,6 +553,7 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
           loadState={taskDetailLoadState}
           error={taskDetailError}
           onClose={closeTaskPanel}
+          onSubmitSteering={submitTaskSteering}
         />
       ) : null}
     </main>
@@ -545,14 +580,76 @@ function TaskPanel({
   loadState,
   error,
   onClose,
+  onSubmitSteering,
 }: {
   readonly detail: PublicTaskDetail | null;
   readonly loadState: LoadState;
   readonly error: string | null;
   readonly onClose: () => void;
+  readonly onSubmitSteering: (input: {
+    readonly detail: PublicTaskDetail;
+    readonly activeSession: PublicSessionSummary | null;
+    readonly body: string;
+    readonly files: readonly File[];
+  }) => Promise<void>;
 }) {
+  const [steeringDraft, setSteeringDraft] = useState("");
+  const [steeringFiles, setSteeringFiles] = useState<readonly File[]>([]);
+  const [steeringInputKey, setSteeringInputKey] = useState(0);
+  const [steeringSubmitState, setSteeringSubmitState] = useState<"idle" | "submitting">("idle");
+  const [steeringError, setSteeringError] = useState<string | null>(null);
+  const [steeringNotice, setSteeringNotice] = useState<string | null>(null);
   const activeSession = detail ? selectActiveSession(detail) : null;
   const resultSummary = detail ? getTaskResultSummary(detail) : null;
+  const steeringAvailability = getSteeringAvailability(detail, activeSession);
+  const steeringDisabled = !steeringAvailability.available || steeringSubmitState === "submitting";
+  const canSubmitSteering = steeringAvailability.available && steeringDraft.trim().length > 0 && steeringSubmitState !== "submitting";
+
+  useEffect(() => {
+    setSteeringDraft("");
+    setSteeringFiles([]);
+    setSteeringInputKey((current) => current + 1);
+    setSteeringError(null);
+    setSteeringNotice(null);
+  }, [detail?.id]);
+
+  function updateSteeringDraft(event: ChangeEvent<HTMLTextAreaElement>): void {
+    setSteeringDraft(event.currentTarget.value);
+    setSteeringNotice(null);
+    setSteeringError(null);
+  }
+
+  function selectSteeringFiles(event: ChangeEvent<HTMLInputElement>): void {
+    setSteeringFiles(Array.from(event.currentTarget.files ?? []));
+    setSteeringNotice(null);
+    setSteeringError(null);
+  }
+
+  async function submitSteering(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!detail) return;
+
+    setSteeringSubmitState("submitting");
+    setSteeringError(null);
+    setSteeringNotice(null);
+
+    try {
+      await onSubmitSteering({
+        detail,
+        activeSession,
+        body: steeringDraft,
+        files: steeringFiles,
+      });
+      setSteeringDraft("");
+      setSteeringFiles([]);
+      setSteeringInputKey((current) => current + 1);
+      setSteeringNotice("Steering queued.");
+    } catch (submitError) {
+      setSteeringError(formatApiError(submitError));
+    } finally {
+      setSteeringSubmitState("idle");
+    }
+  }
 
   return (
     <aside className="task-panel" aria-label="Task detail">
@@ -654,10 +751,44 @@ function TaskPanel({
 
           <section className="panel-section" aria-label="Steering">
             <h3>Steering</h3>
-            <textarea disabled rows={4} value="" aria-label="Steering message" />
-            <button type="button" disabled>
-              Send
-            </button>
+            <form className="steering-form" onSubmit={(event: FormEvent<HTMLFormElement>) => void submitSteering(event)}>
+              <textarea
+                disabled={steeringDisabled}
+                rows={4}
+                value={steeringDraft}
+                onChange={updateSteeringDraft}
+                aria-label="Steering message"
+              />
+              <label className="attachment-control">
+                <span>Attachments</span>
+                <input
+                  key={steeringInputKey}
+                  type="file"
+                  multiple
+                  disabled={steeringDisabled}
+                  onChange={selectSteeringFiles}
+                  aria-label="Steering attachments"
+                />
+              </label>
+              {steeringFiles.length > 0 ? (
+                <ul className="attachment-list" aria-label="Selected steering attachments">
+                  {steeringFiles.map((file) => (
+                    <li key={`${file.name}:${file.size}:${file.lastModified}`}>
+                      <span>{file.name}</span>
+                      <small>{file.type || "application/octet-stream"}</small>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              <div className="steering-actions">
+                <p className="steering-state">{steeringAvailability.reason ?? "Ready to steer active session."}</p>
+                <button type="submit" disabled={!canSubmitSteering}>
+                  {steeringSubmitState === "submitting" ? "Sending" : "Send"}
+                </button>
+              </div>
+              {steeringError ? <p className="form-error">{steeringError}</p> : null}
+              {steeringNotice ? <p className="form-success">{steeringNotice}</p> : null}
+            </form>
           </section>
         </div>
       ) : null}

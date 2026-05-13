@@ -55,6 +55,54 @@ describe("public web API client", () => {
     expect(calls[0]?.url).toBe("/api/public/projects/project%2Fid/tasks/task%2Fid/priority");
     expect(calls[0]?.body).toBe('{"priority":3}');
   });
+
+  test("plans uploads and sends steering through public session routes", async () => {
+    const calls: { readonly url: string; readonly body: string | null }[] = [];
+    const client = createPublicApiClient({
+      operatorId: "operator-test",
+      fetchImpl: async (input, init) => {
+        calls.push({ url: String(input), body: typeof init?.body === "string" ? init.body : null });
+        if (String(input).endsWith("/uploads/plan")) {
+          return jsonResponse({
+            ok: true,
+            upload: {
+              adapter: "local",
+              bucket: "agent-pool-web-sandbox",
+              key: "projects/project-a/task-a/session-a/context.txt",
+              localPath: "/tmp/raw-local-path/context.txt",
+              method: "local_path",
+              contentType: "text/plain",
+              expiresAt: null,
+              headers: {},
+              fields: {},
+            },
+          });
+        }
+
+        return jsonResponse({ ok: true, steering: { id: "steering-a" }, command: { id: "command-a" }, task: null, pendingCommands: [] });
+      },
+    });
+
+    await client.planProjectUpload("project-a", {
+      taskId: "task-a",
+      sessionId: "session-a",
+      fileName: "context.txt",
+      contentType: "text/plain",
+    });
+    await client.steerSession("project-a", "task-a", "session-a", {
+      body: "Keep going",
+      attachments: [{ key: "projects/project-a/task-a/session-a/context.txt", bucket: "agent-pool-web-sandbox", fileName: "context.txt" }],
+    });
+
+    expect(calls.map((call) => call.url)).toEqual([
+      "/api/public/projects/project-a/uploads/plan",
+      "/api/public/projects/project-a/tasks/task-a/sessions/session-a/steer",
+    ]);
+    expect(calls[1]?.body).toBe(
+      '{"body":"Keep going","attachments":[{"key":"projects/project-a/task-a/session-a/context.txt","bucket":"agent-pool-web-sandbox","fileName":"context.txt"}]}',
+    );
+    expect(calls[1]?.body).not.toContain("raw-local-path");
+  });
 });
 
 function jsonResponse(body: unknown, status = 200): Response {
