@@ -48,6 +48,14 @@ export type RuntimeSessionHandle = {
   readonly afterStartup?: () => Promise<void>;
 };
 
+export type RuntimeProviderCapabilities = {
+  readonly start: boolean;
+  readonly stop: boolean;
+  readonly suspend: boolean;
+  readonly resume: boolean;
+  readonly fork: boolean;
+};
+
 export type FakeRuntimeOutput = {
   readonly stream?: BridgeLogStreamKind;
   readonly text: string;
@@ -60,9 +68,31 @@ export type FakeRuntimeDocumentFixture = {
 
 export interface RuntimeProvider {
   readonly kind: RuntimeProviderKind;
+  readonly capabilities: RuntimeProviderCapabilities;
   startSession(request: RuntimeSessionRequest): Promise<RuntimeSessionHandle>;
   stopSession(handle: RuntimeSessionHandle): Promise<void>;
 }
+
+export type E2BRuntimeProviderConfig = {
+  readonly apiKeyEnvName: string;
+  readonly apiKeyConfigured: boolean;
+};
+
+export type E2BSandboxCreateInput = Readonly<Record<string, unknown>>;
+
+export type E2BSandboxHandle = {
+  readonly sandboxId: string;
+};
+
+export interface E2BRuntimeClient {
+  createSandbox(input: E2BSandboxCreateInput): Promise<E2BSandboxHandle>;
+  destroySandbox(sandboxId: string): Promise<void>;
+}
+
+export type E2BRuntimeProviderOptions = {
+  readonly client?: E2BRuntimeClient;
+  readonly config?: E2BRuntimeProviderConfig;
+};
 
 export type FakeRuntimeScenario = {
   readonly startup?: "success" | "failure";
@@ -120,14 +150,20 @@ export type RuntimeProviderFactoryOptions =
       readonly fake?: FakeRuntimeProviderOptions;
     }
   | {
-      readonly kind: "e2b" | "docker";
+      readonly kind: "e2b";
+      readonly e2b?: E2BRuntimeProviderOptions;
+    }
+  | {
+      readonly kind: "docker";
     };
 
 export const RUNTIME_PACKAGE_BOUNDARY = {
   providerInterfaceOnly: false,
   fakeProviderIncluded: true,
+  e2bProviderIncluded: true,
   defaultProviderUsesExternalServices: false,
-  realE2BImplementationIncluded: false,
+  realE2BImplementationIncluded: true,
+  e2bSdkImportedAtModuleLoad: false,
   dockerImplementationIncluded: false,
 } as const;
 
@@ -135,9 +171,20 @@ export function createRuntimeProvider(options: RuntimeProviderFactoryOptions): R
   if (options.kind === "fake") {
     return createFakeRuntimeProvider(options.fake);
   }
+  if (options.kind === "e2b") {
+    return createE2BRuntimeProvider(options.e2b);
+  }
 
   return createUnavailableRuntimeProvider(options.kind);
 }
+
+const START_STOP_CAPABILITIES: RuntimeProviderCapabilities = {
+  start: true,
+  stop: true,
+  suspend: false,
+  resume: false,
+  fork: false,
+};
 
 export function createFakeRuntimeProvider(options: FakeRuntimeProviderOptions = {}): FakeRuntimeProvider {
   const clock = options.clock ?? { now: () => new Date() };
@@ -148,6 +195,7 @@ export function createFakeRuntimeProvider(options: FakeRuntimeProviderOptions = 
 
   return {
     kind: "fake",
+    capabilities: START_STOP_CAPABILITIES,
     get state(): FakeRuntimeProviderState {
       return {
         started: [...started],
@@ -222,9 +270,44 @@ export function createFakeRuntimeProvider(options: FakeRuntimeProviderOptions = 
   };
 }
 
-function createUnavailableRuntimeProvider(kind: "e2b" | "docker"): RuntimeProvider {
+export function createE2BRuntimeProvider(options: E2BRuntimeProviderOptions = {}): RuntimeProvider {
+  return {
+    kind: "e2b",
+    capabilities: START_STOP_CAPABILITIES,
+    async startSession(): Promise<RuntimeSessionHandle> {
+      assertE2BProviderReady(options);
+      throw new Error("e2b runtime provider launch spec is not implemented yet");
+    },
+    async stopSession(handle): Promise<void> {
+      if (handle.provider !== "e2b") {
+        throw new Error(`e2b runtime cannot stop ${handle.provider} session`);
+      }
+      assertE2BProviderReady(options);
+      return undefined;
+    },
+  };
+}
+
+function assertE2BProviderReady(options: E2BRuntimeProviderOptions): void {
+  const config = options.config;
+  if (config && !config.apiKeyConfigured) {
+    throw new Error(`${config.apiKeyEnvName} is required to use the e2b runtime provider`);
+  }
+  if (!options.client) {
+    throw new Error("e2b runtime provider requires an injected E2B client");
+  }
+}
+
+function createUnavailableRuntimeProvider(kind: "docker"): RuntimeProvider {
   return {
     kind,
+    capabilities: {
+      start: false,
+      stop: false,
+      suspend: false,
+      resume: false,
+      fork: false,
+    },
     async startSession(): Promise<RuntimeSessionHandle> {
       throw new Error(`${kind} runtime provider is not implemented in default CI`);
     },
