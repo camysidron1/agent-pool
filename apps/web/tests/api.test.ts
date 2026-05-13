@@ -83,6 +83,38 @@ describe("public web API client", () => {
     expect(calls[0]?.body).toBe('{"priority":3}');
   });
 
+  test("creates tasks in the selected public project", async () => {
+    const calls: { readonly method: string | undefined; readonly url: string; readonly body: string | null }[] = [];
+    const client = createPublicApiClient({
+      operatorId: "operator-test",
+      fetchImpl: async (input, init) => {
+        calls.push({ method: init?.method, url: String(input), body: typeof init?.body === "string" ? init.body : null });
+        return jsonResponse({
+          ok: true,
+          task: { id: "task-a", projectId: "project/id", title: "Run sandbox", status: "queued" },
+          event: { id: "event-a", type: "task.created" },
+          outbox: {},
+        });
+      },
+    });
+
+    await expect(
+      client.createTask("project/id", {
+        title: "Run sandbox",
+        description: "Exercise fake runtime",
+        priority: 50,
+      }),
+    ).resolves.toMatchObject({ ok: true, task: { id: "task-a" } });
+
+    expect(calls).toEqual([
+      {
+        method: "POST",
+        url: "/api/public/projects/project%2Fid/tasks",
+        body: '{"title":"Run sandbox","description":"Exercise fake runtime","priority":50}',
+      },
+    ]);
+  });
+
   test("plans uploads and sends steering through public session routes", async () => {
     const calls: { readonly url: string; readonly body: string | null }[] = [];
     const client = createPublicApiClient({

@@ -249,6 +249,41 @@ label {
   margin-bottom: 0;
 }
 
+.task-composer {
+  align-items: end;
+  border-bottom: 1px solid #e2e7ee;
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: minmax(14rem, 0.85fr) minmax(18rem, 1.15fr) auto;
+  padding-bottom: 1rem;
+}
+
+.task-composer-main,
+.task-composer-description,
+.task-composer-actions {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.task-composer-actions {
+  align-items: end;
+  grid-template-columns: minmax(9rem, auto) auto;
+}
+
+.task-composer-actions label {
+  grid-column: 1 / -1;
+}
+
+.task-composer-actions select {
+  min-width: 0;
+  width: 100%;
+}
+
+.task-composer-error {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
 .task-counts {
   display: grid;
   gap: 0.5rem;
@@ -998,7 +1033,9 @@ label {
   .topbar,
   .operator-menu,
   .board-toolbar,
-  .project-summary {
+  .project-summary,
+  .task-composer,
+  .task-composer-actions {
     align-items: stretch;
     display: grid;
     grid-template-columns: 1fr;

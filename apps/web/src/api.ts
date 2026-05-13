@@ -94,6 +94,13 @@ export type PublicTaskSummary = {
   readonly pendingCommands: readonly PublicCommandSummary[];
 };
 
+export type PublicCreateTaskInput = {
+  readonly title: string;
+  readonly description?: string | null;
+  readonly priority?: number | null;
+  readonly runtimeSource?: PublicRuntimeSource | null;
+};
+
 export type PublicEventSummary = {
   readonly id: string;
   readonly projectId: string;
@@ -277,6 +284,11 @@ export function createPublicApiClient(options: PublicApiClientOptions) {
     listProjects: () => request<PublicApiSuccess<{ readonly projects: readonly PublicProjectSummary[] }>>("/projects"),
     listTasks: (projectId: string) =>
       request<PublicApiSuccess<{ readonly tasks: readonly PublicTaskSummary[] }>>(`/projects/${encodePath(projectId)}/tasks`),
+    createTask: (projectId: string, input: PublicCreateTaskInput) =>
+      request<PublicApiSuccess<{ readonly task: PublicTaskDetail; readonly event: PublicEventSummary; readonly outbox: unknown }>>(
+        `/projects/${encodePath(projectId)}/tasks`,
+        { method: "POST", body: JSON.stringify(input) },
+      ),
     readTask: (projectId: string, taskId: string) =>
       request<PublicApiSuccess<{ readonly task: PublicTaskDetail }>>(
         `/projects/${encodePath(projectId)}/tasks/${encodePath(taskId)}`,

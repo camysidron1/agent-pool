@@ -93,6 +93,11 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
   const [taskLoadState, setTaskLoadState] = useState<LoadState>("idle");
   const [taskError, setTaskError] = useState<string | null>(null);
   const [taskMutationError, setTaskMutationError] = useState<string | null>(null);
+  const [newTaskTitle, setNewTaskTitle] = useState("");
+  const [newTaskDescription, setNewTaskDescription] = useState("");
+  const [newTaskPriority, setNewTaskPriority] = useState(0);
+  const [taskCreateState, setTaskCreateState] = useState<"idle" | "submitting">("idle");
+  const [taskCreateError, setTaskCreateError] = useState<string | null>(null);
   const [priorityMutations, setPriorityMutations] = useState<ReadonlySet<string>>(() => new Set());
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [dropTargetColumn, setDropTargetColumn] = useState<string | null>(null);
@@ -296,6 +301,10 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
     setSelectedProjectId(null);
     setProjectLoadState("idle");
     setTaskLoadState("idle");
+    setNewTaskTitle("");
+    setNewTaskDescription("");
+    setNewTaskPriority(0);
+    setTaskCreateError(null);
   }
 
   function updateOperatorDraft(event: ChangeEvent<HTMLInputElement>): void {
@@ -311,9 +320,63 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
     setSelectedProjectId(nextProjectId);
     saveStoredSelectedProjectId(storage, nextProjectId);
     setTaskMutationError(null);
+    setTaskCreateError(null);
     setSelectedTaskId(null);
     setTaskDetail(null);
     setTaskDetailMode("panel");
+  }
+
+  function updateNewTaskTitle(event: ChangeEvent<HTMLInputElement>): void {
+    setNewTaskTitle(event.currentTarget.value);
+  }
+
+  function updateNewTaskDescription(event: ChangeEvent<HTMLTextAreaElement>): void {
+    setNewTaskDescription(event.currentTarget.value);
+  }
+
+  function updateNewTaskPriority(event: ChangeEvent<HTMLSelectElement>): void {
+    setNewTaskPriority(Number(event.currentTarget.value));
+  }
+
+  async function submitNewTask(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!api || !selectedProjectId) return;
+
+    const title = newTaskTitle.trim();
+    const description = newTaskDescription.trim();
+    if (!title) {
+      setTaskCreateError("Task title is required.");
+      return;
+    }
+
+    setTaskCreateError(null);
+    setTaskMutationError(null);
+    setTaskCreateState("submitting");
+
+    try {
+      const response = await api.createTask(selectedProjectId, {
+        title,
+        description: description || null,
+        priority: newTaskPriority,
+      });
+      setTasks((current) =>
+        current.some((task) => task.id === response.task.id) ? replaceTask(current, response.task) : [response.task, ...current],
+      );
+      setTaskDetail(response.task);
+      setSelectedTaskId(response.task.id);
+      setTaskDetailMode("panel");
+      setTaskDetailLoadState("ready");
+      setNewTaskTitle("");
+      setNewTaskDescription("");
+      setNewTaskPriority(0);
+
+      const projectResponse = await api.listProjects().catch(() => null);
+      if (projectResponse) setProjects(projectResponse.projects);
+    } catch (error) {
+      setTaskCreateError(formatApiError(error));
+    } finally {
+      setTaskCreateState("idle");
+    }
   }
 
   async function updatePriority(task: PublicTaskSummary, event: ChangeEvent<HTMLSelectElement>): Promise<void> {
@@ -597,6 +660,44 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
                 ))}
               </dl>
             </div>
+
+            <form className="task-composer" onSubmit={submitNewTask} aria-label="Create task">
+              <div className="task-composer-main">
+                <label htmlFor="new-task-title">Task</label>
+                <input
+                  id="new-task-title"
+                  name="new-task-title"
+                  value={newTaskTitle}
+                  onChange={updateNewTaskTitle}
+                  placeholder="Sandbox architecture walkthrough"
+                />
+              </div>
+              <div className="task-composer-description">
+                <label htmlFor="new-task-description">Description</label>
+                <textarea
+                  id="new-task-description"
+                  name="new-task-description"
+                  rows={2}
+                  value={newTaskDescription}
+                  onChange={updateNewTaskDescription}
+                  placeholder="Exercise fake runtime callbacks, logs, artifacts, final response, and cleanup."
+                />
+              </div>
+              <div className="task-composer-actions">
+                <label htmlFor="new-task-priority">Priority</label>
+                <select id="new-task-priority" value={newTaskPriority} onChange={updateNewTaskPriority}>
+                  {PRIORITY_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <button type="submit" disabled={taskCreateState === "submitting"}>
+                  {taskCreateState === "submitting" ? "Adding" : "Add task"}
+                </button>
+              </div>
+              {taskCreateError ? <p className="inline-error task-composer-error">{taskCreateError}</p> : null}
+            </form>
 
             {taskLoadState === "loading" ? <BoardNotice title="Loading tasks" body="Fetching selected project tasks." /> : null}
             {taskLoadState === "error" ? <BoardNotice title="Task load failed" body={taskError ?? "Unable to load tasks."} tone="error" /> : null}
