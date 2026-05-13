@@ -43,7 +43,17 @@ import {
   type BoardColumnId,
 } from "./board";
 import { shouldRefreshBoardForEvent, subscribeProjectEvents } from "./sse";
-import { getSteeringAvailability, getVisibleSteeringMessages, shouldUseIncomingTaskDetail, submitSteeringDraft } from "./steering";
+import {
+  buildSteeringInterruptPayload,
+  cancelInterruptConfirmation,
+  getSteeringAvailability,
+  getSteeringInterruptAvailability,
+  getVisibleSteeringMessages,
+  shouldUseIncomingTaskDetail,
+  startInterruptConfirmation,
+  submitSteeringDraft,
+  type InterruptConfirmationState,
+} from "./steering";
 
 export type AppProps = {
   readonly apiBaseUrl?: string;
@@ -388,6 +398,30 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
     }
   }
 
+  async function interruptTaskSteering(input: {
+    readonly detail: PublicTaskDetail;
+    readonly activeSession: PublicSessionSummary | null;
+  }): Promise<void> {
+    if (!api || !selectedProjectId) {
+      throw new Error("Public API is unavailable.");
+    }
+    if (!input.activeSession) {
+      throw new Error("No active session is available.");
+    }
+
+    const response = await api.interruptSession(
+      selectedProjectId,
+      input.detail.id,
+      input.activeSession.id,
+      buildSteeringInterruptPayload(input.detail),
+    );
+    const updatedTask = response.task;
+    if (updatedTask) {
+      setTaskDetail((current) => (shouldUseIncomingTaskDetail(current, updatedTask) ? updatedTask : current));
+      setTasks((current) => replaceTask(current, updatedTask));
+    }
+  }
+
   if (!isAuthenticated) {
     return (
       <main className="app-shell auth-shell" aria-labelledby="auth-title">
@@ -554,6 +588,7 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
           error={taskDetailError}
           onClose={closeTaskPanel}
           onSubmitSteering={submitTaskSteering}
+          onInterruptSteering={interruptTaskSteering}
         />
       ) : null}
     </main>
@@ -581,6 +616,7 @@ function TaskPanel({
   error,
   onClose,
   onSubmitSteering,
+  onInterruptSteering,
 }: {
   readonly detail: PublicTaskDetail | null;
   readonly loadState: LoadState;
@@ -592,6 +628,7 @@ function TaskPanel({
     readonly body: string;
     readonly files: readonly File[];
   }) => Promise<void>;
+  readonly onInterruptSteering: (input: { readonly detail: PublicTaskDetail; readonly activeSession: PublicSessionSummary | null }) => Promise<void>;
 }) {
   const [steeringDraft, setSteeringDraft] = useState("");
   const [steeringFiles, setSteeringFiles] = useState<readonly File[]>([]);
@@ -599,10 +636,14 @@ function TaskPanel({
   const [steeringSubmitState, setSteeringSubmitState] = useState<"idle" | "submitting">("idle");
   const [steeringError, setSteeringError] = useState<string | null>(null);
   const [steeringNotice, setSteeringNotice] = useState<string | null>(null);
+  const [interruptConfirmation, setInterruptConfirmation] = useState<InterruptConfirmationState>("idle");
+  const [interruptSubmitState, setInterruptSubmitState] = useState<"idle" | "submitting">("idle");
+  const [interruptError, setInterruptError] = useState<string | null>(null);
   const activeSession = detail ? selectActiveSession(detail) : null;
   const resultSummary = detail ? getTaskResultSummary(detail) : null;
   const steeringAvailability = getSteeringAvailability(detail, activeSession);
   const visibleSteeringMessages = detail ? getVisibleSteeringMessages(detail) : [];
+  const interruptAvailability = getSteeringInterruptAvailability(detail, activeSession);
   const steeringDisabled = !steeringAvailability.available || steeringSubmitState === "submitting";
   const canSubmitSteering = steeringAvailability.available && steeringDraft.trim().length > 0 && steeringSubmitState !== "submitting";
 
@@ -612,6 +653,8 @@ function TaskPanel({
     setSteeringInputKey((current) => current + 1);
     setSteeringError(null);
     setSteeringNotice(null);
+    setInterruptConfirmation("idle");
+    setInterruptError(null);
   }, [detail?.id]);
 
   function updateSteeringDraft(event: ChangeEvent<HTMLTextAreaElement>): void {
@@ -649,6 +692,24 @@ function TaskPanel({
       setSteeringError(formatApiError(submitError));
     } finally {
       setSteeringSubmitState("idle");
+    }
+  }
+
+  async function submitInterrupt(): Promise<void> {
+    if (!detail) return;
+
+    setInterruptSubmitState("submitting");
+    setInterruptError(null);
+    setSteeringNotice(null);
+
+    try {
+      await onInterruptSteering({ detail, activeSession });
+      setInterruptConfirmation("idle");
+      setSteeringNotice("Interrupt queued.");
+    } catch (submitError) {
+      setInterruptError(formatApiError(submitError));
+    } finally {
+      setInterruptSubmitState("idle");
     }
   }
 
@@ -788,6 +849,51 @@ function TaskPanel({
                   </li>
                 ))}
               </ul>
+            ) : null}
+            {visibleSteeringMessages.length > 0 ? (
+              <div className="interrupt-escalation" aria-label="Steering interrupt escalation">
+                {interruptConfirmation === "confirming" ? (
+                  <div className="interrupt-confirmation">
+                    <p>Confirm interrupt for this active session.</p>
+                    <div className="interrupt-actions">
+                      <button
+                        type="button"
+                        disabled={!interruptAvailability.available || interruptSubmitState === "submitting"}
+                        onClick={() => void submitInterrupt()}
+                      >
+                        {interruptSubmitState === "submitting" ? "Interrupting" : "Confirm interrupt"}
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        disabled={interruptSubmitState === "submitting"}
+                        onClick={() => {
+                          setInterruptConfirmation(cancelInterruptConfirmation());
+                          setInterruptError(null);
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="interrupt-actions">
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={!interruptAvailability.available}
+                      onClick={() => {
+                        setInterruptConfirmation((current) => startInterruptConfirmation(current, interruptAvailability));
+                        setInterruptError(null);
+                      }}
+                    >
+                      Interrupt
+                    </button>
+                    <p className="steering-state">{interruptAvailability.reason ?? "Escalate queued steering."}</p>
+                  </div>
+                )}
+                {interruptError ? <p className="form-error">{interruptError}</p> : null}
+              </div>
             ) : null}
             <form className="steering-form" onSubmit={(event: FormEvent<HTMLFormElement>) => void submitSteering(event)}>
               <textarea

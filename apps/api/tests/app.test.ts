@@ -306,13 +306,22 @@ describe("API service skeleton", () => {
 
       const interrupt = await postPublic(baseUrl, config, `/projects/${project.id}/tasks/${runningTask.id}/sessions/session_running/interrupt`, {
         message: "pause after the current command",
+        steeringContext: { source: "web", messages: [{ id: "steer-preview", body: "Focus on tests", status: "queued" }] },
       });
       const interruptBody = await interrupt.json();
       expect(interrupt.status).toBe(200);
       expect(interruptBody).toMatchObject({
         ok: true,
         command: { type: "interrupt", taskId: runningTask.id, sessionId: "session_running" },
-        pendingCommands: [{ type: "interrupt", status: "queued" }],
+        pendingCommands: [
+          {
+            type: "interrupt",
+            status: "queued",
+            payload: {
+              steeringContext: { source: "web", messages: [{ id: "steer-preview", body: "Focus on tests", status: "queued" }] },
+            },
+          },
+        ],
       });
 
       const steer = await postPublic(baseUrl, config, `/projects/${project.id}/tasks/${runningTask.id}/sessions/session_running/steer`, {

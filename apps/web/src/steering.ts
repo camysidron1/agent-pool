@@ -22,6 +22,21 @@ export type VisibleSteeringMessage = PublicSteeringMessageSummary & {
   readonly displayStatus: "Queued" | "Failed";
 };
 
+export type InterruptConfirmationState = "idle" | "confirming";
+
+export type SteeringInterruptPayload = {
+  readonly message: string;
+  readonly steeringContext: {
+    readonly source: "web";
+    readonly messages: readonly {
+      readonly id: string;
+      readonly status: string;
+      readonly body: string;
+      readonly attachments: readonly PublicSteeringAttachmentReference[];
+    }[];
+  };
+};
+
 export type SubmitSteeringDraftInput = {
   readonly api: Pick<PublicApiClient, "planProjectUpload" | "steerSession">;
   readonly projectId: string;
@@ -58,6 +73,48 @@ export function getVisibleSteeringMessages(task: PublicTaskDetail): readonly Vis
       ...message,
       displayStatus: message.status === "failed" ? "Failed" : "Queued",
     }));
+}
+
+export function getSteeringInterruptAvailability(
+  task: PublicTaskDetail | null,
+  activeSession: PublicSessionSummary | null,
+): SteeringAvailability {
+  const steeringAvailability = getSteeringAvailability(task, activeSession);
+  if (!steeringAvailability.available || !task) return steeringAvailability;
+
+  if (getVisibleSteeringMessages(task).length === 0) {
+    return { available: false, reason: "No queued steering is available to escalate." };
+  }
+
+  return { available: true, reason: null };
+}
+
+export function startInterruptConfirmation(
+  current: InterruptConfirmationState,
+  availability: SteeringAvailability,
+): InterruptConfirmationState {
+  return availability.available ? "confirming" : current;
+}
+
+export function cancelInterruptConfirmation(): InterruptConfirmationState {
+  return "idle";
+}
+
+export function buildSteeringInterruptPayload(task: PublicTaskDetail): SteeringInterruptPayload {
+  const messages = getVisibleSteeringMessages(task).map((message) => ({
+    id: message.id,
+    status: message.status,
+    body: message.body,
+    attachments: message.attachments,
+  }));
+
+  return {
+    message: `Interrupt requested with ${messages.length} queued steering ${messages.length === 1 ? "message" : "messages"}.`,
+    steeringContext: {
+      source: "web",
+      messages,
+    },
+  };
 }
 
 export function shouldUseIncomingTaskDetail(current: PublicTaskDetail | null, incoming: PublicTaskDetail): boolean {

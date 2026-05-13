@@ -93,15 +93,21 @@ describe("public web API client", () => {
       body: "Keep going",
       attachments: [{ key: "projects/project-a/task-a/session-a/context.txt", bucket: "agent-pool-web-sandbox", fileName: "context.txt" }],
     });
+    await client.interruptSession("project-a", "task-a", "session-a", {
+      message: "Interrupt requested",
+      steeringContext: { source: "web", messages: [{ id: "steer-a", body: "Keep going" }] },
+    });
 
     expect(calls.map((call) => call.url)).toEqual([
       "/api/public/projects/project-a/uploads/plan",
       "/api/public/projects/project-a/tasks/task-a/sessions/session-a/steer",
+      "/api/public/projects/project-a/tasks/task-a/sessions/session-a/interrupt",
     ]);
     expect(calls[1]?.body).toBe(
       '{"body":"Keep going","attachments":[{"key":"projects/project-a/task-a/session-a/context.txt","bucket":"agent-pool-web-sandbox","fileName":"context.txt"}]}',
     );
     expect(calls[1]?.body).not.toContain("raw-local-path");
+    expect(calls[2]?.body).toContain('"steeringContext"');
   });
 });
 

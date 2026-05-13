@@ -575,6 +575,29 @@ label {
   font-size: 0.78rem;
 }
 
+.interrupt-escalation,
+.interrupt-confirmation {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.interrupt-escalation {
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  padding: 0.75rem;
+}
+
+.interrupt-confirmation p {
+  margin: 0;
+}
+
+.interrupt-actions {
+  align-items: center;
+  display: flex;
+  gap: 0.65rem;
+  justify-content: space-between;
+}
+
 .attachment-control {
   display: grid;
   gap: 0.35rem;
@@ -648,6 +671,11 @@ label {
   }
 
   .steering-actions {
+    align-items: stretch;
+    display: grid;
+  }
+
+  .interrupt-actions {
     align-items: stretch;
     display: grid;
   }

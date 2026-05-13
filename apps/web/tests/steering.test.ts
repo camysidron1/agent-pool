@@ -9,10 +9,14 @@ import type {
   PublicTaskDetail,
 } from "../src/api";
 import {
+  buildSteeringInterruptPayload,
+  cancelInterruptConfirmation,
   getSteeringAvailability,
+  getSteeringInterruptAvailability,
   getVisibleSteeringMessages,
   plannedUploadToSteeringAttachment,
   shouldUseIncomingTaskDetail,
+  startInterruptConfirmation,
   submitSteeringDraft,
 } from "../src/steering";
 
@@ -199,6 +203,56 @@ describe("web steering composer", () => {
 
     expect(shouldUseIncomingTaskDetail(current, stale)).toBe(false);
     expect(shouldUseIncomingTaskDetail(current, newer)).toBe(true);
+  });
+
+  test("requires confirmation before building an interrupt escalation payload", () => {
+    const runningSession = session("session-active", "running");
+    const taskWithQueuedSteering = {
+      ...detailTask("running", runningSession),
+      steeringMessages: [steeringMessage("steer-a", "queued", "2026-05-13T00:01:00.000Z")],
+    };
+    const availability = getSteeringInterruptAvailability(taskWithQueuedSteering, runningSession);
+
+    expect(availability).toEqual({ available: true, reason: null });
+    expect(startInterruptConfirmation("idle", availability)).toBe("confirming");
+    expect(cancelInterruptConfirmation()).toBe("idle");
+    expect(buildSteeringInterruptPayload(taskWithQueuedSteering)).toEqual({
+      message: "Interrupt requested with 1 queued steering message.",
+      steeringContext: {
+        source: "web",
+        messages: [
+          {
+            id: "steer-a",
+            status: "queued",
+            body: "Keep going",
+            attachments: [{ key: "projects/project-a/task-a/session-active/context.txt", fileName: "context.txt" }],
+          },
+        ],
+      },
+    });
+  });
+
+  test("keeps interrupt escalation unavailable for unsupported states", () => {
+    const runningSession = session("session-active", "running");
+    const canceledSession = session("session-canceled", "canceled");
+
+    expect(getSteeringInterruptAvailability(detailTask("completed", runningSession), runningSession)).toEqual({
+      available: false,
+      reason: "Steering is unavailable while the task is completed.",
+    });
+    expect(
+      getSteeringInterruptAvailability(
+        {
+          ...detailTask("running", canceledSession),
+          steeringMessages: [steeringMessage("steer-a", "queued", "2026-05-13T00:01:00.000Z")],
+        },
+        canceledSession,
+      ),
+    ).toEqual({
+      available: false,
+      reason: "Steering is unavailable while the session is canceled.",
+    });
+    expect(startInterruptConfirmation("idle", { available: false, reason: "No queued steering is available to escalate." })).toBe("idle");
   });
 
   test("keeps planned upload local paths out of steering attachment payloads", () => {

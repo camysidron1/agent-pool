@@ -171,6 +171,14 @@ export type PublicTaskDetail = PublicTaskSummary & {
   readonly steeringMessages: readonly PublicSteeringMessageSummary[];
 };
 
+export type PublicCommandMutation = {
+  readonly command: PublicCommandSummary;
+  readonly event: PublicEventSummary;
+  readonly outbox: unknown;
+  readonly task: PublicTaskDetail | null;
+  readonly pendingCommands: readonly PublicCommandSummary[];
+};
+
 export type PublicSteeringMutation = {
   readonly steering: PublicSteeringMessageSummary;
   readonly command: PublicCommandSummary;
@@ -245,6 +253,11 @@ export function createPublicApiClient(options: PublicApiClientOptions) {
       request<PublicApiSuccess<PublicSteeringMutation>>(
         `/projects/${encodePath(projectId)}/tasks/${encodePath(taskId)}/sessions/${encodePath(sessionId)}/steer`,
         { method: "POST", body: JSON.stringify(input) },
+      ),
+    interruptSession: (projectId: string, taskId: string, sessionId: string, payload: JsonRecord) =>
+      request<PublicApiSuccess<PublicCommandMutation>>(
+        `/projects/${encodePath(projectId)}/tasks/${encodePath(taskId)}/sessions/${encodePath(sessionId)}/interrupt`,
+        { method: "POST", body: JSON.stringify(payload) },
       ),
     updateTaskPriority: (projectId: string, taskId: string, priority: number) =>
       request<PublicApiSuccess<{ readonly task: PublicTaskSummary; readonly pendingCommands: readonly PublicCommandSummary[] }>>(
