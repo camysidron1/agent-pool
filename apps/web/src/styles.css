@@ -50,7 +50,8 @@ h1 {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -70,6 +71,16 @@ button:hover {
 
 input {
   min-width: 0;
+  border: 1px solid #c6cfdb;
+  border-radius: 6px;
+  padding: 0.7rem 0.8rem;
+}
+
+textarea {
+  box-sizing: border-box;
+  min-width: 0;
+  resize: vertical;
+  width: 100%;
   border: 1px solid #c6cfdb;
   border-radius: 6px;
   padding: 0.7rem 0.8rem;
@@ -320,6 +331,11 @@ label {
   cursor: grabbing;
 }
 
+.task-card:focus {
+  outline: 2px solid #607084;
+  outline-offset: 2px;
+}
+
 .task-card-title {
   align-items: start;
   display: grid;
@@ -359,9 +375,110 @@ label {
   gap: 0.3rem;
 }
 
-.task-card-footer select {
+  .task-card-footer select {
   min-width: 0;
   width: 100%;
+}
+
+.task-panel {
+  box-sizing: border-box;
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(34rem, 100vw);
+  border-left: 1px solid #d8dee8;
+  background: #ffffff;
+  box-shadow: -18px 0 45px rgba(24, 33, 47, 0.15);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  z-index: 20;
+}
+
+.task-panel-header {
+  align-items: start;
+  border-bottom: 1px solid #e2e7ee;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  padding: 1rem;
+}
+
+.task-panel-header h2 {
+  font-size: 1.2rem;
+  margin-bottom: 0;
+}
+
+.task-panel-header button {
+  background: #ffffff;
+  color: #263349;
+}
+
+.task-panel-body {
+  display: grid;
+  gap: 1rem;
+  overflow-y: auto;
+  padding: 1rem;
+}
+
+.panel-section {
+  border-bottom: 1px solid #e2e7ee;
+  display: grid;
+  gap: 0.7rem;
+  padding-bottom: 1rem;
+}
+
+.panel-section:last-child {
+  border-bottom: 0;
+}
+
+.panel-section h3 {
+  font-size: 0.95rem;
+  margin: 0;
+}
+
+.panel-section p {
+  color: #607084;
+  margin-bottom: 0;
+}
+
+.detail-grid {
+  display: grid;
+  gap: 0.6rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+}
+
+.detail-grid dt {
+  color: #607084;
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.detail-grid dd {
+  margin: 0.2rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.log-list {
+  display: grid;
+  gap: 0.55rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.log-list li {
+  border: 1px solid #e2e7ee;
+  border-radius: 6px;
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.65rem;
+}
+
+.log-list time {
+  color: #607084;
+  font-size: 0.78rem;
 }
 
 @media (max-width: 680px) {
@@ -386,5 +503,9 @@ label {
 
   .task-counts {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .detail-grid {
+    grid-template-columns: 1fr;
   }
 }

@@ -1,4 +1,4 @@
-import type { PublicProjectSummary, PublicTaskSummary } from "./api";
+import type { PublicLogStreamSummary, PublicProjectSummary, PublicSessionSummary, PublicTaskDetail, PublicTaskSummary } from "./api";
 import type { BrowserStorage } from "./auth";
 
 export const SELECTED_PROJECT_STORAGE_KEY = "agent-pool.selectedProjectId";
@@ -170,6 +170,20 @@ export function applyTaskColumn(
         return task;
     }
   });
+}
+
+export function selectActiveSession(task: PublicTaskDetail): PublicSessionSummary | null {
+  return (
+    task.sessions.find((session) => session.status === "running" || session.status === "starting") ??
+    task.latestSession ??
+    task.sessions[0] ??
+    null
+  );
+}
+
+export function summarizeLogStream(logStream: PublicLogStreamSummary): string {
+  const lineLabel = logStream.lineCount === 1 ? "line" : "lines";
+  return `${logStream.kind} · ${logStream.lineCount} ${lineLabel} · offset ${logStream.byteOffset}`;
 }
 
 function normalizeProjectId(value: string | null): string | null {

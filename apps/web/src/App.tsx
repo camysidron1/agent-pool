@@ -1,6 +1,15 @@
-import { useEffect, useMemo, useState, type ChangeEvent, type DragEvent, type FormEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type ChangeEvent,
+  type DragEvent,
+  type FormEvent,
+  type KeyboardEvent,
+  type MouseEvent,
+} from "react";
 
-import { createPublicApiClient, PublicApiError, type PublicProjectSummary, type PublicTaskSummary } from "./api";
+import { createPublicApiClient, PublicApiError, type PublicProjectSummary, type PublicTaskDetail, type PublicTaskSummary } from "./api";
 import {
   clearStoredOperatorId,
   normalizeOperatorId,
@@ -21,6 +30,8 @@ import {
   readStoredSelectedProjectId,
   replaceTask,
   saveStoredSelectedProjectId,
+  selectActiveSession,
+  summarizeLogStream,
   type BoardColumnId,
 } from "./board";
 import { shouldRefreshBoardForEvent, subscribeProjectEvents } from "./sse";
@@ -46,6 +57,10 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
   const [priorityMutations, setPriorityMutations] = useState<ReadonlySet<string>>(() => new Set());
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [dropTargetColumn, setDropTargetColumn] = useState<string | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [taskDetail, setTaskDetail] = useState<PublicTaskDetail | null>(null);
+  const [taskDetailLoadState, setTaskDetailLoadState] = useState<LoadState>("idle");
+  const [taskDetailError, setTaskDetailError] = useState<string | null>(null);
   const isAuthenticated = operatorId.length > 0;
   const api = useMemo(
     () => (isAuthenticated ? createPublicApiClient({ baseUrl: apiBaseUrl, operatorId }) : null),
@@ -159,6 +174,37 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
     };
   }, [api, apiBaseUrl, operatorId, selectedProjectId]);
 
+  useEffect(() => {
+    if (!api || !selectedProjectId || !selectedTaskId) {
+      setTaskDetail(null);
+      setTaskDetailLoadState("idle");
+      setTaskDetailError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setTaskDetailLoadState("loading");
+    setTaskDetailError(null);
+
+    api
+      .readTask(selectedProjectId, selectedTaskId)
+      .then((response) => {
+        if (cancelled) return;
+        setTaskDetail(response.task);
+        setTaskDetailLoadState("ready");
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setTaskDetail(null);
+        setTaskDetailError(formatApiError(error));
+        setTaskDetailLoadState("error");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [api, selectedProjectId, selectedTaskId]);
+
   function submitOperator(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
     const normalized = normalizeOperatorId(operatorDraft);
@@ -196,6 +242,8 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
     setSelectedProjectId(nextProjectId);
     saveStoredSelectedProjectId(storage, nextProjectId);
     setTaskMutationError(null);
+    setSelectedTaskId(null);
+    setTaskDetail(null);
   }
 
   async function updatePriority(task: PublicTaskSummary, event: ChangeEvent<HTMLSelectElement>): Promise<void> {
@@ -278,6 +326,27 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
       setTasks(previousTasks);
       setTaskMutationError(formatApiError(error));
     }
+  }
+
+  function openTaskPanel(taskId: string): void {
+    setSelectedTaskId(taskId);
+  }
+
+  function closeTaskPanel(): void {
+    setSelectedTaskId(null);
+    setTaskDetail(null);
+    setTaskDetailLoadState("idle");
+    setTaskDetailError(null);
+  }
+
+  function openTaskPanelFromKeyboard(taskId: string, event: KeyboardEvent<HTMLElement>): void {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    openTaskPanel(taskId);
+  }
+
+  function stopCardActionPropagation(event: MouseEvent<HTMLElement>): void {
+    event.stopPropagation();
   }
 
   if (!isAuthenticated) {
@@ -389,6 +458,11 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
                           key={task.id}
                           className="task-card"
                           draggable
+                          tabIndex={0}
+                          role="button"
+                          aria-label={`Open ${task.title}`}
+                          onClick={() => openTaskPanel(task.id)}
+                          onKeyDown={(event: KeyboardEvent<HTMLElement>) => openTaskPanelFromKeyboard(task.id, event)}
                           onDragStart={(event: DragEvent<HTMLElement>) => beginTaskDrag(task, event)}
                           onDragEnd={endTaskDrag}
                         >
@@ -402,7 +476,7 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
                               {task.runtimeSource.repositoryUrl} @ {task.runtimeSource.baseRef}
                             </p>
                           ) : null}
-                          <div className="task-card-footer">
+                          <div className="task-card-footer" onClick={stopCardActionPropagation}>
                             <label>
                               <span>Priority</span>
                               <select
@@ -434,6 +508,14 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
           </section>
         ) : null}
       </section>
+      {selectedTaskId ? (
+        <TaskPanel
+          detail={taskDetail}
+          loadState={taskDetailLoadState}
+          error={taskDetailError}
+          onClose={closeTaskPanel}
+        />
+      ) : null}
     </main>
   );
 }
@@ -453,12 +535,118 @@ function BoardNotice({ title, body, tone = "neutral" }: { readonly title: string
   );
 }
 
+function TaskPanel({
+  detail,
+  loadState,
+  error,
+  onClose,
+}: {
+  readonly detail: PublicTaskDetail | null;
+  readonly loadState: LoadState;
+  readonly error: string | null;
+  readonly onClose: () => void;
+}) {
+  const activeSession = detail ? selectActiveSession(detail) : null;
+
+  return (
+    <aside className="task-panel" aria-label="Task detail">
+      <header className="task-panel-header">
+        <div>
+          <p className="eyebrow">Task detail</p>
+          <h2>{detail?.title ?? "Loading task"}</h2>
+        </div>
+        <button type="button" onClick={onClose} aria-label="Close task detail">
+          Close
+        </button>
+      </header>
+
+      {loadState === "loading" ? <BoardNotice title="Loading task" body="Fetching task detail from the public API." /> : null}
+      {loadState === "error" ? <BoardNotice title="Task detail failed" body={error ?? "Unable to load task detail."} tone="error" /> : null}
+      {loadState === "ready" && detail ? (
+        <div className="task-panel-body">
+          <section className="panel-section" aria-label="Task summary">
+            <dl className="detail-grid">
+              <div>
+                <dt>Status</dt>
+                <dd>{detail.status}</dd>
+              </div>
+              <div>
+                <dt>Priority</dt>
+                <dd>{getPriorityLabel(detail.priority)}</dd>
+              </div>
+              <div>
+                <dt>Updated</dt>
+                <dd>{formatTimestamp(detail.updatedAt)}</dd>
+              </div>
+            </dl>
+            {detail.description ? <p>{detail.description}</p> : null}
+          </section>
+
+          <section className="panel-section" aria-label="Active session">
+            <h3>Active Session</h3>
+            {activeSession ? (
+              <dl className="detail-grid">
+                <div>
+                  <dt>Attempt</dt>
+                  <dd>{activeSession.attemptNumber}</dd>
+                </div>
+                <div>
+                  <dt>Status</dt>
+                  <dd>{activeSession.status}</dd>
+                </div>
+                <div>
+                  <dt>Provider</dt>
+                  <dd>{activeSession.runtimeProvider ?? "none"}</dd>
+                </div>
+              </dl>
+            ) : (
+              <p>No active session.</p>
+            )}
+          </section>
+
+          <section className="panel-section" aria-label="Raw logs">
+            <h3>Raw Logs</h3>
+            {detail.logStreams.length === 0 ? (
+              <p>No logs recorded.</p>
+            ) : (
+              <ul className="log-list">
+                {detail.logStreams.map((logStream) => (
+                  <li key={logStream.id}>
+                    <span>{summarizeLogStream(logStream)}</span>
+                    <time>{formatTimestamp(logStream.updatedAt)}</time>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          <section className="panel-section" aria-label="Steering">
+            <h3>Steering</h3>
+            <textarea disabled rows={4} value="" aria-label="Steering message" />
+            <button type="button" disabled>
+              Send
+            </button>
+          </section>
+        </div>
+      ) : null}
+    </aside>
+  );
+}
+
 function formatApiError(error: unknown): string {
   if (error instanceof PublicApiError) {
     return error.message;
   }
 
   return error instanceof Error ? error.message : "Unexpected public API error.";
+}
+
+function formatTimestamp(value: string | null): string {
+  if (!value) return "none";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+
+  return date.toLocaleString();
 }
 
 function readBrowserStorage(): BrowserStorage | null {

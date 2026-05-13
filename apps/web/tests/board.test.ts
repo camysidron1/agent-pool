@@ -12,7 +12,9 @@ import {
   replaceTask,
   saveStoredSelectedProjectId,
   SELECTED_PROJECT_STORAGE_KEY,
+  selectActiveSession,
   sortTasksForBoard,
+  summarizeLogStream,
 } from "../src/board";
 import type { PublicProjectSummary, PublicTaskSummary } from "../src/api";
 import type { BrowserStorage } from "../src/auth";
@@ -100,6 +102,34 @@ describe("web board state", () => {
     expect(backlogged[1]?.status).toBe("queued");
     expect(backlogged[1]?.priority).toBe(-50);
   });
+
+  test("selects an active session and summarizes log streams for the detail panel", () => {
+    const detail = {
+      ...task("task-a", 0, 1, "A task", "running"),
+      sessions: [
+        session("session-old", "failed", 1),
+        session("session-active", "running", 2),
+      ],
+      artifacts: [],
+      events: [],
+      logStreams: [
+        {
+          id: "log-a",
+          projectId: "project-a",
+          taskId: "task-a",
+          sessionId: "session-active",
+          kind: "stdout",
+          byteOffset: 128,
+          lineCount: 2,
+          createdAt: "2026-05-13T00:00:00.000Z",
+          updatedAt: "2026-05-13T00:01:00.000Z",
+        },
+      ],
+    };
+
+    expect(selectActiveSession(detail)?.id).toBe("session-active");
+    expect(summarizeLogStream(detail.logStreams[0])).toBe("stdout · 2 lines · offset 128");
+  });
 });
 
 function project(id: string): PublicProjectSummary {
@@ -135,6 +165,26 @@ function task(
     updatedAt: "2026-05-13T00:00:00.000Z",
     latestSession: null,
     pendingCommands: [],
+  };
+}
+
+function session(id: string, status: string, attemptNumber: number) {
+  return {
+    id,
+    projectId: "project-a",
+    taskId: "task-a",
+    attemptNumber,
+    status,
+    runtimeProvider: "fake",
+    runtimeSessionId: null,
+    createdAt: "2026-05-13T00:00:00.000Z",
+    startedAt: null,
+    endedAt: null,
+    finalResponseRecordedAt: null,
+    lastHeartbeatAt: null,
+    heartbeatStatus: "unknown",
+    staleAt: null,
+    lostAt: null,
   };
 }
 
