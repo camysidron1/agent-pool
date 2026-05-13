@@ -25,13 +25,14 @@ describe("web project SSE client", () => {
     expect(parsed.events.map((item) => item.id)).toEqual(["evt-2"]);
   });
 
-  test("refreshes only selected project task session command and steering events", () => {
+  test("refreshes selected project task detail events", () => {
     expect(shouldRefreshBoardForEvent(event("evt-1", "task.claimed"), "project-a")).toBe(true);
     expect(shouldRefreshBoardForEvent(event("evt-2", "session.started"), "project-a")).toBe(true);
     expect(shouldRefreshBoardForEvent(event("evt-3", "command.queued"), "project-a")).toBe(true);
     expect(shouldRefreshBoardForEvent(event("evt-4", "steering.delivered"), "project-a")).toBe(true);
-    expect(shouldRefreshBoardForEvent(event("evt-5", "artifact.created"), "project-a")).toBe(false);
-    expect(shouldRefreshBoardForEvent(event("evt-6", "task.claimed", "project-b"), "project-a")).toBe(false);
+    expect(shouldRefreshBoardForEvent(event("evt-5", "artifact.created"), "project-a")).toBe(true);
+    expect(shouldRefreshBoardForEvent(event("evt-6", "note.created"), "project-a")).toBe(true);
+    expect(shouldRefreshBoardForEvent(event("evt-7", "task.claimed", "project-b"), "project-a")).toBe(false);
   });
 });
 

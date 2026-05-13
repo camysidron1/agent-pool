@@ -13,6 +13,7 @@ import {
 import {
   createPublicApiClient,
   PublicApiError,
+  type PublicArtifactSummary,
   type PublicProjectSummary,
   type PublicSessionSummary,
   type PublicTaskDetail,
@@ -54,7 +55,18 @@ import {
   submitSteeringDraft,
   type InterruptConfirmationState,
 } from "./steering";
-import { formatRawLogEntries, getRawLogEntries, shouldFollowRawLogScroll, summarizeLogFallback, type RawLogEntry } from "./task-detail";
+import {
+  canPreviewArtifact,
+  formatRawLogEntries,
+  getArtifactHref,
+  getArtifactStatus,
+  getArtifactTitle,
+  getRawLogEntries,
+  groupArtifacts,
+  shouldFollowRawLogScroll,
+  summarizeLogFallback,
+  type RawLogEntry,
+} from "./task-detail";
 
 export type AppProps = {
   readonly apiBaseUrl?: string;
@@ -654,6 +666,7 @@ function TaskPanel({
   const [interruptConfirmation, setInterruptConfirmation] = useState<InterruptConfirmationState>("idle");
   const [interruptSubmitState, setInterruptSubmitState] = useState<"idle" | "submitting">("idle");
   const [interruptError, setInterruptError] = useState<string | null>(null);
+  const [previewArtifact, setPreviewArtifact] = useState<PublicArtifactSummary | null>(null);
   const activeSession = detail ? selectActiveSession(detail) : null;
   const resultSummary = detail ? getTaskResultSummary(detail) : null;
   const steeringAvailability = getSteeringAvailability(detail, activeSession);
@@ -671,6 +684,7 @@ function TaskPanel({
     setSteeringNotice(null);
     setInterruptConfirmation("idle");
     setInterruptError(null);
+    setPreviewArtifact(null);
   }, [detail?.id]);
 
   function updateSteeringDraft(event: ChangeEvent<HTMLTextAreaElement>): void {
@@ -773,6 +787,8 @@ function TaskPanel({
             </dl>
             {detail.description ? <p>{detail.description}</p> : null}
           </section>
+
+          <ArtifactSection detail={detail} onPreview={setPreviewArtifact} />
 
           <section className="panel-section" aria-label="Active session">
             <h3>Active Session</h3>
@@ -950,6 +966,7 @@ function TaskPanel({
               {steeringNotice ? <p className="form-success">{steeringNotice}</p> : null}
             </form>
           </section>
+          {previewArtifact ? <ArtifactPreviewModal artifact={previewArtifact} onClose={() => setPreviewArtifact(null)} /> : null}
         </div>
       ) : null}
     </aside>
@@ -1032,6 +1049,128 @@ function RawLogMeta({ entries }: { readonly entries: readonly RawLogEntry[] }) {
         </dd>
       </div>
     </dl>
+  );
+}
+
+function ArtifactSection({
+  detail,
+  onPreview,
+}: {
+  readonly detail: PublicTaskDetail;
+  readonly onPreview: (artifact: PublicArtifactSummary) => void;
+}) {
+  const groups = groupArtifacts(detail.artifacts);
+
+  return (
+    <section className="panel-section artifact-section" aria-label="Artifacts">
+      <h3>Artifacts</h3>
+      {groups.length === 0 ? (
+        <p>No artifacts recorded.</p>
+      ) : (
+        <div className="artifact-groups">
+          {groups.map((group) => (
+            <section key={group.kind} className="artifact-group" aria-label={group.label}>
+              <header>
+                <h4>{group.label}</h4>
+                <span>{group.artifacts.length}</span>
+              </header>
+              <ul className="artifact-detail-list">
+                {group.artifacts.map((artifact) => (
+                  <li key={artifact.id} className="artifact-detail-item">
+                    <ArtifactListItem artifact={artifact} onPreview={onPreview} />
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ArtifactListItem({
+  artifact,
+  onPreview,
+}: {
+  readonly artifact: PublicArtifactSummary;
+  readonly onPreview: (artifact: PublicArtifactSummary) => void;
+}) {
+  const title = getArtifactTitle(artifact);
+  const status = getArtifactStatus(artifact);
+  const href = getArtifactHref(artifact);
+
+  return (
+    <>
+      <div>
+        <strong>{title}</strong>
+        <span>{artifact.kind}</span>
+      </div>
+      <p>{artifact.uri}</p>
+      <div className="artifact-item-actions">
+        <span className={`artifact-status artifact-status-${status.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}>{status}</span>
+        {canPreviewArtifact(artifact) ? (
+          <button type="button" className="secondary-button" onClick={() => onPreview(artifact)}>
+            Preview
+          </button>
+        ) : null}
+        {href ? (
+          <a href={href} target="_blank" rel="noreferrer">
+          Open
+        </a>
+      ) : null}
+      </div>
+    </>
+  );
+}
+
+function ArtifactPreviewModal({ artifact, onClose }: { readonly artifact: PublicArtifactSummary; readonly onClose: () => void }) {
+  const href = getArtifactHref(artifact);
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="artifact-modal" role="dialog" aria-modal="true" aria-label="Document artifact preview">
+        <header>
+          <div>
+            <p className="eyebrow">{artifact.kind}</p>
+            <h3>{getArtifactTitle(artifact)}</h3>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close artifact preview">
+            Close
+          </button>
+        </header>
+        <dl className="detail-grid">
+          <div>
+            <dt>Status</dt>
+            <dd>{getArtifactStatus(artifact)}</dd>
+          </div>
+          <div>
+            <dt>Created</dt>
+            <dd>{formatTimestamp(artifact.createdAt)}</dd>
+          </div>
+          <div>
+            <dt>Session</dt>
+            <dd>{artifact.sessionId ?? "none"}</dd>
+          </div>
+        </dl>
+        <pre className="artifact-preview-body" aria-label="Inline document preview">
+          {JSON.stringify(
+            {
+              uri: artifact.uri,
+              title: artifact.title,
+              metadata: artifact.metadata,
+            },
+            null,
+            2,
+          )}
+        </pre>
+        {href ? (
+          <a className="artifact-modal-link" href={href} target="_blank" rel="noreferrer">
+            Open external artifact
+          </a>
+        ) : null}
+      </section>
+    </div>
   );
 }
 
