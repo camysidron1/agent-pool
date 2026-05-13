@@ -4,6 +4,7 @@ import {
   createE2BRuntimeProvider,
   type E2BCommandResult,
   type E2BCommandRunOptions,
+  type E2BDestroySandboxOptions,
   type E2BRuntimeClient,
   type E2BRuntimeProviderConfig,
   type E2BSandboxCreateInput,
@@ -24,6 +25,7 @@ type E2BClientCall =
   | {
       readonly kind: "destroy";
       readonly sandboxId: string;
+      readonly options?: E2BDestroySandboxOptions;
     };
 
 const config: E2BRuntimeProviderConfig = {
@@ -198,6 +200,100 @@ describe("E2B runtime provider", () => {
     expect(message).toContain("[REDACTED]");
     expect(message).not.toContain("github-secret");
   });
+
+  test("destroys E2B sandboxes once with the configured cleanup deadline", async () => {
+    const { client, calls } = createRecordingClient();
+    const provider = createE2BRuntimeProvider({
+      client,
+      config,
+      env: { GITHUB_TOKEN: "github-secret" },
+      secretEnvNames: ["GITHUB_TOKEN"],
+    });
+    const handle = {
+      provider: "e2b" as const,
+      sessionId: "runtime_session_1",
+      metadata: {
+        sandboxId: "sandbox_from_metadata",
+      },
+    };
+
+    await provider.stopSession(handle);
+    await provider.stopSession(handle);
+
+    const destroyCalls = calls.filter(isDestroyCall);
+    expect(destroyCalls).toEqual([
+      {
+        kind: "destroy",
+        sandboxId: "sandbox_from_metadata",
+        options: { timeoutMs: 45_000 },
+      },
+    ]);
+    expect(provider.capabilities).toEqual({
+      start: true,
+      stop: true,
+      suspend: false,
+      resume: false,
+      fork: false,
+    });
+    expect("suspendSession" in provider).toBe(false);
+    expect("resumeSession" in provider).toBe(false);
+    expect("forkSession" in provider).toBe(false);
+  });
+
+  test("rejects cleanup without a sandbox id before calling the client", async () => {
+    const { client, calls } = createRecordingClient();
+    const provider = createE2BRuntimeProvider({
+      client,
+      config,
+      env: { GITHUB_TOKEN: "github-secret" },
+      secretEnvNames: ["GITHUB_TOKEN"],
+    });
+
+    await expect(provider.stopSession({ provider: "e2b", sessionId: " " })).rejects.toThrow(
+      "e2b cleanup requires sandbox id",
+    );
+    expect(calls).toEqual([]);
+  });
+
+  test("redacts cleanup errors and leaves failed cleanup retryable", async () => {
+    const { client, calls } = createRecordingClient({
+      destroySandbox: async () => {
+        throw new Error("cleanup failed for github-secret");
+      },
+    });
+    const provider = createE2BRuntimeProvider({
+      client,
+      config,
+      env: { GITHUB_TOKEN: "github-secret" },
+      secretEnvNames: ["GITHUB_TOKEN"],
+    });
+
+    const message = await rejectedMessage(provider.stopSession({ provider: "e2b", sessionId: "sandbox_1" }));
+    const retryMessage = await rejectedMessage(provider.stopSession({ provider: "e2b", sessionId: "sandbox_1" }));
+
+    expect(message).toContain("[REDACTED]");
+    expect(message).not.toContain("github-secret");
+    expect(retryMessage).toContain("[REDACTED]");
+    expect(calls.filter(isDestroyCall)).toHaveLength(2);
+  });
+
+  test("surfaces cleanup deadline failures from the client boundary", async () => {
+    const { client } = createRecordingClient({
+      destroySandbox: async (_sandboxId, options) => {
+        throw new Error(`cleanup timed out after ${options?.timeoutMs ?? 0}ms`);
+      },
+    });
+    const provider = createE2BRuntimeProvider({
+      client,
+      config,
+      env: { GITHUB_TOKEN: "github-secret" },
+      secretEnvNames: ["GITHUB_TOKEN"],
+    });
+
+    await expect(provider.stopSession({ provider: "e2b", sessionId: "sandbox_1" })).rejects.toThrow(
+      "cleanup timed out after 45000ms",
+    );
+  });
 });
 
 function createRecordingClient(overrides: {
@@ -207,6 +303,7 @@ function createRecordingClient(overrides: {
     command: readonly string[],
     options: E2BCommandRunOptions,
   ) => Promise<E2BCommandResult>;
+  readonly destroySandbox?: (sandboxId: string, options?: E2BDestroySandboxOptions) => Promise<void>;
 } = {}): { readonly client: E2BRuntimeClient; readonly calls: readonly E2BClientCall[] } {
   const calls: E2BClientCall[] = [];
   const client: E2BRuntimeClient = {
@@ -218,8 +315,9 @@ function createRecordingClient(overrides: {
       calls.push({ kind: "command", sandboxId, command, options });
       return overrides.runCommand?.(sandboxId, command, options) ?? { ok: true, exitCode: 0 };
     },
-    async destroySandbox(sandboxId) {
-      calls.push({ kind: "destroy", sandboxId });
+    async destroySandbox(sandboxId, options) {
+      calls.push({ kind: "destroy", sandboxId, options });
+      await overrides.destroySandbox?.(sandboxId, options);
     },
   };
 
@@ -232,6 +330,10 @@ function isCreateCall(call: E2BClientCall): call is Extract<E2BClientCall, { rea
 
 function isCommandCall(call: E2BClientCall): call is Extract<E2BClientCall, { readonly kind: "command" }> {
   return call.kind === "command";
+}
+
+function isDestroyCall(call: E2BClientCall): call is Extract<E2BClientCall, { readonly kind: "destroy" }> {
+  return call.kind === "destroy";
 }
 
 async function rejectedMessage(promise: Promise<unknown>): Promise<string> {

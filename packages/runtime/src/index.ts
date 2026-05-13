@@ -109,10 +109,14 @@ export type E2BCommandResult = {
   readonly stderr?: string;
 };
 
+export type E2BDestroySandboxOptions = {
+  readonly timeoutMs?: number;
+};
+
 export interface E2BRuntimeClient {
   createSandbox(input: E2BSandboxCreateInput): Promise<E2BSandboxHandle>;
   runCommand(sandboxId: string, command: readonly string[], options: E2BCommandRunOptions): Promise<E2BCommandResult>;
-  destroySandbox(sandboxId: string): Promise<void>;
+  destroySandbox(sandboxId: string, options?: E2BDestroySandboxOptions): Promise<void>;
 }
 
 export type E2BRuntimeProviderOptions = {
@@ -362,6 +366,8 @@ export function createFakeRuntimeProvider(options: FakeRuntimeProviderOptions = 
 }
 
 export function createE2BRuntimeProvider(options: E2BRuntimeProviderOptions = {}): RuntimeProvider {
+  const stoppedSandboxIds = new Set<string>();
+
   return {
     kind: "e2b",
     capabilities: START_STOP_CAPABILITIES,
@@ -372,8 +378,7 @@ export function createE2BRuntimeProvider(options: E2BRuntimeProviderOptions = {}
       if (handle.provider !== "e2b") {
         throw new Error(`e2b runtime cannot stop ${handle.provider} session`);
       }
-      assertE2BProviderReady(options);
-      return undefined;
+      return stopE2BSession(handle, options, stoppedSandboxIds);
     },
   };
 }
@@ -574,9 +579,33 @@ async function startE2BSession(
     };
   } catch (error) {
     if (sandboxId) {
-      await client.destroySandbox(sandboxId).catch(() => undefined);
+      await client.destroySandbox(sandboxId, { timeoutMs: config.cleanupTimeoutMs ?? 30_000 }).catch(() => undefined);
     }
     throw new Error(redactSecretValues(errorMessage(error), secretValues));
+  }
+}
+
+async function stopE2BSession(
+  handle: RuntimeSessionHandle,
+  options: E2BRuntimeProviderOptions,
+  stoppedSandboxIds: Set<string>,
+): Promise<void> {
+  assertE2BProviderReady(options);
+
+  const config = options.config;
+  const client = options.client;
+  if (!config || !client) {
+    throw new Error("e2b runtime provider requires runtime config and an injected E2B client");
+  }
+
+  const sandboxId = readE2BSandboxId(handle);
+  if (stoppedSandboxIds.has(sandboxId)) return;
+
+  try {
+    await client.destroySandbox(sandboxId, { timeoutMs: config.cleanupTimeoutMs ?? 30_000 });
+    stoppedSandboxIds.add(sandboxId);
+  } catch (error) {
+    throw new Error(redactSecretValues(errorMessage(error), collectOptionSecretValues(options)));
   }
 }
 
@@ -620,6 +649,16 @@ function normalizeE2BSandboxId(sandboxId: string): string {
   const trimmed = sandboxId.trim();
   if (!trimmed) {
     throw new Error("e2b runtime provider returned an empty sandbox id");
+  }
+  return trimmed;
+}
+
+function readE2BSandboxId(handle: RuntimeSessionHandle): string {
+  const metadataSandboxId = handle.metadata?.sandboxId;
+  const sandboxId = typeof metadataSandboxId === "string" && metadataSandboxId.trim() ? metadataSandboxId : handle.sessionId;
+  const trimmed = sandboxId.trim();
+  if (!trimmed) {
+    throw new Error("e2b cleanup requires sandbox id");
   }
   return trimmed;
 }
