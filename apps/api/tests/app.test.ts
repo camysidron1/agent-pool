@@ -233,6 +233,115 @@ describe("API service skeleton", () => {
     }
   });
 
+  test("public session dispatch provider and unsupported command routes stay provider-side-effect free", async () => {
+    const { baseUrl, config, database, close } = await startTestApi();
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      const project = services.createProject({ id: "project_public_sessions", slug: "public-sessions", name: "Public Sessions" });
+      const dispatchTask = services.createTask({ id: "task_dispatch", projectId: project.id, title: "Dispatch me", priority: 0 }).task;
+      const runningTask = services.createTask({ id: "task_running", projectId: project.id, title: "Running", priority: 10 }).task;
+      const cleanupTask = services.createTask({ id: "task_cleanup", projectId: project.id, title: "Cleanup", priority: 5 }).task;
+
+      expect(
+        services.claimNextTask({
+          projectId: project.id,
+          sessionId: "session_running",
+          bridgeSessionToken: "bridge-token-session",
+        }),
+      ).toMatchObject({ ok: true, task: { id: runningTask.id } });
+      expect(services.reportStartupSucceeded({ projectId: project.id, sessionId: "session_running", runtimeSessionId: "runtime_running" })).toMatchObject({
+        ok: true,
+      });
+      expect(services.claimNextTask({ projectId: project.id, sessionId: "session_cleanup" })).toMatchObject({ ok: true, task: { id: cleanupTask.id } });
+      expect(services.reportStartupSucceeded({ projectId: project.id, sessionId: "session_cleanup" })).toMatchObject({ ok: true });
+      expect(
+        services.completeSession({
+          projectId: project.id,
+          taskId: cleanupTask.id,
+          sessionId: "session_cleanup",
+        }),
+      ).toMatchObject({ ok: true });
+
+      const capabilities = await fetch(`${baseUrl}/api/public/providers/capabilities`, {
+        headers: publicHeaders(config),
+      });
+      const capabilitiesBody = await capabilities.json();
+      expect(capabilities.status).toBe(200);
+      expect(capabilitiesBody).toMatchObject({
+        ok: true,
+        defaultProvider: "fake",
+        providers: [
+          { kind: "fake", configured: true, capabilities: { start: true, stop: true, suspend: false, resume: false, fork: false } },
+          { kind: "e2b", available: true, capabilities: { start: true, stop: true, suspend: false, resume: false, fork: false } },
+          { kind: "docker", available: false, capabilities: { start: false, stop: false } },
+        ],
+      });
+
+      const sessions = await fetch(`${baseUrl}/api/public/projects/${project.id}/tasks/${runningTask.id}/sessions`, {
+        headers: publicHeaders(config),
+      });
+      const sessionsBody = await sessions.json();
+      expect(sessions.status).toBe(200);
+      expect(sessionsBody).toMatchObject({
+        ok: true,
+        sessions: [{ id: "session_running", status: "running", runtimeSessionId: "runtime_running" }],
+      });
+      expect(JSON.stringify(sessionsBody)).not.toContain("bridge-token-session");
+
+      const dispatch = await postPublic(baseUrl, config, `/projects/${project.id}/tasks/${dispatchTask.id}/dispatch`, {
+        reason: "operator dispatch",
+      });
+      const dispatchBody = await dispatch.json();
+      expect(dispatch.status).toBe(200);
+      expect(dispatchBody).toMatchObject({
+        ok: true,
+        command: { type: "start", taskId: dispatchTask.id, sessionId: null },
+        pendingCommands: [{ type: "start", status: "queued" }],
+      });
+      expect(
+        database.sqlite.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM sessions WHERE task_id = 'task_dispatch'").get()?.count,
+      ).toBe(0);
+
+      const interrupt = await postPublic(baseUrl, config, `/projects/${project.id}/tasks/${runningTask.id}/sessions/session_running/interrupt`, {
+        message: "pause after the current command",
+      });
+      const interruptBody = await interrupt.json();
+      expect(interrupt.status).toBe(200);
+      expect(interruptBody).toMatchObject({
+        ok: true,
+        command: { type: "interrupt", taskId: runningTask.id, sessionId: "session_running" },
+        pendingCommands: [{ type: "interrupt", status: "queued" }],
+      });
+
+      const cleanup = await postPublic(baseUrl, config, `/projects/${project.id}/tasks/${cleanupTask.id}/sessions/session_cleanup/cleanup`, {
+        reason: "demo cleanup",
+      });
+      const cleanupBody = await cleanup.json();
+      expect(cleanup.status).toBe(200);
+      expect(cleanupBody).toMatchObject({
+        ok: true,
+        command: { type: "cleanup", taskId: cleanupTask.id, sessionId: "session_cleanup" },
+      });
+
+      const beforeUnsupported = database.sqlite.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM orchestrator_commands").get()?.count;
+      const suspend = await postPublic(baseUrl, config, `/projects/${project.id}/tasks/${runningTask.id}/sessions/session_running/suspend`, {});
+      expect(suspend.status).toBe(501);
+      expect(await suspend.json()).toEqual({
+        ok: false,
+        error: {
+          code: "unsupported_provider_command",
+          message: "suspend is not supported by the configured runtime providers",
+        },
+      });
+      expect(database.sqlite.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM orchestrator_commands").get()?.count).toBe(
+        beforeUnsupported,
+      );
+    } finally {
+      await close();
+    }
+  });
+
   test("internal orchestrator namespace requires service-token auth", async () => {
     const { baseUrl, config, close } = await startTestApi();
 

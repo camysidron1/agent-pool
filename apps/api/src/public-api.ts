@@ -1,6 +1,6 @@
 import type { Express, NextFunction, Request, RequestHandler, Response } from "express";
 
-import type { AppConfig, OperatorIdentity } from "@agent-pool/config";
+import type { AppConfig, OperatorIdentity, RuntimeProviderName } from "@agent-pool/config";
 import type {
   CanonicalStateServices,
   CreateProjectInput,
@@ -139,6 +139,50 @@ export function registerPublicApiRoutes(app: Express, options: PublicApiOptions)
     response.status(200).json({ ok: true, task: result.task });
   });
 
+  app.get("/api/public/projects/:projectId/tasks/:taskId/sessions", requirePublicOperator, (request, response) => {
+    const services = requirePublicServices(options, response);
+    if (!services) return;
+
+    const scope = readTaskScope(request, response);
+    if (!scope) return;
+
+    const result = services.readTaskDetail(scope);
+    if (!result.ok) {
+      response.status(404).json(publicError(result.error.code, result.error.message));
+      return;
+    }
+
+    response.status(200).json({ ok: true, sessions: result.task.sessions });
+  });
+
+  app.get("/api/public/projects/:projectId/tasks/:taskId/sessions/:sessionId", requirePublicOperator, (request, response) => {
+    const services = requirePublicServices(options, response);
+    if (!services) return;
+
+    const scope = readTaskScope(request, response);
+    if (!scope) return;
+
+    const sessionId = readPathParam(request, "sessionId");
+    if (!sessionId) {
+      response.status(400).json(publicError("validation_error", "sessionId is required"));
+      return;
+    }
+
+    const detail = services.readTaskDetail(scope);
+    if (!detail.ok) {
+      response.status(404).json(publicError(detail.error.code, detail.error.message));
+      return;
+    }
+
+    const session = detail.task.sessions.find((candidate) => candidate.id === sessionId);
+    if (!session) {
+      response.status(404).json(publicError("not_found", `session not found: ${sessionId}`));
+      return;
+    }
+
+    response.status(200).json({ ok: true, session, task: detail.task });
+  });
+
   app.post("/api/public/projects/:projectId/tasks/:taskId/priority", requirePublicOperator, (request, response) => {
     const services = requirePublicServices(options, response);
     if (!services) return;
@@ -181,6 +225,36 @@ export function registerPublicApiRoutes(app: Express, options: PublicApiOptions)
 
   app.post("/api/public/projects/:projectId/tasks/:taskId/retry", requirePublicOperator, (request: PublicOperatorRequest, response) => {
     respondTaskCommand(options, request, response, "retry");
+  });
+
+  app.post("/api/public/projects/:projectId/tasks/:taskId/dispatch", requirePublicOperator, (request: PublicOperatorRequest, response) => {
+    respondTaskCommand(options, request, response, "start");
+  });
+
+  app.post("/api/public/projects/:projectId/tasks/:taskId/sessions/:sessionId/stop", requirePublicOperator, (request: PublicOperatorRequest, response) => {
+    respondSessionCommand(options, request, response, "stop");
+  });
+
+  app.post("/api/public/projects/:projectId/tasks/:taskId/sessions/:sessionId/interrupt", requirePublicOperator, (request: PublicOperatorRequest, response) => {
+    respondSessionCommand(options, request, response, "interrupt");
+  });
+
+  app.post("/api/public/projects/:projectId/tasks/:taskId/sessions/:sessionId/cleanup", requirePublicOperator, (request: PublicOperatorRequest, response) => {
+    respondSessionCommand(options, request, response, "cleanup");
+  });
+
+  for (const command of ["suspend", "resume", "fork"] as const) {
+    app.post(`/api/public/projects/:projectId/tasks/:taskId/sessions/:sessionId/${command}`, requirePublicOperator, (_request, response) => {
+      response.status(501).json(publicError("unsupported_provider_command", `${command} is not supported by the configured runtime providers`));
+    });
+  }
+
+  app.get("/api/public/providers/capabilities", requirePublicOperator, (_request, response) => {
+    response.status(200).json({
+      ok: true,
+      defaultProvider: options.config.controlPlane.runtimeProvider,
+      providers: readProviderCapabilities(options.config),
+    });
   });
 }
 
@@ -248,7 +322,7 @@ function respondTaskCommand(
   options: PublicApiOptions,
   request: PublicOperatorRequest,
   response: Response,
-  type: "cancel" | "retry",
+  type: "start" | "cancel" | "retry",
 ): void {
   const services = requirePublicServices(options, response);
   if (!services) return;
@@ -266,6 +340,42 @@ function respondTaskCommand(
 
   const result = services.requestCommand({
     ...scope,
+    type,
+    payload,
+    requestedBy: request.publicOperator?.id ?? null,
+  });
+  respondCommandMutation(response, services, scope, result);
+}
+
+function respondSessionCommand(
+  options: PublicApiOptions,
+  request: PublicOperatorRequest,
+  response: Response,
+  type: "stop" | "interrupt" | "cleanup",
+): void {
+  const services = requirePublicServices(options, response);
+  if (!services) return;
+
+  const scope = readTaskScope(request, response);
+  if (!scope) return;
+
+  const sessionId = readPathParam(request, "sessionId");
+  if (!sessionId) {
+    response.status(400).json(publicError("validation_error", "sessionId is required"));
+    return;
+  }
+
+  let payload: Readonly<Record<string, unknown>> = {};
+  try {
+    payload = parsePublicBody(request.body);
+  } catch (error) {
+    respondPublicException(response, error);
+    return;
+  }
+
+  const result = services.requestCommand({
+    ...scope,
+    sessionId,
     type,
     payload,
     requestedBy: request.publicOperator?.id ?? null,
@@ -369,4 +479,68 @@ function readOptionalRuntimeSource(value: unknown): TaskRuntimeSourceMetadata | 
 
 function respondPublicException(response: Response, error: unknown): void {
   response.status(400).json(publicError("validation_error", error instanceof Error ? error.message : String(error)));
+}
+
+function readProviderCapabilities(config: AppConfig): readonly {
+  readonly kind: RuntimeProviderName;
+  readonly available: boolean;
+  readonly configured: boolean;
+  readonly capabilities: {
+    readonly start: boolean;
+    readonly stop: boolean;
+    readonly suspend: boolean;
+    readonly resume: boolean;
+    readonly fork: boolean;
+  };
+  readonly requirements: Readonly<Record<string, boolean>>;
+}[] {
+  return [
+    {
+      kind: "fake",
+      available: true,
+      configured: true,
+      capabilities: startStopCapabilities(),
+      requirements: {},
+    },
+    {
+      kind: "e2b",
+      available: true,
+      configured: config.controlPlane.e2b.apiKeyConfigured && Boolean(config.controlPlane.e2b.templateId || config.controlPlane.e2b.sandboxImageId),
+      capabilities: startStopCapabilities(),
+      requirements: {
+        apiKeyConfigured: config.controlPlane.e2b.apiKeyConfigured,
+        githubTokenConfigured: config.controlPlane.e2b.githubTokenConfigured,
+        imageConfigured: Boolean(config.controlPlane.e2b.templateId || config.controlPlane.e2b.sandboxImageId),
+      },
+    },
+    {
+      kind: "docker",
+      available: false,
+      configured: false,
+      capabilities: {
+        start: false,
+        stop: false,
+        suspend: false,
+        resume: false,
+        fork: false,
+      },
+      requirements: {},
+    },
+  ];
+}
+
+function startStopCapabilities(): {
+  readonly start: true;
+  readonly stop: true;
+  readonly suspend: false;
+  readonly resume: false;
+  readonly fork: false;
+} {
+  return {
+    start: true,
+    stop: true,
+    suspend: false,
+    resume: false,
+    fork: false,
+  };
 }
