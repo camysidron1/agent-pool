@@ -5,14 +5,19 @@ declare module "express" {
     readonly headers?: Record<string, string | readonly string[] | undefined>;
     readonly body?: unknown;
     readonly params?: Record<string, string | undefined>;
+    on?(event: "close", callback: () => void): void;
     internalServiceSubject?: "internal-service";
   };
 
   export type Response = {
     status(code: number): Response;
+    setHeader(name: string, value: string): Response;
+    flushHeaders?(): void;
     type(contentType: string): Response;
     json(body: unknown): Response;
     send(body: string): Response;
+    write(chunk: string): boolean;
+    end(): void;
   };
 
   export type NextFunction = () => void;

@@ -143,6 +143,7 @@ export {
   type PublicSessionSummary,
   type PublicTaskDetail,
   type PublicTaskSummary,
+  type ListPublicEventsInput,
   type ReadTaskDetailInput,
   type ReadTaskDetailResult,
   type RequestCommandInput,

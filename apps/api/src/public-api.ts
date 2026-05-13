@@ -5,6 +5,7 @@ import type {
   CanonicalStateServices,
   CreateProjectInput,
   CreateTaskInput,
+  PublicEventSummary,
   PublicTaskDetail,
   RequestCommandResult,
   TaskMutationResult,
@@ -16,6 +17,7 @@ export type PublicApiOptions = {
   readonly config: AppConfig;
   readonly services?: PublicApiServices | null;
   readonly storage?: StorageAdapter | null;
+  readonly sseHub?: PublicSseHub;
 };
 
 export type PublicOperatorRequest = Request & {
@@ -29,6 +31,7 @@ type PublicApiServices = Pick<
   | "backlogTask"
   | "createProject"
   | "createTask"
+  | "listPublicEvents"
   | "listProjectTasks"
   | "listProjects"
   | "readTaskDetail"
@@ -42,8 +45,25 @@ type PublicApiServices = Pick<
   };
 };
 
+type PublicSseEvent = PublicEventSummary;
+
+type PublicSseSubscription = {
+  readonly projectId: string;
+  readonly taskId: string | null;
+  readonly sessionId: string | null;
+  readonly dispatchOnly: boolean;
+  readonly response: Response;
+};
+
+export type PublicSseHub = {
+  readonly clientCount: number;
+  subscribe(subscription: PublicSseSubscription): () => void;
+  publish(event: PublicSseEvent): void;
+};
+
 export function registerPublicApiRoutes(app: Express, options: PublicApiOptions): void {
   const requirePublicOperator = createPublicOperatorMiddleware(options.config);
+  const sseHub = options.sseHub ?? createPublicSseHub();
 
   app.get("/api/public/me", requirePublicOperator, (request: PublicOperatorRequest, response) => {
     response.status(200).json({
@@ -51,6 +71,22 @@ export function registerPublicApiRoutes(app: Express, options: PublicApiOptions)
       operator: request.publicOperator,
       authMode: options.config.authMode,
     });
+  });
+
+  app.get("/api/public/projects/:projectId/events", requirePublicOperator, (request, response) => {
+    respondSseStream(response, options, sseHub, request, { dispatchOnly: false });
+  });
+
+  app.get("/api/public/projects/:projectId/dispatch/events", requirePublicOperator, (request, response) => {
+    respondSseStream(response, options, sseHub, request, { dispatchOnly: true });
+  });
+
+  app.get("/api/public/projects/:projectId/tasks/:taskId/events", requirePublicOperator, (request, response) => {
+    respondSseStream(response, options, sseHub, request, { dispatchOnly: false });
+  });
+
+  app.get("/api/public/projects/:projectId/tasks/:taskId/sessions/:sessionId/events", requirePublicOperator, (request, response) => {
+    respondSseStream(response, options, sseHub, request, { dispatchOnly: false });
   });
 
   app.get("/api/public/projects", requirePublicOperator, (_request, response) => {
@@ -120,6 +156,7 @@ export function registerPublicApiRoutes(app: Express, options: PublicApiOptions)
         event: result.event,
         outbox: result.outbox,
       });
+      sseHub.publish(publicEventFromMutation(result.event, { projectId, taskId: result.task.id }));
     } catch (error) {
       respondPublicException(response, error);
     }
@@ -266,7 +303,7 @@ export function registerPublicApiRoutes(app: Express, options: PublicApiOptions)
     try {
       const body = parsePublicBody(request.body);
       const priority = readRequiredBodyInteger(body, "priority");
-      respondTaskMutation(response, services.updateTaskPriority({ ...scope, priority }));
+      respondTaskMutation(response, sseHub, scope, services.updateTaskPriority({ ...scope, priority }));
     } catch (error) {
       respondPublicException(response, error);
     }
@@ -279,7 +316,7 @@ export function registerPublicApiRoutes(app: Express, options: PublicApiOptions)
     const scope = readTaskScope(request, response);
     if (!scope) return;
 
-    respondTaskMutation(response, services.backlogTask(scope));
+    respondTaskMutation(response, sseHub, scope, services.backlogTask(scope));
   });
 
   app.post("/api/public/projects/:projectId/tasks/:taskId/unblock", requirePublicOperator, (request, response) => {
@@ -289,31 +326,31 @@ export function registerPublicApiRoutes(app: Express, options: PublicApiOptions)
     const scope = readTaskScope(request, response);
     if (!scope) return;
 
-    respondTaskMutation(response, services.unblockTask(scope));
+    respondTaskMutation(response, sseHub, scope, services.unblockTask(scope));
   });
 
   app.post("/api/public/projects/:projectId/tasks/:taskId/cancel", requirePublicOperator, (request: PublicOperatorRequest, response) => {
-    respondTaskCommand(options, request, response, "cancel");
+    respondTaskCommand(options, sseHub, request, response, "cancel");
   });
 
   app.post("/api/public/projects/:projectId/tasks/:taskId/retry", requirePublicOperator, (request: PublicOperatorRequest, response) => {
-    respondTaskCommand(options, request, response, "retry");
+    respondTaskCommand(options, sseHub, request, response, "retry");
   });
 
   app.post("/api/public/projects/:projectId/tasks/:taskId/dispatch", requirePublicOperator, (request: PublicOperatorRequest, response) => {
-    respondTaskCommand(options, request, response, "start");
+    respondTaskCommand(options, sseHub, request, response, "start");
   });
 
   app.post("/api/public/projects/:projectId/tasks/:taskId/sessions/:sessionId/stop", requirePublicOperator, (request: PublicOperatorRequest, response) => {
-    respondSessionCommand(options, request, response, "stop");
+    respondSessionCommand(options, sseHub, request, response, "stop");
   });
 
   app.post("/api/public/projects/:projectId/tasks/:taskId/sessions/:sessionId/interrupt", requirePublicOperator, (request: PublicOperatorRequest, response) => {
-    respondSessionCommand(options, request, response, "interrupt");
+    respondSessionCommand(options, sseHub, request, response, "interrupt");
   });
 
   app.post("/api/public/projects/:projectId/tasks/:taskId/sessions/:sessionId/cleanup", requirePublicOperator, (request: PublicOperatorRequest, response) => {
-    respondSessionCommand(options, request, response, "cleanup");
+    respondSessionCommand(options, sseHub, request, response, "cleanup");
   });
 
   for (const command of ["suspend", "resume", "fork"] as const) {
@@ -384,6 +421,75 @@ function requirePublicStorage(options: PublicApiOptions, response: Response): St
   return options.storage;
 }
 
+function respondSseStream(
+  response: Response,
+  options: PublicApiOptions,
+  sseHub: PublicSseHub,
+  request: Request,
+  stream: { readonly dispatchOnly: boolean },
+): void {
+  const services = requirePublicServices(options, response);
+  if (!services) return;
+
+  const projectId = readPathParam(request, "projectId");
+  const taskId = readPathParam(request, "taskId");
+  const sessionId = readPathParam(request, "sessionId");
+
+  if (!projectId) {
+    response.status(400).json(publicError("validation_error", "projectId is required"));
+    return;
+  }
+
+  if (taskId || sessionId) {
+    if (!taskId) {
+      response.status(400).json(publicError("validation_error", "taskId is required"));
+      return;
+    }
+
+    const detail = services.readTaskDetail({ projectId, taskId });
+    if (!detail.ok) {
+      response.status(404).json(publicError(detail.error.code, detail.error.message));
+      return;
+    }
+
+    if (sessionId && !detail.task.sessions.some((session) => session.id === sessionId)) {
+      response.status(404).json(publicError("not_found", `session not found: ${sessionId}`));
+      return;
+    }
+  } else if (!services.listProjects().some((project) => project.id === projectId)) {
+    response.status(404).json(publicError("not_found", `project not found: ${projectId}`));
+    return;
+  }
+
+  const replay = services.listPublicEvents({
+    projectId,
+    taskId,
+    sessionId,
+    dispatchOnly: stream.dispatchOnly,
+    lastEventId: readHeader(request, "last-event-id"),
+  });
+
+  response.setHeader("content-type", "text/event-stream; charset=utf-8");
+  response.setHeader("cache-control", "no-cache, no-transform");
+  response.setHeader("connection", "keep-alive");
+  response.setHeader("x-accel-buffering", "no");
+  response.flushHeaders?.();
+  response.write(": connected\n\n");
+
+  for (const event of replay) {
+    writeSseEvent(response, event);
+  }
+
+  const cleanup = sseHub.subscribe({
+    projectId,
+    taskId: taskId ?? null,
+    sessionId: sessionId ?? null,
+    dispatchOnly: stream.dispatchOnly,
+    response,
+  });
+  request.on?.("close", cleanup);
+}
+
 function respondArtifacts(response: Response, options: PublicApiOptions, request: Request): void {
   const detail = readScopedTaskDetail(response, options, request);
   if (!detail) return;
@@ -430,7 +536,67 @@ function readScopedTaskDetail(response: Response, options: PublicApiOptions, req
   return detail.task;
 }
 
-function respondTaskMutation(response: Response, result: TaskMutationResult): void {
+export function createPublicSseHub(): PublicSseHub {
+  const clients = new Set<PublicSseSubscription>();
+
+  return {
+    get clientCount(): number {
+      return clients.size;
+    },
+    subscribe(subscription): () => void {
+      clients.add(subscription);
+      return () => {
+        clients.delete(subscription);
+        subscription.response.end();
+      };
+    },
+    publish(event): void {
+      for (const client of clients) {
+        if (matchesSseSubscription(client, event)) {
+          writeSseEvent(client.response, event);
+        }
+      }
+    },
+  };
+}
+
+function matchesSseSubscription(subscription: PublicSseSubscription, event: PublicSseEvent): boolean {
+  if (subscription.projectId !== event.projectId) return false;
+  if (subscription.taskId && event.taskId !== subscription.taskId) return false;
+  if (subscription.sessionId && event.sessionId !== subscription.sessionId) return false;
+  if (subscription.dispatchOnly && !event.commandId && !event.type.startsWith("command.") && event.type !== "task.claimed") return false;
+
+  return true;
+}
+
+function writeSseEvent(response: Response, event: PublicSseEvent): void {
+  response.write(`id: ${event.id}\n`);
+  response.write(`event: ${event.type.replace(/[^A-Za-z0-9_.-]/g, "_")}\n`);
+  response.write(`data: ${JSON.stringify(event)}\n\n`);
+}
+
+function publicEventFromMutation(
+  event: { readonly id: string; readonly projectId: string; readonly type: string },
+  scope: { readonly projectId: string; readonly taskId?: string | null; readonly sessionId?: string | null; readonly commandId?: string | null },
+): PublicSseEvent {
+  return {
+    id: event.id,
+    projectId: event.projectId,
+    taskId: scope.taskId ?? null,
+    sessionId: scope.sessionId ?? null,
+    commandId: scope.commandId ?? null,
+    type: event.type,
+    payload: {},
+    createdAt: new Date(0).toISOString(),
+  };
+}
+
+function respondTaskMutation(
+  response: Response,
+  sseHub: PublicSseHub,
+  scope: { readonly projectId: string; readonly taskId: string },
+  result: TaskMutationResult,
+): void {
   if (!result.ok) {
     response.status(result.error.code === "not_found" ? 404 : 409).json(publicError(result.error.code, result.error.message));
     return;
@@ -444,10 +610,12 @@ function respondTaskMutation(response: Response, result: TaskMutationResult): vo
     event: result.event,
     outbox: result.outbox,
   });
+  sseHub.publish(publicEventFromMutation(result.event, scope));
 }
 
 function respondTaskCommand(
   options: PublicApiOptions,
+  sseHub: PublicSseHub,
   request: PublicOperatorRequest,
   response: Response,
   type: "start" | "cancel" | "retry",
@@ -472,11 +640,12 @@ function respondTaskCommand(
     payload,
     requestedBy: request.publicOperator?.id ?? null,
   });
-  respondCommandMutation(response, services, scope, result);
+  respondCommandMutation(response, sseHub, services, scope, result);
 }
 
 function respondSessionCommand(
   options: PublicApiOptions,
+  sseHub: PublicSseHub,
   request: PublicOperatorRequest,
   response: Response,
   type: "stop" | "interrupt" | "cleanup",
@@ -508,13 +677,14 @@ function respondSessionCommand(
     payload,
     requestedBy: request.publicOperator?.id ?? null,
   });
-  respondCommandMutation(response, services, scope, result);
+  respondCommandMutation(response, sseHub, services, { ...scope, sessionId }, result);
 }
 
 function respondCommandMutation(
   response: Response,
+  sseHub: PublicSseHub,
   services: PublicApiServices,
-  scope: { readonly projectId: string; readonly taskId: string },
+  scope: { readonly projectId: string; readonly taskId: string; readonly sessionId?: string | null },
   result: RequestCommandResult,
 ): void {
   if (!result.ok) {
@@ -531,6 +701,14 @@ function respondCommandMutation(
     task: detail.ok ? detail.task : null,
     pendingCommands: detail.ok ? detail.task.pendingCommands : [],
   });
+  sseHub.publish(
+    publicEventFromMutation(result.event, {
+      projectId: scope.projectId,
+      taskId: scope.taskId,
+      sessionId: scope.sessionId ?? result.command.sessionId,
+      commandId: result.command.id,
+    }),
+  );
 }
 
 function commandErrorStatus(code: string): number {

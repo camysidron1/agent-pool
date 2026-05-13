@@ -10,6 +10,7 @@ import { createRabbitMqAdapter, type RabbitMqAdapter } from "@agent-pool/queue";
 import { createApiApp } from "../src/app";
 import { API_DATABASE_PATH_ENV, openApiDatabase } from "../src/database";
 import { createOutboxPublisherLoop, type OutboxPublisherLoop } from "../src/outbox-publisher-loop";
+import { createPublicSseHub, type PublicSseHub } from "../src/public-api";
 
 const cleanupPaths: string[] = [];
 
@@ -443,6 +444,83 @@ describe("API service skeleton", () => {
         headers: publicHeaders(config),
       });
       expect(wrongScope.status).toBe(404);
+    } finally {
+      await close();
+    }
+  });
+
+  test("public SSE streams replay scoped events and clean up clients", async () => {
+    const publicSseHub = createPublicSseHub();
+    const { baseUrl, config, database, close } = await startTestApi({ publicSseHub });
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      const project = services.createProject({ id: "project_public_sse", slug: "public-sse", name: "Public SSE" });
+      const firstTask = services.createTask({ id: "task_sse_first", projectId: project.id, title: "First", priority: 10 }).task;
+      const secondTask = services.createTask({ id: "task_sse_second", projectId: project.id, title: "Second" }).task;
+      expect(
+        services.claimNextTask({
+          projectId: project.id,
+          sessionId: "session_sse_first",
+          bridgeSessionToken: "sse-bridge-token",
+        }),
+      ).toMatchObject({ ok: true, task: { id: firstTask.id } });
+      services.reportStartupSucceeded({ projectId: project.id, sessionId: "session_sse_first", runtimeSessionId: "runtime_sse" });
+      services.requestCommand({
+        id: "command_sse_dispatch",
+        projectId: project.id,
+        taskId: secondTask.id,
+        type: "start",
+        requestedBy: config.operator.id,
+      });
+
+      const missingAuth = await fetch(`${baseUrl}/api/public/projects/${project.id}/events`);
+      expect(missingAuth.status).toBe(401);
+
+      const allEvents = database.sqlite
+        .query<{ id: string; type: string }, []>("SELECT id, type FROM events WHERE project_id = 'project_public_sse' ORDER BY rowid ASC")
+        .all();
+      const firstEventId = allEvents[0]?.id;
+      const secondEventId = allEvents[1]?.id;
+      expect(firstEventId).toBeDefined();
+      expect(secondEventId).toBeDefined();
+
+      const projectStream = await readSseUntil(`${baseUrl}/api/public/projects/${project.id}/events`, publicHeaders(config), "task.created");
+      expect(projectStream.response.status).toBe(200);
+      expect(projectStream.response.headers.get("content-type")).toContain("text/event-stream");
+      expect(projectStream.text).toContain("event: task.created");
+      expect(projectStream.text).toContain(firstTask.id);
+      expect(projectStream.text).not.toContain("sse-bridge-token");
+      expect(projectStream.text).not.toContain("web-sandbox.db");
+      expect(publicSseHub.clientCount).toBe(1);
+      await projectStream.close();
+      await waitForSseClients(publicSseHub, 0);
+
+      const replay = await readSseUntil(
+        `${baseUrl}/api/public/projects/${project.id}/events`,
+        { ...publicHeaders(config), "last-event-id": firstEventId ?? "" },
+        secondEventId ?? "task_sse_second",
+      );
+      expect(replay.text).not.toContain(`id: ${firstEventId}`);
+      expect(replay.text).toContain(`id: ${secondEventId}`);
+      await replay.close();
+      await waitForSseClients(publicSseHub, 0);
+
+      const sessionStream = await readSseUntil(
+        `${baseUrl}/api/public/projects/${project.id}/tasks/${firstTask.id}/sessions/session_sse_first/events`,
+        publicHeaders(config),
+        "session_sse_first",
+      );
+      expect(sessionStream.text).toContain("session_sse_first");
+      expect(sessionStream.text).not.toContain(secondTask.id);
+      await sessionStream.close();
+      await waitForSseClients(publicSseHub, 0);
+
+      const dispatchStream = await readSseUntil(`${baseUrl}/api/public/projects/${project.id}/dispatch/events`, publicHeaders(config), "command.queued");
+      expect(dispatchStream.text).toContain("command.queued");
+      expect(dispatchStream.text).not.toContain("event: task.created");
+      await dispatchStream.close();
+      await waitForSseClients(publicSseHub, 0);
     } finally {
       await close();
     }
@@ -1835,10 +1913,55 @@ async function postPublic(
   });
 }
 
+async function readSseUntil(
+  url: string,
+  headers: HeadersInit,
+  expectedText: string,
+): Promise<{ readonly response: Response; readonly text: string; readonly close: () => Promise<void> }> {
+  const controller = new AbortController();
+  const response = await fetch(url, { headers, signal: controller.signal });
+  const reader = response.body?.getReader();
+  let text = "";
+
+  if (!reader) {
+    throw new Error("SSE response did not expose a reader");
+  }
+
+  for (let index = 0; index < 5 && !text.includes(expectedText); index += 1) {
+    const chunk = await Promise.race([
+      reader.read(),
+      new Promise<ReadableStreamReadResult<Uint8Array>>((resolve) =>
+        setTimeout(() => resolve({ done: true, value: undefined }), 250),
+      ),
+    ]);
+    if (chunk.done) break;
+    text += new TextDecoder().decode(chunk.value);
+  }
+
+  return {
+    response,
+    text,
+    async close() {
+      controller.abort();
+      await reader.cancel().catch(() => {});
+    },
+  };
+}
+
+async function waitForSseClients(hub: PublicSseHub, expected: number): Promise<void> {
+  for (let index = 0; index < 20; index += 1) {
+    if (hub.clientCount === expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  expect(hub.clientCount).toBe(expected);
+}
+
 async function startTestApi(options: {
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly outboxPublisherLoop?: OutboxPublisherLoop;
   readonly queue?: RabbitMqAdapter;
+  readonly publicSseHub?: PublicSseHub;
 } = {}): Promise<{
   readonly baseUrl: string;
   readonly config: ReturnType<typeof loadConfig>;
@@ -1858,7 +1981,7 @@ async function startTestApi(options: {
   const config = loadConfig(env);
   const database = openApiDatabase(env);
   const queue = options.queue ?? createRabbitMqAdapter(config.rabbitmq);
-  const app = createApiApp({ config, database, queue, outboxPublisherLoop: options.outboxPublisherLoop });
+  const app = createApiApp({ config, database, queue, outboxPublisherLoop: options.outboxPublisherLoop, publicSseHub: options.publicSseHub });
   const server = app.listen(0);
   const address = server.address();
 

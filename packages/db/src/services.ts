@@ -161,6 +161,14 @@ export type PublicTaskDetail = PublicTaskSummary & {
   readonly logStreams: readonly PublicLogStreamSummary[];
 };
 
+export type ListPublicEventsInput = {
+  readonly projectId: string;
+  readonly taskId?: string | null;
+  readonly sessionId?: string | null;
+  readonly dispatchOnly?: boolean;
+  readonly lastEventId?: string | null;
+};
+
 export type ReadTaskDetailInput = {
   readonly projectId: string;
   readonly taskId: string;
@@ -531,6 +539,10 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
 
     listProjectTasks(input: { readonly projectId: string }): readonly PublicTaskSummary[] {
       return listPublicTaskSummaries(database, input.projectId);
+    },
+
+    listPublicEvents(input: ListPublicEventsInput): readonly PublicEventSummary[] {
+      return listPublicEvents(database, input);
     },
 
     readTaskDetail(input: ReadTaskDetailInput): ReadTaskDetailResult {
@@ -2503,21 +2515,45 @@ function listPublicArtifactsForTask(database: WebSandboxSqliteDatabase, projectI
 }
 
 function listPublicEventsForTask(database: WebSandboxSqliteDatabase, projectId: string, taskId: string): readonly PublicEventSummary[] {
+  return listPublicEvents(database, { projectId, taskId });
+}
+
+function listPublicEvents(database: WebSandboxSqliteDatabase, input: ListPublicEventsInput): readonly PublicEventSummary[] {
+  const afterRowid = readReplayAfterRowid(database, input.projectId, input.lastEventId);
+  const taskId = input.taskId?.trim() || null;
+  const sessionId = input.sessionId?.trim() || null;
+  const dispatchOnly = input.dispatchOnly ? 1 : 0;
+
   return database
-    .query<PublicEventRow, [string, string, string, string]>(
+    .query<PublicEventRow, [string, number, string | null, string | null, string | null, string | null, string | null, number]>(
       `
         SELECT id, project_id, task_id, session_id, command_id, type, payload_json, created_at
         FROM events
         WHERE project_id = ?
+          AND rowid > ?
           AND (
-            task_id = ?
-            OR session_id IN (SELECT id FROM sessions WHERE project_id = ? AND task_id = ?)
+            ? IS NULL
+            OR task_id = ?
+            OR session_id IN (SELECT id FROM sessions WHERE project_id = events.project_id AND task_id = ?)
           )
-        ORDER BY created_at ASC, rowid ASC, id ASC
+          AND (? IS NULL OR session_id = ?)
+          AND (? = 0 OR command_id IS NOT NULL OR type LIKE 'command.%' OR type = 'task.claimed')
+        ORDER BY rowid ASC, id ASC
       `,
     )
-    .all(projectId, taskId, projectId, taskId)
+    .all(input.projectId, afterRowid, taskId, taskId, taskId, sessionId, sessionId, dispatchOnly)
     .map(publicEventSummary);
+}
+
+function readReplayAfterRowid(database: WebSandboxSqliteDatabase, projectId: string, lastEventId: string | null | undefined): number {
+  const eventId = lastEventId?.trim();
+  if (!eventId) return 0;
+
+  return (
+    database
+      .query<{ rowid: number }, [string, string]>("SELECT rowid FROM events WHERE project_id = ? AND id = ?")
+      .get(projectId, eventId)?.rowid ?? 0
+  );
 }
 
 function listPublicLogStreamsForTask(database: WebSandboxSqliteDatabase, projectId: string, taskId: string): readonly PublicLogStreamSummary[] {
