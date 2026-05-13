@@ -90,6 +90,9 @@ describe("fake runtime provider", () => {
       async createSandbox() {
         return { sandboxId: "sandbox_1" };
       },
+      async runCommand() {
+        return { ok: true };
+      },
       async destroySandbox() {
         return undefined;
       },
@@ -114,7 +117,7 @@ describe("fake runtime provider", () => {
       fork: false,
     });
     await expect(provider.startSession({ projectId: "project_a", taskId: "task_1" })).rejects.toThrow(
-      "e2b runtime provider launch spec is not implemented yet",
+      "e2b launch spec requires bridge session options",
     );
     expect(RUNTIME_PACKAGE_BOUNDARY.e2bSdkImportedAtModuleLoad).toBe(false);
   });
@@ -128,6 +131,9 @@ describe("fake runtime provider", () => {
       client: {
         async createSandbox() {
           return { sandboxId: "sandbox_1" };
+        },
+        async runCommand() {
+          return { ok: true };
         },
         async destroySandbox() {
           return undefined;
