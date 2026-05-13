@@ -76,6 +76,14 @@ export interface RuntimeProvider {
 export type E2BRuntimeProviderConfig = {
   readonly apiKeyEnvName: string;
   readonly apiKeyConfigured: boolean;
+  readonly templateId?: string | null;
+  readonly sandboxImageId?: string | null;
+  readonly workingDirectory?: string;
+  readonly startupTimeoutMs?: number;
+  readonly cleanupTimeoutMs?: number;
+  readonly githubTokenEnvName?: string;
+  readonly githubTokenConfigured?: boolean;
+  readonly allowedSecretEnvNames?: readonly string[];
 };
 
 export type E2BSandboxCreateInput = Readonly<Record<string, unknown>>;
@@ -92,6 +100,42 @@ export interface E2BRuntimeClient {
 export type E2BRuntimeProviderOptions = {
   readonly client?: E2BRuntimeClient;
   readonly config?: E2BRuntimeProviderConfig;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly secretEnvNames?: readonly string[];
+};
+
+export type E2BLaunchSpec = {
+  readonly provider: "e2b";
+  readonly sandbox: {
+    readonly templateId: string | null;
+    readonly sandboxImageId: string | null;
+    readonly workingDirectory: string;
+    readonly startupTimeoutMs: number;
+    readonly cleanupTimeoutMs: number;
+  };
+  readonly session: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly sessionId: string;
+  };
+  readonly bridge: RuntimeBridgeSessionOptions;
+  readonly environment: {
+    readonly variables: Readonly<Record<string, string>>;
+    readonly secrets: Readonly<Record<string, string>>;
+  };
+};
+
+export type RedactedE2BLaunchSpec = Omit<E2BLaunchSpec, "environment" | "bridge"> & {
+  readonly bridge: Omit<RuntimeBridgeSessionOptions, "sessionToken"> & {
+    readonly sessionToken: {
+      readonly headerName: string;
+      readonly token: "[REDACTED]";
+    };
+  };
+  readonly environment: {
+    readonly variables: Readonly<Record<string, string>>;
+    readonly secrets: Readonly<Record<string, "[REDACTED]">>;
+  };
 };
 
 export type FakeRuntimeScenario = {
@@ -286,6 +330,91 @@ export function createE2BRuntimeProvider(options: E2BRuntimeProviderOptions = {}
       return undefined;
     },
   };
+}
+
+export function buildE2BLaunchSpec(request: RuntimeSessionRequest, options: E2BRuntimeProviderOptions = {}): E2BLaunchSpec {
+  const config = options.config;
+  if (!request.bridge) {
+    throw new Error("e2b launch spec requires bridge session options");
+  }
+  if (!config?.templateId && !config?.sandboxImageId) {
+    throw new Error("e2b launch spec requires E2B_TEMPLATE_ID or E2B_SANDBOX_IMAGE_ID");
+  }
+
+  const workingDirectory = normalizeSandboxWorkingDirectory(config.workingDirectory ?? "/workspace/agent-pool");
+  const allowedSecretEnvNames = new Set(config.allowedSecretEnvNames ?? []);
+  const requestedSecretEnvNames = options.secretEnvNames ?? config.allowedSecretEnvNames ?? [];
+  const secrets: Record<string, string> = {};
+
+  for (const name of requestedSecretEnvNames) {
+    if (!allowedSecretEnvNames.has(name)) {
+      throw new Error(`e2b launch spec rejected unscoped secret env var: ${name}`);
+    }
+    const value = options.env?.[name]?.trim();
+    if (value) secrets[name] = value;
+  }
+
+  return {
+    provider: "e2b",
+    sandbox: {
+      templateId: config.templateId ?? null,
+      sandboxImageId: config.sandboxImageId ?? null,
+      workingDirectory,
+      startupTimeoutMs: config.startupTimeoutMs ?? 120_000,
+      cleanupTimeoutMs: config.cleanupTimeoutMs ?? 30_000,
+    },
+    session: {
+      projectId: request.projectId,
+      taskId: request.taskId,
+      sessionId: request.sessionId ?? request.bridge.sessionId,
+    },
+    bridge: request.bridge,
+    environment: {
+      variables: {
+        AGENT_POOL_PROJECT_ID: request.projectId,
+        AGENT_POOL_TASK_ID: request.taskId,
+        AGENT_POOL_SESSION_ID: request.sessionId ?? request.bridge.sessionId,
+        AGENT_POOL_BRIDGE_CALLBACK_BASE_URL: request.bridge.callbackBaseUrl,
+        AGENT_POOL_BRIDGE_SESSION_TOKEN_HEADER: request.bridge.sessionToken.headerName,
+      },
+      secrets,
+    },
+  };
+}
+
+export function redactE2BLaunchSpec(spec: E2BLaunchSpec): RedactedE2BLaunchSpec {
+  return {
+    ...spec,
+    bridge: {
+      ...spec.bridge,
+      sessionToken: {
+        headerName: spec.bridge.sessionToken.headerName,
+        token: "[REDACTED]",
+      },
+    },
+    environment: {
+      variables: spec.environment.variables,
+      secrets: Object.fromEntries(Object.keys(spec.environment.secrets).map((name) => [name, "[REDACTED]" as const])),
+    },
+  };
+}
+
+function normalizeSandboxWorkingDirectory(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed.startsWith("/")) {
+    throw new Error("e2b launch spec working directory must be an absolute sandbox path");
+  }
+  if (
+    trimmed.startsWith("/Users/") ||
+    trimmed.startsWith("/private/") ||
+    trimmed.includes("~") ||
+    trimmed.includes("..") ||
+    trimmed.includes(".agent-pool/data/agent-pool.db")
+  ) {
+    throw new Error("e2b launch spec working directory must not reference host paths or the TUI database");
+  }
+
+  return trimmed.replace(/\/+$/, "") || "/";
 }
 
 function assertE2BProviderReady(options: E2BRuntimeProviderOptions): void {
