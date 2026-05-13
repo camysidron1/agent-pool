@@ -19,7 +19,7 @@ describe("compose smoke runner", () => {
     const scripts = packageJson.scripts ?? {};
 
     expect(scripts.test).toBe("bun test apps packages");
-    expect(scripts.test).not.toMatch(/smoke:compose|docker|compose|rabbitmq|minio|prometheus/i);
+    expect(scripts.test).not.toMatch(/smoke:compose|smoke:e2b|docker|compose|rabbitmq|minio|prometheus|e2b/i);
     expect(scripts["smoke:compose"]).toBe("bun run deploy/compose/smoke-compose.ts");
     expect(scripts["smoke:e2b"]).toBe("bun run deploy/compose/e2b-smoke.ts");
   });

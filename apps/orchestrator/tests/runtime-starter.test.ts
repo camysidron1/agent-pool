@@ -244,6 +244,68 @@ describe("orchestrator runtime starter", () => {
     ]);
     expect(JSON.stringify(reports)).not.toContain("github-secret");
   });
+
+  test("task consumer reports redacted E2B startup failure variants as operator-visible reasons", async () => {
+    const bridgeCommandFailures = (() => {
+      let commandCount = 0;
+      return async (): Promise<E2BCommandResult> => {
+        commandCount += 1;
+        return commandCount === 4
+          ? { ok: false, exitCode: 1, stderr: "bridge failed with github-secret" }
+          : { ok: true, exitCode: 0 };
+      };
+    })();
+    const cases = [
+      {
+        name: "missing GitHub credentials",
+        config: { ...e2bConfig(), githubTokenConfigured: false },
+        client: createE2BClient().client,
+        expected: "GITHUB_TOKEN is required for github bootstrap",
+      },
+      {
+        name: "sandbox creation failure",
+        config: e2bConfig(),
+        client: createE2BClient({
+          createSandbox: async () => {
+            throw new Error("sandbox failed with github-secret");
+          },
+        }).client,
+        expected: "sandbox failed with [REDACTED]",
+      },
+      {
+        name: "repository bootstrap failure",
+        config: e2bConfig(),
+        client: createE2BClient({
+          runCommand: async () => ({ ok: false, exitCode: 128, stderr: "clone failed with github-secret" }),
+        }).client,
+        expected: "e2b command failed (clone repository, exit 128)",
+      },
+      {
+        name: "bridge startup failure",
+        config: e2bConfig(),
+        client: createE2BClient({
+          runCommand: bridgeCommandFailures,
+        }).client,
+        expected: "e2b command failed (start bridge, exit 1)",
+      },
+    ];
+
+    for (const testCase of cases) {
+      const reports = await runE2BStartupFailureCase({
+        client: testCase.client,
+        config: testCase.config,
+      });
+
+      expect(reports).toEqual([
+        {
+          projectId: "project_a",
+          sessionId: "session_1",
+          errorMessage: expect.stringContaining(testCase.expected),
+        },
+      ]);
+      expect(JSON.stringify(reports)).not.toContain("github-secret");
+    }
+  });
 });
 
 function bridgeConfig(): Readonly<Record<string, unknown>> {
@@ -282,6 +344,65 @@ function e2bConfig() {
   } as const;
 }
 
+async function runE2BStartupFailureCase(options: {
+  readonly client: E2BRuntimeClient;
+  readonly config: ReturnType<typeof e2bConfig>;
+}): Promise<readonly unknown[]> {
+  const queue = createRabbitMqAdapter(loadConfig({ AUTH_MODE: "test" }).rabbitmq);
+  const reports: unknown[] = [];
+  const backend: TaskQueueConsumerBackend = {
+    claimNextTask: async () => ({
+      ok: true,
+      status: 200,
+      body: {
+        ok: true,
+        claimed: true,
+        task: { id: "task_1", title: "Run E2B", runtimeSource: runtimeSource() },
+        session: { id: "session_1", bridge: bridgeConfig() },
+        event: { id: "event_1", projectId: "project_a", type: "task.claimed" },
+        outbox: { id: "outbox_1", projectId: "project_a", eventId: "event_1", routingKey: "project.project_a.control" },
+      },
+    }),
+    reportStartupSucceeded: async () => {
+      throw new Error("startup success report should not be called");
+    },
+    reportStartupFailed: async (input) => {
+      reports.push(input);
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          ok: true,
+          idempotent: false,
+          session: { id: input.sessionId, status: "failed" },
+          task: { id: "task_1", status: "blocked" },
+          event: null,
+          outbox: null,
+        },
+      };
+    },
+  };
+
+  queue.publishProjectTaskHint("project_a", { taskId: "task_1" });
+  await runTaskQueueConsumerOnce({
+    projectId: "project_a",
+    queue,
+    backend,
+    runtimeProvider: "e2b",
+    runtimeStarter: createRuntimeStarter({
+      providerKind: "e2b",
+      e2b: {
+        client: options.client,
+        config: options.config,
+        env: { GITHUB_TOKEN: "github-secret" },
+        secretEnvNames: ["GITHUB_TOKEN"],
+      },
+    }),
+  });
+
+  return reports;
+}
+
 type E2BClientCall =
   | { readonly kind: "create"; readonly input: E2BSandboxCreateInput }
   | {
@@ -292,6 +413,7 @@ type E2BClientCall =
     };
 
 function createE2BClient(overrides: {
+  readonly createSandbox?: (input: E2BSandboxCreateInput) => Promise<{ readonly sandboxId: string }>;
   readonly runCommand?: (
     sandboxId: string,
     command: readonly string[],
@@ -302,7 +424,7 @@ function createE2BClient(overrides: {
   const client: E2BRuntimeClient = {
     async createSandbox(input) {
       calls.push({ kind: "create", input });
-      return { sandboxId: "sandbox_1" };
+      return overrides.createSandbox?.(input) ?? { sandboxId: "sandbox_1" };
     },
     async runCommand(sandboxId, command, options) {
       calls.push({ kind: "command", sandboxId, command, options });

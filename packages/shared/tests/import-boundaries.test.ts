@@ -63,6 +63,23 @@ const RULES: readonly BoundaryRule[] = [
       "../runtime",
     ],
   },
+  {
+    name: "E2B runtime provider stays isolated from backend DB, web, and public API code",
+    roots: ["packages/runtime/src"],
+    forbiddenImports: [
+      "@agent-pool/db",
+      "apps/api",
+      "apps/web",
+      "bun:sqlite",
+      "drizzle-orm",
+      "../../apps/api",
+      "../../apps/web",
+      "../../packages/db",
+      "../api",
+      "../db",
+      "../web",
+    ],
+  },
 ];
 
 describe("import boundaries", () => {
