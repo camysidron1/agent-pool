@@ -125,6 +125,29 @@ export type E2BLaunchSpec = {
   };
 };
 
+export type RuntimeTaskSourceMetadata = {
+  readonly repositoryUrl: string;
+  readonly baseRef: string;
+  readonly taskBranchPrefix: string;
+};
+
+export type GitHubBootstrapCommand = {
+  readonly label: string;
+  readonly command: readonly string[];
+};
+
+export type GitHubBootstrapPlan = {
+  readonly repositoryUrl: string;
+  readonly baseRef: string;
+  readonly branchName: string;
+  readonly workingDirectory: string;
+  readonly commands: readonly GitHubBootstrapCommand[];
+  readonly environment: {
+    readonly variables: Readonly<Record<string, string>>;
+    readonly secretEnvNames: readonly string[];
+  };
+};
+
 export type RedactedE2BLaunchSpec = Omit<E2BLaunchSpec, "environment" | "bridge"> & {
   readonly bridge: Omit<RuntimeBridgeSessionOptions, "sessionToken"> & {
     readonly sessionToken: {
@@ -397,6 +420,93 @@ export function redactE2BLaunchSpec(spec: E2BLaunchSpec): RedactedE2BLaunchSpec 
       secrets: Object.fromEntries(Object.keys(spec.environment.secrets).map((name) => [name, "[REDACTED]" as const])),
     },
   };
+}
+
+export function buildGitHubBootstrapPlan(input: {
+  readonly runtimeSource?: RuntimeTaskSourceMetadata | null;
+  readonly taskId: string;
+  readonly workingDirectory: string;
+  readonly githubTokenEnvName?: string;
+  readonly githubTokenConfigured?: boolean;
+}): GitHubBootstrapPlan {
+  const runtimeSource = sanitizeRuntimeTaskSource(input.runtimeSource);
+  if (!runtimeSource) {
+    throw new Error("github bootstrap requires runtime source metadata");
+  }
+  const githubTokenEnvName = sanitizeEnvName(input.githubTokenEnvName ?? "GITHUB_TOKEN");
+  if (!input.githubTokenConfigured) {
+    throw new Error(`${githubTokenEnvName} is required for github bootstrap`);
+  }
+  const workingDirectory = normalizeSandboxWorkingDirectory(input.workingDirectory);
+  const branchName = createTaskBranchName(runtimeSource.taskBranchPrefix, input.taskId);
+  const commands: GitHubBootstrapCommand[] = [
+    {
+      label: "clone repository",
+      command: ["git", "clone", "--no-checkout", runtimeSource.repositoryUrl, workingDirectory],
+    },
+    {
+      label: "fetch base ref",
+      command: ["git", "-C", workingDirectory, "fetch", "--depth", "1", "origin", runtimeSource.baseRef],
+    },
+    {
+      label: "create task branch",
+      command: ["git", "-C", workingDirectory, "checkout", "-B", branchName, "FETCH_HEAD"],
+    },
+  ];
+
+  return {
+    repositoryUrl: runtimeSource.repositoryUrl,
+    baseRef: runtimeSource.baseRef,
+    branchName,
+    workingDirectory,
+    commands,
+    environment: {
+      variables: {
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_ASKPASS: "/agent-pool/bin/github-token-askpass",
+        AGENT_POOL_GITHUB_TOKEN_ENV: githubTokenEnvName,
+      },
+      secretEnvNames: [githubTokenEnvName],
+    },
+  };
+}
+
+function sanitizeRuntimeTaskSource(input: RuntimeTaskSourceMetadata | null | undefined): RuntimeTaskSourceMetadata | null {
+  if (!input) return null;
+  const repositoryUrl = input.repositoryUrl.trim();
+  const baseRef = input.baseRef.trim();
+  const taskBranchPrefix = input.taskBranchPrefix.trim();
+  const serialized = JSON.stringify({ repositoryUrl, baseRef, taskBranchPrefix });
+
+  if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(repositoryUrl)) {
+    throw new Error("github bootstrap repositoryUrl must be an https GitHub repository URL");
+  }
+  if (!/^[A-Za-z0-9._/-]+$/.test(baseRef) || baseRef.includes("..")) {
+    throw new Error("github bootstrap baseRef is invalid");
+  }
+  if (!/^[A-Za-z0-9._/-]+$/.test(taskBranchPrefix) || taskBranchPrefix.includes("..")) {
+    throw new Error("github bootstrap taskBranchPrefix is invalid");
+  }
+  if (/token|secret|password|github_pat_|ghp_/i.test(serialized)) {
+    throw new Error("github bootstrap runtime source must not contain secret values");
+  }
+
+  return { repositoryUrl, baseRef, taskBranchPrefix };
+}
+
+function createTaskBranchName(prefix: string, taskId: string): string {
+  const sanitizedPrefix = prefix.replace(/(^\/+|\/+$)/g, "");
+  const sanitizedTaskId = taskId.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!sanitizedTaskId) {
+    throw new Error("github bootstrap taskId is invalid");
+  }
+  return `${sanitizedPrefix}/${sanitizedTaskId}`;
+}
+
+function sanitizeEnvName(value: string): string {
+  const trimmed = value.trim();
+  if (/^[A-Z_][A-Z0-9_]*$/.test(trimmed)) return trimmed;
+  throw new Error("github bootstrap token env name is invalid");
 }
 
 function normalizeSandboxWorkingDirectory(path: string): string {
