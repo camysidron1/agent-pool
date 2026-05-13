@@ -1,0 +1,12 @@
+aws_region               = "us-east-1"
+name_prefix              = "agent-pool"
+environment              = "mvp"
+route53_zone_name        = "console.agentpool.app"
+create_route53_zone      = true
+app_hostname             = "console.agentpool.app"
+validate_acm_certificate = false
+node_desired_size        = 1
+node_max_size            = 2
+enable_cost_guardrails   = false
+monthly_budget_limit_usd = 150
+cost_alert_emails        = []

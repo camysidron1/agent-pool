@@ -1,0 +1,73 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - agent-pool.production.json
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+configMapGenerator:
+  - name: agent-pool-aws-deploy-vars
+    namespace: agent-pool
+    literals:
+      - hostname=agent-pool.example.com
+      - publicUrl=https://agent-pool.example.com
+      - certificateArn=arn:aws:acm:us-east-1:000000000000:certificate/replace-me
+
+images:
+  - name: agent-pool-api
+    newName: 000000000000.dkr.ecr.us-east-1.amazonaws.com/agent-pool-api
+    newTag: replace-with-git-sha
+  - name: agent-pool-orchestrator
+    newName: 000000000000.dkr.ecr.us-east-1.amazonaws.com/agent-pool-orchestrator
+    newTag: replace-with-git-sha
+  - name: agent-pool-web
+    newName: 000000000000.dkr.ecr.us-east-1.amazonaws.com/agent-pool-web
+    newTag: replace-with-git-sha
+
+patches:
+  - path: overlays/aws/patches/ingress-alb.json
+    target:
+      kind: Ingress
+      name: agent-pool
+  - path: overlays/aws/patches/pvc-storage-class.json
+    target:
+      kind: PersistentVolumeClaim
+  - path: overlays/aws/patches/api-security-context.json
+    target:
+      kind: Deployment
+      name: agent-pool-api
+
+replacements:
+  - source:
+      kind: ConfigMap
+      name: agent-pool-aws-deploy-vars
+      fieldPath: data.hostname
+    targets:
+      - select:
+          kind: Ingress
+          name: agent-pool
+        fieldPaths:
+          - spec.rules.0.host
+          - metadata.annotations.[external-dns.alpha.kubernetes.io/hostname]
+  - source:
+      kind: ConfigMap
+      name: agent-pool-aws-deploy-vars
+      fieldPath: data.publicUrl
+    targets:
+      - select:
+          kind: ConfigMap
+          name: agent-pool-config
+        fieldPaths:
+          - data.API_PUBLIC_URL
+          - data.BRIDGE_CALLBACK_BASE_URL
+  - source:
+      kind: ConfigMap
+      name: agent-pool-aws-deploy-vars
+      fieldPath: data.certificateArn
+    targets:
+      - select:
+          kind: Ingress
+          name: agent-pool
+        fieldPaths:
+          - metadata.annotations.[alb.ingress.kubernetes.io/certificate-arn]

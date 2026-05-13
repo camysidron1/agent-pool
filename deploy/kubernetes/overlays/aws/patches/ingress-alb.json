@@ -1,0 +1,110 @@
+[
+  {
+    "op": "add",
+    "path": "/metadata/annotations",
+    "value": {
+      "alb.ingress.kubernetes.io/certificate-arn": "arn:aws:acm:us-east-1:000000000000:certificate/replace-me",
+      "alb.ingress.kubernetes.io/healthcheck-path": "/health",
+      "alb.ingress.kubernetes.io/listen-ports": "[{\"HTTP\":80},{\"HTTPS\":443}]",
+      "alb.ingress.kubernetes.io/scheme": "internet-facing",
+      "alb.ingress.kubernetes.io/ssl-redirect": "443",
+      "alb.ingress.kubernetes.io/target-type": "ip",
+      "external-dns.alpha.kubernetes.io/hostname": "agent-pool.example.com"
+    }
+  },
+  {
+    "op": "add",
+    "path": "/spec/ingressClassName",
+    "value": "alb"
+  },
+  {
+    "op": "replace",
+    "path": "/spec/rules/0/http/paths",
+    "value": [
+      {
+        "path": "/api",
+        "pathType": "Prefix",
+        "backend": {
+          "service": {
+            "name": "agent-pool-api",
+            "port": {
+              "number": 3000
+            }
+          }
+        }
+      },
+      {
+        "path": "/internal",
+        "pathType": "Prefix",
+        "backend": {
+          "service": {
+            "name": "agent-pool-api",
+            "port": {
+              "number": 3000
+            }
+          }
+        }
+      },
+      {
+        "path": "/callbacks",
+        "pathType": "Prefix",
+        "backend": {
+          "service": {
+            "name": "agent-pool-api",
+            "port": {
+              "number": 3000
+            }
+          }
+        }
+      },
+      {
+        "path": "/steering",
+        "pathType": "Prefix",
+        "backend": {
+          "service": {
+            "name": "agent-pool-api",
+            "port": {
+              "number": 3000
+            }
+          }
+        }
+      },
+      {
+        "path": "/health",
+        "pathType": "Exact",
+        "backend": {
+          "service": {
+            "name": "agent-pool-api",
+            "port": {
+              "number": 3000
+            }
+          }
+        }
+      },
+      {
+        "path": "/metrics",
+        "pathType": "Exact",
+        "backend": {
+          "service": {
+            "name": "agent-pool-api",
+            "port": {
+              "number": 3000
+            }
+          }
+        }
+      },
+      {
+        "path": "/",
+        "pathType": "Prefix",
+        "backend": {
+          "service": {
+            "name": "agent-pool-web",
+            "port": {
+              "number": 8080
+            }
+          }
+        }
+      }
+    ]
+  }
+]

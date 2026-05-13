@@ -21,6 +21,7 @@ type Container = {
   readonly env?: readonly EnvVar[];
   readonly args?: readonly string[];
   readonly volumeMounts?: readonly VolumeMount[];
+  readonly securityContext?: Readonly<Record<string, unknown>>;
 };
 
 type EnvVar = {
@@ -49,6 +50,7 @@ type Volume = {
 type PodSpec = {
   readonly containers?: readonly Container[];
   readonly volumes?: readonly Volume[];
+  readonly securityContext?: Readonly<Record<string, unknown>>;
 };
 
 const MANIFEST_PATH = join(process.cwd(), "deploy", "kubernetes", "agent-pool.production.json");
@@ -132,6 +134,8 @@ describe("production Kubernetes manifest", () => {
     const orchestratorContainer = findContainer(findObject(items, "Deployment", "agent-pool-orchestrator"), "orchestrator");
     const blobStatefulSet = findObject(items, "StatefulSet", "agent-pool-blob");
     const blobBootstrap = findContainer(findObject(items, "Job", "agent-pool-blob-bootstrap"), "mc");
+    const prometheus = findObject(items, "Deployment", "agent-pool-prometheus");
+    const prometheusContainer = findContainer(prometheus, "prometheus");
 
     expect(config).toMatchObject({
       AUTH_MODE: "local",
@@ -170,8 +174,14 @@ describe("production Kubernetes manifest", () => {
     expect(envVar(orchestratorContainer, "RABBITMQ_MANAGEMENT_URL")?.valueFrom).toMatchObject({
       secretKeyRef: { name: "agent-pool-secrets", key: "RABBITMQ_MANAGEMENT_URL" },
     });
+    expect(envVar(orchestratorContainer, "OPERATOR_ID")?.valueFrom).toMatchObject({
+      secretKeyRef: { name: "agent-pool-secrets", key: "OPERATOR_ID" },
+    });
     expect(envVar(orchestratorContainer, "RUNTIME_PROVIDER")?.valueFrom).toMatchObject({
       configMapKeyRef: { name: "agent-pool-config", key: "RUNTIME_PROVIDER" },
+    });
+    expect(envVar(orchestratorContainer, "COMPOSE_SMOKE_PROJECT_ID")?.valueFrom).toMatchObject({
+      configMapKeyRef: { name: "agent-pool-config", key: "COMPOSE_SMOKE_PROJECT_ID" },
     });
     expect(envVar(orchestratorContainer, "E2B_API_KEY")?.valueFrom).toMatchObject({
       secretKeyRef: { name: "agent-pool-secrets", key: "E2B_API_KEY", optional: true },
@@ -182,6 +192,12 @@ describe("production Kubernetes manifest", () => {
 
     expect(volumeClaimNames(blobStatefulSet)).toEqual(["agent-pool-blob-data"]);
     expect(blobBootstrap.args?.join(" ")).toContain("agent-pool/agent-pool-artifacts");
+    expect(podSpec(prometheus).securityContext).toMatchObject({ fsGroup: 65534, fsGroupChangePolicy: "OnRootMismatch" });
+    expect(prometheusContainer.securityContext).toMatchObject({
+      allowPrivilegeEscalation: false,
+      runAsNonRoot: true,
+      runAsUser: 65534,
+    });
     expect(prometheusConfig).toContain("job_name: agent-pool-api");
     expect(prometheusConfig).toContain("agent-pool-api.agent-pool.svc.cluster.local:3000");
     expect(prometheusConfig).toContain("job_name: agent-pool-orchestrator");
@@ -194,6 +210,7 @@ describe("production Kubernetes manifest", () => {
     const config = findObject(items, "ConfigMap", "agent-pool-config").data ?? {};
 
     expect(config.RUNTIME_PROVIDER).toBe("fake");
+    expect(config.E2B_TEMPLATE_ID).toBe("");
     expect(text).not.toMatch(/github-secret|e2b-secret|service-secret|compose-internal-service-token|test-service-token/);
     expect(text).not.toMatch(/docker compose|kubectl|bun:sqlite|openApiDatabase|openWebSandboxDatabase/);
 
@@ -205,6 +222,25 @@ describe("production Kubernetes manifest", () => {
 
       expect(value).toContain("<");
       expect(value).toContain(">");
+    }
+  });
+
+  test("uses explicit app image placeholders instead of latest tags", async () => {
+    const { items } = await loadManifest();
+    const appImages = [
+      findContainer(findObject(items, "Deployment", "agent-pool-api"), "api").image,
+      findContainer(findObject(items, "Deployment", "agent-pool-orchestrator"), "orchestrator").image,
+      findContainer(findObject(items, "Deployment", "agent-pool-web"), "web").image,
+    ];
+
+    expect(appImages).toEqual([
+      "agent-pool-api:replace-with-git-sha",
+      "agent-pool-orchestrator:replace-with-git-sha",
+      "agent-pool-web:replace-with-git-sha",
+    ]);
+
+    for (const image of appImages) {
+      expect(image).not.toEndWith(":latest");
     }
   });
 });

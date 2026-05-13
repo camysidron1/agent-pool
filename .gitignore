@@ -24,6 +24,13 @@ docs/
 node_modules/
 apps/web/dist/
 
+# Terraform runtime state
+deploy/terraform/**/.terraform/
+deploy/terraform/**/*.tfstate
+deploy/terraform/**/*.tfstate.*
+deploy/terraform/**/*.tfplan
+deploy/terraform/**/*.tfvars
+
 # Task-finished marker files
 .task-finished-*
 

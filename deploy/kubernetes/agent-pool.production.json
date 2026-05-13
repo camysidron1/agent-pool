@@ -76,7 +76,7 @@
         "E2B_API_KEY_ENV_NAME": "E2B_API_KEY",
         "E2B_GITHUB_TOKEN_ENV_NAME": "GITHUB_TOKEN",
         "E2B_ALLOWED_SECRET_ENV_NAMES": "GITHUB_TOKEN",
-        "E2B_TEMPLATE_ID": "<optional-e2b-template-id>",
+        "E2B_TEMPLATE_ID": "",
         "E2B_WORKING_DIRECTORY": "/workspace/agent-pool",
         "E2B_STARTUP_TIMEOUT_MS": "120000",
         "E2B_CLEANUP_TIMEOUT_MS": "30000"
@@ -275,7 +275,7 @@
             "containers": [
               {
                 "name": "api",
-                "image": "agent-pool-api:latest",
+                "image": "agent-pool-api:replace-with-git-sha",
                 "imagePullPolicy": "IfNotPresent",
                 "ports": [
                   {
@@ -559,7 +559,7 @@
             "containers": [
               {
                 "name": "orchestrator",
-                "image": "agent-pool-orchestrator:latest",
+                "image": "agent-pool-orchestrator:replace-with-git-sha",
                 "imagePullPolicy": "IfNotPresent",
                 "ports": [
                   {
@@ -583,6 +583,33 @@
                       "secretKeyRef": {
                         "name": "agent-pool-secrets",
                         "key": "INTERNAL_SERVICE_TOKEN"
+                      }
+                    }
+                  },
+                  {
+                    "name": "OPERATOR_ID",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "OPERATOR_ID"
+                      }
+                    }
+                  },
+                  {
+                    "name": "OPERATOR_EMAIL",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "OPERATOR_EMAIL"
+                      }
+                    }
+                  },
+                  {
+                    "name": "OPERATOR_DISPLAY_NAME",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "OPERATOR_DISPLAY_NAME"
                       }
                     }
                   },
@@ -700,6 +727,15 @@
                       "configMapKeyRef": {
                         "name": "agent-pool-config",
                         "key": "COMPOSE_SMOKE_ENABLED"
+                      }
+                    }
+                  },
+                  {
+                    "name": "COMPOSE_SMOKE_PROJECT_ID",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "COMPOSE_SMOKE_PROJECT_ID"
                       }
                     }
                   },
@@ -841,7 +877,7 @@
             "containers": [
               {
                 "name": "web",
-                "image": "agent-pool-web:latest",
+                "image": "agent-pool-web:replace-with-git-sha",
                 "imagePullPolicy": "IfNotPresent",
                 "ports": [
                   {
@@ -1239,10 +1275,19 @@
             }
           },
           "spec": {
+            "securityContext": {
+              "fsGroup": 65534,
+              "fsGroupChangePolicy": "OnRootMismatch"
+            },
             "containers": [
               {
                 "name": "prometheus",
                 "image": "prom/prometheus:v2.55.1",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "runAsNonRoot": true,
+                  "runAsUser": 65534
+                },
                 "args": [
                   "--config.file=/etc/prometheus/prometheus.yml",
                   "--storage.tsdb.path=/prometheus",

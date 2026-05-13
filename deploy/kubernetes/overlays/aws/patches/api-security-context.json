@@ -1,0 +1,19 @@
+[
+  {
+    "op": "add",
+    "path": "/spec/template/spec/securityContext",
+    "value": {
+      "fsGroup": 1000,
+      "fsGroupChangePolicy": "OnRootMismatch"
+    }
+  },
+  {
+    "op": "add",
+    "path": "/spec/template/spec/containers/0/securityContext",
+    "value": {
+      "allowPrivilegeEscalation": false,
+      "runAsNonRoot": true,
+      "runAsUser": 1000
+    }
+  }
+]
