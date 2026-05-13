@@ -191,11 +191,20 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
       if (!api || !selectedProjectId || cancelled) return;
 
       try {
-        const response = await api.listTasks(selectedProjectId);
-        if (!cancelled) setTasks(response.tasks);
+        const [tasksResponse, projectsResponse] = await Promise.all([
+          api.listTasks(selectedProjectId),
+          api.listProjects().catch(() => null),
+        ]);
+        if (!cancelled) {
+          setTasks(tasksResponse.tasks);
+          if (projectsResponse) setProjects(projectsResponse.projects);
+        }
         if (selectedTaskId) {
           const detailResponse = await api.readTask(selectedProjectId, selectedTaskId);
-          if (!cancelled) setTaskDetail((current) => (shouldUseIncomingTaskDetail(current, detailResponse.task) ? detailResponse.task : current));
+          if (!cancelled) {
+            setTaskDetail((current) => (shouldUseIncomingTaskDetail(current, detailResponse.task) ? detailResponse.task : current));
+            setTasks((current) => replaceTask(current, detailResponse.task));
+          }
         }
       } catch (error) {
         if (!cancelled) setTaskMutationError(formatApiError(error));
