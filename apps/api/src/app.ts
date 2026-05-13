@@ -10,6 +10,7 @@ import { createApiBackendServices } from "./backend-services";
 import type { ApiDatabaseConnection } from "./database";
 import { createOutboxPublisher, type OutboxPublisher } from "./outbox-publisher";
 import type { OutboxPublisherLoop } from "./outbox-publisher-loop";
+import { registerPublicApiRoutes } from "./public-api";
 import { isSmokeFixtureEnabled, readSmokeFixtureStatus, seedSmokeFixture, type SmokeRuntimeSourceInput } from "./smoke-fixture";
 
 type ApiBackendServices = ReturnType<typeof createApiBackendServices>;
@@ -35,6 +36,7 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
   const requireInternalServiceToken = createInternalServiceTokenMiddleware(config);
 
   app.use(express.json());
+  registerPublicApiRoutes(app, { config });
 
   app.get("/health", (_request, response) => {
     response.status(200).json({

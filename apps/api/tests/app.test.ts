@@ -83,6 +83,43 @@ describe("API service skeleton", () => {
     }
   });
 
+  test("public API identity route requires deterministic operator auth", async () => {
+    const { baseUrl, config, close } = await startTestApi();
+
+    try {
+      const missing = await fetch(`${baseUrl}/api/public/me`);
+      const invalid = await fetch(`${baseUrl}/api/public/me`, {
+        headers: {
+          "x-agent-pool-operator-id": "wrong-operator",
+        },
+      });
+      const ok = await fetch(`${baseUrl}/api/public/me`, {
+        headers: {
+          "x-agent-pool-operator-id": config.operator.id,
+        },
+      });
+
+      expect(missing.status).toBe(401);
+      expect(await missing.json()).toEqual({
+        ok: false,
+        error: { code: "unauthenticated", message: "operator auth required" },
+      });
+      expect(invalid.status).toBe(403);
+      expect(await invalid.json()).toEqual({
+        ok: false,
+        error: { code: "forbidden", message: "operator auth invalid" },
+      });
+      expect(ok.status).toBe(200);
+      expect(await ok.json()).toEqual({
+        ok: true,
+        authMode: "test",
+        operator: config.operator,
+      });
+    } finally {
+      await close();
+    }
+  });
+
   test("internal orchestrator namespace requires service-token auth", async () => {
     const { baseUrl, config, close } = await startTestApi();
 
@@ -110,6 +147,14 @@ describe("API service skeleton", () => {
         ok: false,
         error: "missing_project_id",
       });
+
+      const publicAuth = await fetch(`${baseUrl}/internal/orchestrator/sessions/session_1/startup-succeeded`, {
+        method: "POST",
+        headers: {
+          "x-agent-pool-operator-id": config.operator.id,
+        },
+      });
+      expect(publicAuth.status).toBe(401);
     } finally {
       await close();
     }
