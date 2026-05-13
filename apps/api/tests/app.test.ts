@@ -306,22 +306,13 @@ describe("API service skeleton", () => {
 
       const interrupt = await postPublic(baseUrl, config, `/projects/${project.id}/tasks/${runningTask.id}/sessions/session_running/interrupt`, {
         message: "pause after the current command",
-        steeringContext: { source: "web", messages: [{ id: "steer-preview", body: "Focus on tests", status: "queued" }] },
       });
       const interruptBody = await interrupt.json();
       expect(interrupt.status).toBe(200);
       expect(interruptBody).toMatchObject({
         ok: true,
         command: { type: "interrupt", taskId: runningTask.id, sessionId: "session_running" },
-        pendingCommands: [
-          {
-            type: "interrupt",
-            status: "queued",
-            payload: {
-              steeringContext: { source: "web", messages: [{ id: "steer-preview", body: "Focus on tests", status: "queued" }] },
-            },
-          },
-        ],
+        pendingCommands: [{ type: "interrupt", status: "queued" }],
       });
 
       const steer = await postPublic(baseUrl, config, `/projects/${project.id}/tasks/${runningTask.id}/sessions/session_running/steer`, {
@@ -429,6 +420,98 @@ describe("API service skeleton", () => {
       expect(database.sqlite.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM orchestrator_commands").get()?.count).toBe(
         beforeUnsupported,
       );
+    } finally {
+      await close();
+    }
+  });
+
+  test("confirmed public interrupt exposes restart context through bridge steering poll", async () => {
+    const { baseUrl, config, database, close } = await startTestApi();
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      const project = services.createProject({ id: "project_interrupt_restart", slug: "interrupt-restart", name: "Interrupt Restart" });
+      const task = services.createTask({ id: "task_interrupt_restart", projectId: project.id, title: "Interrupt restart" }).task;
+      const claim = services.claimNextTask({
+        projectId: project.id,
+        sessionId: "session_interrupt_restart",
+        bridgeSessionToken: "interrupt-restart-token",
+      });
+      expect(claim).toMatchObject({ ok: true });
+      if (!claim.ok) throw new Error("expected task claim to succeed");
+      expect(services.reportStartupSucceeded({ projectId: project.id, sessionId: "session_interrupt_restart" })).toMatchObject({ ok: true });
+
+      const interrupt = await postPublic(baseUrl, config, `/projects/${project.id}/tasks/${task.id}/sessions/session_interrupt_restart/interrupt`, {
+        message: "Interrupt requested with 1 queued steering message.",
+        steeringContext: { source: "web", messages: [{ id: "steer_previous", body: "try focused tests", status: "queued" }] },
+      });
+      const interruptBody = await interrupt.json();
+      expect(interrupt.status).toBe(200);
+      expect(interruptBody).toMatchObject({
+        ok: true,
+        command: { type: "interrupt" },
+        task: {
+          steeringMessages: [
+            {
+              commandId: interruptBody.command.id,
+              status: "queued",
+              body: "Interrupt requested with 1 queued steering message.",
+            },
+          ],
+        },
+      });
+
+      const poll = await fetch(`${baseUrl}/steering/poll`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [claim.session.bridge.sessionToken.headerName]: claim.session.bridge.sessionToken.token,
+        },
+        body: JSON.stringify({ projectId: project.id, taskId: task.id, sessionId: "session_interrupt_restart" }),
+      });
+      const pollBody = await poll.json();
+      expect(poll.status).toBe(200);
+      expect(pollBody).toMatchObject({
+        ok: true,
+        messages: [
+          {
+            commandId: interruptBody.command.id,
+            confirmedInterrupt: true,
+            metadata: {
+              restartContext: {
+                kind: "confirmed_interrupt_restart",
+                steeringContext: { source: "web", messages: [{ id: "steer_previous", body: "try focused tests", status: "queued" }] },
+              },
+            },
+          },
+        ],
+      });
+
+      const messageId = pollBody.messages[0].id;
+      const report = await fetch(`${baseUrl}/steering/report`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [claim.session.bridge.sessionToken.headerName]: claim.session.bridge.sessionToken.token,
+        },
+        body: JSON.stringify({
+          projectId: project.id,
+          taskId: task.id,
+          sessionId: "session_interrupt_restart",
+          steeringMessageId: messageId,
+          status: "delivered",
+        }),
+      });
+      expect(report.status).toBe(200);
+      expect(await report.json()).toMatchObject({
+        ok: true,
+        steering: { id: messageId, status: "delivered", commandId: interruptBody.command.id },
+      });
+      expect(
+        database.sqlite
+          .query<{ status: string }, [string]>("SELECT status FROM orchestrator_commands WHERE id = ?")
+          .get(interruptBody.command.id),
+      ).toEqual({ status: "succeeded" });
     } finally {
       await close();
     }

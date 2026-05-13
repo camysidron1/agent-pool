@@ -261,6 +261,8 @@ export type BridgeSteeringMessageRecord = {
   readonly body: string;
   readonly commandId: string | null;
   readonly attachments: readonly SteeringAttachmentReference[];
+  readonly confirmedInterrupt?: boolean;
+  readonly metadata?: Readonly<Record<string, unknown>>;
 };
 
 export type RequestSteeringResult =
@@ -952,6 +954,8 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
 
       return transaction(database, () => {
         const commandId = input.id ?? createId("command");
+        const payload = input.payload ?? {};
+        const payloadJson = JSON.stringify(payload);
         database
           .query(
             "INSERT INTO orchestrator_commands (id, project_id, task_id, session_id, type, payload_json, requested_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -962,9 +966,14 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
             input.taskId ?? null,
             input.sessionId ?? null,
             input.type,
-            JSON.stringify(input.payload ?? {}),
+            payloadJson,
             input.requestedBy ?? null,
           );
+        if (input.type === "interrupt" && input.taskId && input.sessionId && isConfirmedSteeringInterruptPayload(payload)) {
+          database
+            .query("INSERT INTO steering_messages (id, project_id, task_id, session_id, command_id, body) VALUES (?, ?, ?, ?, ?, ?)")
+            .run(createId("steer"), input.projectId, input.taskId, input.sessionId, commandId, readInterruptMessage(payload));
+        }
 
         const event = appendEvent(database, {
           projectId: input.projectId,
@@ -1844,12 +1853,18 @@ function pollQueuedSteering(database: WebSandboxSqliteDatabase, input: PollQueue
 
   return {
     ok: true,
-    messages: rows.map((row) => ({
-      id: row.id,
-      body: row.body,
-      commandId: row.command_id,
-      attachments: readAttachmentsFromCommandPayload(row.payload_json),
-    })),
+    messages: rows.map((row) => {
+      const metadata = readBridgeSteeringMetadata(row.payload_json);
+
+      return {
+        id: row.id,
+        body: row.body,
+        commandId: row.command_id,
+        attachments: readAttachmentsFromCommandPayload(row.payload_json),
+        confirmedInterrupt: metadata.restartContext ? true : undefined,
+        metadata,
+      };
+    }),
   };
 }
 
@@ -1939,6 +1954,15 @@ function normalizeSteeringAttachments(
   return { ok: true, attachments: normalized };
 }
 
+function isConfirmedSteeringInterruptPayload(payload: Readonly<Record<string, unknown>>): boolean {
+  return readSteeringContext(payload) !== null;
+}
+
+function readInterruptMessage(payload: Readonly<Record<string, unknown>>): string {
+  const message = payload.message;
+  return typeof message === "string" && message.trim() ? message.trim() : "Confirmed steering interrupt";
+}
+
 function readAttachmentsFromCommandPayload(payloadJson: string | null): readonly SteeringAttachmentReference[] {
   if (!payloadJson) return [];
   const payload = parseJsonObject(payloadJson);
@@ -1946,6 +1970,27 @@ function readAttachmentsFromCommandPayload(payloadJson: string | null): readonly
   if (!Array.isArray(attachments)) return [];
 
   return attachments.filter(isSteeringAttachmentReference);
+}
+
+function readBridgeSteeringMetadata(payloadJson: string | null): Readonly<Record<string, unknown>> {
+  const attachments = readAttachmentsFromCommandPayload(payloadJson);
+  const payload = payloadJson ? parseJsonObject(payloadJson) : {};
+  const steeringContext = readSteeringContext(payload);
+  const metadata: Record<string, unknown> = { attachments };
+
+  if (steeringContext) {
+    metadata.restartContext = {
+      kind: "confirmed_interrupt_restart",
+      steeringContext,
+    };
+  }
+
+  return metadata;
+}
+
+function readSteeringContext(payload: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> | null {
+  const context = payload.steeringContext;
+  return context && typeof context === "object" && !Array.isArray(context) ? (context as Readonly<Record<string, unknown>>) : null;
 }
 
 function isSteeringAttachmentReference(value: unknown): value is SteeringAttachmentReference {

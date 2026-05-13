@@ -17,6 +17,7 @@ export type BridgeMockHarnessState = {
   readonly generation: number;
   readonly handledSteering: readonly BridgeSteeringMessage[];
   readonly restartCount: number;
+  readonly restartContexts: readonly unknown[];
 };
 
 export type BridgeMockHarness = BridgeHarness & {
@@ -29,6 +30,7 @@ export function createBridgeMockHarness(options: BridgeMockHarnessOptions): Brid
   let sequence = 1;
   let byteOffset = 0;
   let handledSteering: BridgeSteeringMessage[] = [];
+  let restartContexts: unknown[] = [];
 
   function systemOutput(text: string): BridgeOutputChunk {
     const chunk: BridgeOutputChunk = {
@@ -54,6 +56,7 @@ export function createBridgeMockHarness(options: BridgeMockHarnessOptions): Brid
         generation,
         handledSteering: [...handledSteering],
         restartCount,
+        restartContexts: [...restartContexts],
       };
     },
     handleCommand(command): BridgeHarnessResult {
@@ -83,6 +86,7 @@ export function createBridgeMockHarness(options: BridgeMockHarnessOptions): Brid
 
           generation += 1;
           restartCount += 1;
+          restartContexts = [...restartContexts, command.message.metadata?.restartContext ?? null];
           return {
             ok: true,
             output: [systemOutput(`mock harness restarted after interrupt: ${command.message.id}`)],
@@ -90,6 +94,7 @@ export function createBridgeMockHarness(options: BridgeMockHarnessOptions): Brid
         case "restart":
           generation += 1;
           restartCount += 1;
+          restartContexts = [...restartContexts, { reason: command.reason }];
           return {
             ok: true,
             output: [systemOutput(`mock harness restarted: ${command.reason}`)],

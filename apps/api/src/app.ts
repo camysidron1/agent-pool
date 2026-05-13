@@ -744,7 +744,8 @@ function respondWithBridgeSteeringPoll(response: Response, services: ApiBackendS
       id: message.id,
       body: message.body,
       commandId: message.commandId,
-      metadata: { attachments: message.attachments },
+      confirmedInterrupt: message.confirmedInterrupt,
+      metadata: message.metadata ?? { attachments: message.attachments },
     })),
   });
 }

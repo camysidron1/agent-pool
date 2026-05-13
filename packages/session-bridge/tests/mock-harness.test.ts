@@ -22,6 +22,7 @@ describe("bridge mock harness", () => {
       generation: 1,
       handledSteering: [{ id: "steer_1", body: "continue" }],
       restartCount: 0,
+      restartContexts: [],
     });
   });
 
@@ -37,7 +38,12 @@ describe("bridge mock harness", () => {
     });
     const restarted = harness.handleCommand({
       kind: "interrupt",
-      message: { id: "interrupt_2", body: "stop", confirmedInterrupt: true },
+      message: {
+        id: "interrupt_2",
+        body: "stop",
+        confirmedInterrupt: true,
+        metadata: { restartContext: { kind: "confirmed_interrupt_restart", steeringContext: { messages: [{ id: "steer_1" }] } } },
+      },
     });
 
     expect(rejected).toMatchObject({
@@ -51,6 +57,9 @@ describe("bridge mock harness", () => {
     });
     expect(harness.state.generation).toBe(2);
     expect(harness.state.restartCount).toBe(1);
+    expect(harness.state.restartContexts).toEqual([
+      { kind: "confirmed_interrupt_restart", steeringContext: { messages: [{ id: "steer_1" }] } },
+    ]);
   });
 
   test("unsupported mock harness commands return structured failures", () => {

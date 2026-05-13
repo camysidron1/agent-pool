@@ -333,6 +333,84 @@ describe("canonical state services", () => {
     }
   });
 
+  test("queues confirmed interrupt restart context through bridge steering poll", () => {
+    const database = createMigratedMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      services.createTask({ id: "task_1", projectId: "project_a", title: "First" });
+      expect(services.claimNextTask({ projectId: "project_a", sessionId: "session_1" })).toMatchObject({ ok: true });
+      expect(services.reportStartupSucceeded({ projectId: "project_a", sessionId: "session_1" })).toMatchObject({ ok: true });
+
+      expect(
+        services.requestCommand({
+          id: "command_interrupt",
+          projectId: "project_a",
+          taskId: "task_1",
+          sessionId: "session_1",
+          type: "interrupt",
+          payload: {
+            message: "Interrupt requested with 1 queued steering message.",
+            steeringContext: { source: "web", messages: [{ id: "steer_1", body: "continue" }] },
+          },
+        }),
+      ).toMatchObject({ ok: true, command: { id: "command_interrupt", type: "interrupt" } });
+      expect(services.readTaskDetail({ projectId: "project_a", taskId: "task_1" })).toMatchObject({
+        ok: true,
+        task: {
+          steeringMessages: [
+            {
+              commandId: "command_interrupt",
+              body: "Interrupt requested with 1 queued steering message.",
+              status: "queued",
+            },
+          ],
+        },
+      });
+
+      const polled = services.pollQueuedSteering({ projectId: "project_a", taskId: "task_1", sessionId: "session_1" });
+      expect(polled).toMatchObject({
+        ok: true,
+        messages: [
+          {
+            commandId: "command_interrupt",
+            confirmedInterrupt: true,
+            metadata: {
+              restartContext: {
+                kind: "confirmed_interrupt_restart",
+                steeringContext: { source: "web", messages: [{ id: "steer_1", body: "continue" }] },
+              },
+            },
+          },
+        ],
+      });
+
+      if (!polled.ok || !polled.messages[0]) throw new Error("expected confirmed interrupt steering message");
+      expect(
+        database.query<{ status: string }, []>("SELECT status FROM orchestrator_commands WHERE id = 'command_interrupt'").get(),
+      ).toEqual({ status: "running" });
+      expect(
+        services.reportSteeringDelivery({
+          projectId: "project_a",
+          taskId: "task_1",
+          sessionId: "session_1",
+          steeringMessageId: polled.messages[0].id,
+          status: "delivered",
+        }),
+      ).toMatchObject({
+        ok: true,
+        steering: { status: "delivered", commandId: "command_interrupt" },
+        event: { type: "steering.delivered" },
+      });
+      expect(
+        database.query<{ status: string }, []>("SELECT status FROM orchestrator_commands WHERE id = 'command_interrupt'").get(),
+      ).toEqual({ status: "succeeded" });
+    } finally {
+      database.close();
+    }
+  });
+
   test("creates immutable session attempts with event/outbox rows", () => {
     const database = createMigratedMemoryDatabase();
 

@@ -141,7 +141,7 @@ describe("bridge runner", () => {
       steeringMessages: [{ id: "steer_fail", body: "apply this" }],
     });
     const failingHarness: BridgeMockHarness = {
-      state: { generation: 1, handledSteering: [], restartCount: 0 },
+      state: { generation: 1, handledSteering: [], restartCount: 0, restartContexts: [] },
       handleCommand: () => ({
         ok: false,
         errorMessage: "steering apply failed",

@@ -32,7 +32,17 @@ describe("Phase 5 session bridge package smoke", () => {
       sessionToken: session.sessionToken,
       steeringMessages: [
         { id: "steer_1", body: "please continue", metadata: { source: "operator" } },
-        { id: "interrupt_1", body: "restart cleanly", confirmedInterrupt: true },
+        {
+          id: "interrupt_1",
+          body: "restart cleanly",
+          confirmedInterrupt: true,
+          metadata: {
+            restartContext: {
+              kind: "confirmed_interrupt_restart",
+              steeringContext: { messages: [{ id: "steer_1", body: "please continue" }] },
+            },
+          },
+        },
       ],
     });
 
@@ -87,6 +97,12 @@ describe("Phase 5 session bridge package smoke", () => {
       bufferDeadLetters: 0,
     });
     expect(runner.harness.state.restartCount).toBe(1);
+    expect(runner.harness.state.restartContexts).toEqual([
+      {
+        kind: "confirmed_interrupt_restart",
+        steeringContext: { messages: [{ id: "steer_1", body: "please continue" }] },
+      },
+    ]);
     expect(runner.harness.state.handledSteering.map((message) => message.id)).toEqual(["steer_1"]);
 
     const events = server.events;
