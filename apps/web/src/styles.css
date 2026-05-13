@@ -171,6 +171,15 @@ label {
   background: #f5f7fa;
 }
 
+.secondary-button {
+  background: #ffffff;
+  color: #263349;
+}
+
+.secondary-button:hover {
+  background: #f5f7fa;
+}
+
 .workspace-band {
   min-height: calc(100vh - 8.5rem);
   border: 1px solid #d8dee8;
@@ -527,6 +536,43 @@ label {
 .steering-form {
   display: grid;
   gap: 0.65rem;
+}
+
+.steering-message-list {
+  display: grid;
+  gap: 0.65rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.steering-message {
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.75rem;
+}
+
+.steering-message-queued {
+  background: #f7f9fc;
+}
+
+.steering-message-failed {
+  background: #fff4ef;
+  border-color: #f0c7b5;
+}
+
+.steering-message-header {
+  align-items: center;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+}
+
+.steering-message-header time {
+  color: #607084;
+  font-size: 0.78rem;
 }
 
 .attachment-control {

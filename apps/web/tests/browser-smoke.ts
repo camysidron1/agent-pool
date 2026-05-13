@@ -60,6 +60,7 @@ async function assertServedBundle(): Promise<void> {
       ["kanban board", "Loaded project Kanban board"],
       ["task panel", "Task detail"],
       ["steering composer", "Steering message"],
+      ["steering state", "Queued and failed steering"],
       ["steering mutation", "/steer"],
       ["upload planning", "/uploads/plan"],
       ["priority mutation", "/priority"],

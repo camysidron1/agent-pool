@@ -3,6 +3,7 @@ import type {
   PublicPlannedUpload,
   PublicSessionSummary,
   PublicSteeringAttachmentReference,
+  PublicSteeringMessageSummary,
   PublicSteeringMutation,
   PublicTaskDetail,
 } from "./api";
@@ -15,6 +16,10 @@ export type SteeringAvailability = {
 export type SteeringFileSelection = {
   readonly name: string;
   readonly type?: string | null;
+};
+
+export type VisibleSteeringMessage = PublicSteeringMessageSummary & {
+  readonly displayStatus: "Queued" | "Failed";
 };
 
 export type SubmitSteeringDraftInput = {
@@ -44,6 +49,21 @@ export function getSteeringAvailability(task: PublicTaskDetail | null, activeSes
   }
 
   return { available: true, reason: null };
+}
+
+export function getVisibleSteeringMessages(task: PublicTaskDetail): readonly VisibleSteeringMessage[] {
+  return task.steeringMessages
+    .filter((message) => message.status === "queued" || message.status === "failed")
+    .map((message) => ({
+      ...message,
+      displayStatus: message.status === "failed" ? "Failed" : "Queued",
+    }));
+}
+
+export function shouldUseIncomingTaskDetail(current: PublicTaskDetail | null, incoming: PublicTaskDetail): boolean {
+  if (!current || current.id !== incoming.id) return true;
+
+  return readDetailFreshness(incoming) >= readDetailFreshness(current);
 }
 
 export async function submitSteeringDraft(input: SubmitSteeringDraftInput): Promise<PublicSteeringMutation> {
@@ -97,4 +117,18 @@ async function planSteeringAttachments(input: SubmitSteeringDraftInput): Promise
 function normalizeContentType(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
+}
+
+function readDetailFreshness(task: PublicTaskDetail): number {
+  return Math.max(
+    readTimestamp(task.updatedAt),
+    ...task.events.map((event) => readTimestamp(event.createdAt)),
+    ...task.steeringMessages.map((message) => readTimestamp(message.deliveredAt ?? message.createdAt)),
+  );
+}
+
+function readTimestamp(value: string | null): number {
+  if (!value) return 0;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }

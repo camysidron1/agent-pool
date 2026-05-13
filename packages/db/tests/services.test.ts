@@ -209,9 +209,27 @@ describe("canonical state services", () => {
 
       expect(queued).toMatchObject({
         ok: true,
-        steering: { id: "steer_1", status: "queued", body: "Focus on tests" },
+        steering: {
+          id: "steer_1",
+          status: "queued",
+          body: "Focus on tests",
+          attachments: [{ key: "projects/project_a/task_1/uploads/context.txt" }],
+        },
         command: { type: "steer" },
         event: { type: "steering.queued" },
+      });
+      expect(services.readTaskDetail({ projectId: "project_a", taskId: "task_1" })).toMatchObject({
+        ok: true,
+        task: {
+          steeringMessages: [
+            {
+              id: "steer_1",
+              status: "queued",
+              body: "Focus on tests",
+              attachments: [{ key: "projects/project_a/task_1/uploads/context.txt", fileName: "context.txt" }],
+            },
+          ],
+        },
       });
       const polled = services.pollQueuedSteering({ projectId: "project_a", taskId: "task_1", sessionId: "session_1" });
       expect(polled).toMatchObject({
@@ -238,12 +256,46 @@ describe("canonical state services", () => {
 
       expect(delivered).toMatchObject({
         ok: true,
-        steering: { id: "steer_1", status: "delivered" },
+        steering: { id: "steer_1", status: "delivered", attachments: [{ key: "projects/project_a/task_1/uploads/context.txt" }] },
         event: { type: "steering.delivered" },
+      });
+      expect(services.readTaskDetail({ projectId: "project_a", taskId: "task_1" })).toMatchObject({
+        ok: true,
+        task: { steeringMessages: [{ id: "steer_1", status: "delivered" }] },
       });
       expect(
         database.query<{ status: string }, []>("SELECT status FROM orchestrator_commands WHERE type = 'steer'").get(),
       ).toEqual({ status: "succeeded" });
+
+      expect(
+        services.requestSteering({
+          id: "steer_2",
+          projectId: "project_a",
+          taskId: "task_1",
+          sessionId: "session_1",
+          body: "Try another approach",
+        }),
+      ).toMatchObject({ ok: true, steering: { id: "steer_2", status: "queued" } });
+      expect(services.pollQueuedSteering({ projectId: "project_a", taskId: "task_1", sessionId: "session_1" })).toMatchObject({ ok: true });
+      expect(
+        services.reportSteeringDelivery({
+          projectId: "project_a",
+          taskId: "task_1",
+          sessionId: "session_1",
+          steeringMessageId: "steer_2",
+          status: "failed",
+          errorMessage: "bridge apply failed",
+        }),
+      ).toMatchObject({ ok: true, steering: { id: "steer_2", status: "failed", errorMessage: "bridge apply failed" } });
+      expect(services.readTaskDetail({ projectId: "project_a", taskId: "task_1" })).toMatchObject({
+        ok: true,
+        task: {
+          steeringMessages: [
+            { id: "steer_1", status: "delivered" },
+            { id: "steer_2", status: "failed", errorMessage: "bridge apply failed" },
+          ],
+        },
+      });
     } finally {
       database.close();
     }

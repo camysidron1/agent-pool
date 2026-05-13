@@ -126,6 +126,7 @@ describe("web board state", () => {
           updatedAt: "2026-05-13T00:01:00.000Z",
         },
       ],
+      steeringMessages: [],
     };
 
     expect(selectActiveSession(detail)?.id).toBe("session-active");
@@ -148,6 +149,7 @@ describe("web board state", () => {
           createdAt: "2026-05-13T00:00:00.000Z",
         },
       ],
+      steeringMessages: [],
     });
 
     expect(summary.kind).toBe("completed");
@@ -254,6 +256,7 @@ function detailTask(status: PublicTaskSummary["status"]) {
     artifacts: [],
     events: [],
     logStreams: [],
+    steeringMessages: [],
   };
 }
 

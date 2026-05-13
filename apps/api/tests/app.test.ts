@@ -323,8 +323,21 @@ describe("API service skeleton", () => {
       expect(steer.status).toBe(200);
       expect(steerBody).toMatchObject({
         ok: true,
-        steering: { status: "queued", body: "Focus on the failing tests" },
+        steering: {
+          status: "queued",
+          body: "Focus on the failing tests",
+          attachments: [{ key: `projects/${project.id}/${runningTask.id}/uploads/context.txt`, fileName: "context.txt" }],
+        },
         command: { type: "steer", taskId: runningTask.id, sessionId: "session_running" },
+        task: {
+          steeringMessages: [
+            {
+              status: "queued",
+              body: "Focus on the failing tests",
+              attachments: [{ key: `projects/${project.id}/${runningTask.id}/uploads/context.txt`, fileName: "context.txt" }],
+            },
+          ],
+        },
         pendingCommands: expect.arrayContaining([expect.objectContaining({ type: "steer", status: "queued" })]),
       });
 
@@ -368,6 +381,14 @@ describe("API service skeleton", () => {
         ok: true,
         steering: { id: steerBody.steering.id, status: "delivered" },
         event: { type: "steering.delivered" },
+      });
+      const detailAfterSteering = await fetch(`${baseUrl}/api/public/projects/${project.id}/tasks/${runningTask.id}`, {
+        headers: publicHeaders(config),
+      });
+      expect(detailAfterSteering.status).toBe(200);
+      expect(await detailAfterSteering.json()).toMatchObject({
+        ok: true,
+        task: { steeringMessages: [{ id: steerBody.steering.id, status: "delivered" }] },
       });
 
       const invalidSteer = await postPublic(baseUrl, config, `/projects/${project.id}/tasks/${runningTask.id}/sessions/session_running/steer`, {

@@ -5,9 +5,16 @@ import type {
   PublicPlannedUpload,
   PublicSessionSummary,
   PublicSteeringAttachmentReference,
+  PublicSteeringMessageSummary,
   PublicTaskDetail,
 } from "../src/api";
-import { getSteeringAvailability, plannedUploadToSteeringAttachment, submitSteeringDraft } from "../src/steering";
+import {
+  getSteeringAvailability,
+  getVisibleSteeringMessages,
+  plannedUploadToSteeringAttachment,
+  shouldUseIncomingTaskDetail,
+  submitSteeringDraft,
+} from "../src/steering";
 
 describe("web steering composer", () => {
   test("enables steering only for running tasks with a running active session", () => {
@@ -58,7 +65,7 @@ describe("web steering composer", () => {
             requestedBy: "operator-test",
             createdAt: "2026-05-13T00:00:00.000Z",
             deliveredAt: null,
-            metadata: {},
+            attachments: input.attachments ?? [],
           },
           command: {
             id: "command-a",
@@ -154,6 +161,46 @@ describe("web steering composer", () => {
     ).rejects.toThrow("Steering is unavailable while the task is completed.");
   });
 
+  test("keeps queued and failed steering visible while hiding delivered steering", () => {
+    const runningSession = session("session-active", "running");
+    const visible = getVisibleSteeringMessages({
+      ...detailTask("running", runningSession),
+      steeringMessages: [
+        steeringMessage("steer-queued", "queued", "2026-05-13T00:01:00.000Z"),
+        steeringMessage("steer-delivered", "delivered", "2026-05-13T00:02:00.000Z", "2026-05-13T00:03:00.000Z"),
+        steeringMessage("steer-failed", "failed", "2026-05-13T00:04:00.000Z", "2026-05-13T00:05:00.000Z"),
+      ],
+    });
+
+    expect(visible.map((message) => [message.id, message.displayStatus])).toEqual([
+      ["steer-queued", "Queued"],
+      ["steer-failed", "Failed"],
+    ]);
+  });
+
+  test("rejects stale steering detail responses after a newer applied update", () => {
+    const runningSession = session("session-active", "running");
+    const current = {
+      ...detailTask("running", runningSession),
+      steeringMessages: [
+        steeringMessage("steer-a", "delivered", "2026-05-13T00:01:00.000Z", "2026-05-13T00:05:00.000Z"),
+      ],
+    };
+    const stale = {
+      ...detailTask("running", runningSession),
+      steeringMessages: [steeringMessage("steer-a", "queued", "2026-05-13T00:01:00.000Z")],
+    };
+    const newer = {
+      ...detailTask("running", runningSession),
+      steeringMessages: [
+        steeringMessage("steer-a", "failed", "2026-05-13T00:01:00.000Z", "2026-05-13T00:06:00.000Z"),
+      ],
+    };
+
+    expect(shouldUseIncomingTaskDetail(current, stale)).toBe(false);
+    expect(shouldUseIncomingTaskDetail(current, newer)).toBe(true);
+  });
+
   test("keeps planned upload local paths out of steering attachment payloads", () => {
     const attachment = plannedUploadToSteeringAttachment(
       plannedUpload({ key: "projects/project-a/task-a/session-a/context.md", localPath: "/tmp/context.md" }),
@@ -186,6 +233,28 @@ function plannedUpload(
   };
 }
 
+function steeringMessage(
+  id: string,
+  status: PublicSteeringMessageSummary["status"],
+  createdAt: string,
+  deliveredAt: string | null = null,
+): PublicSteeringMessageSummary {
+  return {
+    id,
+    projectId: "project-a",
+    taskId: "task-a",
+    sessionId: "session-active",
+    commandId: "command-a",
+    body: "Keep going",
+    status,
+    errorMessage: status === "failed" ? "apply failed" : null,
+    requestedBy: "operator-test",
+    createdAt,
+    deliveredAt,
+    attachments: [{ key: "projects/project-a/task-a/session-active/context.txt", fileName: "context.txt" }],
+  };
+}
+
 function detailTask(status: PublicTaskDetail["status"], activeSession: PublicSessionSummary): PublicTaskDetail {
   return {
     id: "task-a",
@@ -204,6 +273,7 @@ function detailTask(status: PublicTaskDetail["status"], activeSession: PublicSes
     artifacts: [],
     events: [],
     logStreams: [],
+    steeringMessages: [],
   };
 }
 

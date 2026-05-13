@@ -159,6 +159,7 @@ export type PublicTaskDetail = PublicTaskSummary & {
   readonly artifacts: readonly PublicArtifactSummary[];
   readonly events: readonly PublicEventSummary[];
   readonly logStreams: readonly PublicLogStreamSummary[];
+  readonly steeringMessages: readonly PublicSteeringMessageSummary[];
 };
 
 export type ListPublicEventsInput = {
@@ -250,7 +251,10 @@ export type SteeringMessageRecord = {
   readonly errorMessage: string | null;
   readonly createdAt: string;
   readonly deliveredAt: string | null;
+  readonly attachments: readonly SteeringAttachmentReference[];
 };
+
+export type PublicSteeringMessageSummary = SteeringMessageRecord;
 
 export type BridgeSteeringMessageRecord = {
   readonly id: string;
@@ -1953,39 +1957,18 @@ function isSteeringAttachmentReference(value: unknown): value is SteeringAttachm
 
 function readSteeringMessage(database: WebSandboxSqliteDatabase, projectId: string, steeringMessageId: string): SteeringMessageRecord | null {
   const row = database
-    .query<
-      {
-        id: string;
-        project_id: string;
-        task_id: string;
-        session_id: string;
-        command_id: string | null;
-        body: string;
-        status: "queued" | "delivered" | "failed" | "canceled";
-        error_message: string | null;
-        created_at: string;
-        delivered_at: string | null;
-      },
-      [string, string]
-    >(
-      "SELECT id, project_id, task_id, session_id, command_id, body, status, error_message, created_at, delivered_at FROM steering_messages WHERE project_id = ? AND id = ?",
+    .query<PublicSteeringMessageRow, [string, string]>(
+      `
+        SELECT s.id, s.project_id, s.task_id, s.session_id, s.command_id, s.body, s.status, s.error_message,
+          s.created_at, s.delivered_at, c.payload_json AS command_payload_json
+        FROM steering_messages s
+        LEFT JOIN orchestrator_commands c ON c.project_id = s.project_id AND c.id = s.command_id
+        WHERE s.project_id = ? AND s.id = ?
+      `,
     )
     .get(projectId, steeringMessageId);
 
-  return row
-    ? {
-        id: row.id,
-        projectId: row.project_id,
-        taskId: row.task_id,
-        sessionId: row.session_id,
-        commandId: row.command_id,
-        body: row.body,
-        status: row.status,
-        errorMessage: row.error_message,
-        createdAt: row.created_at,
-        deliveredAt: row.delivered_at,
-      }
-    : null;
+  return row ? publicSteeringMessageSummary(row) : null;
 }
 
 function reportCommandTransition(
@@ -2708,6 +2691,20 @@ type PublicLogStreamRow = {
   readonly updated_at: string;
 };
 
+type PublicSteeringMessageRow = {
+  readonly id: string;
+  readonly project_id: string;
+  readonly task_id: string;
+  readonly session_id: string;
+  readonly command_id: string | null;
+  readonly body: string;
+  readonly status: "queued" | "delivered" | "failed" | "canceled";
+  readonly error_message: string | null;
+  readonly created_at: string;
+  readonly delivered_at: string | null;
+  readonly command_payload_json: string | null;
+};
+
 function listPublicProjects(database: WebSandboxSqliteDatabase): readonly PublicProjectSummary[] {
   const rows = database
     .query<PublicProjectRow, []>(
@@ -2772,6 +2769,7 @@ function readPublicTaskDetail(database: WebSandboxSqliteDatabase, projectId: str
     artifacts: listPublicArtifactsForTask(database, projectId, taskId),
     events: listPublicEventsForTask(database, projectId, taskId),
     logStreams: listPublicLogStreamsForTask(database, projectId, taskId),
+    steeringMessages: listPublicSteeringMessagesForTask(database, projectId, taskId),
   };
 }
 
@@ -2893,6 +2891,30 @@ function listPublicEvents(database: WebSandboxSqliteDatabase, input: ListPublicE
     .map(publicEventSummary);
 }
 
+function listPublicSteeringMessagesForTask(
+  database: WebSandboxSqliteDatabase,
+  projectId: string,
+  taskId: string,
+): readonly PublicSteeringMessageSummary[] {
+  return database
+    .query<PublicSteeringMessageRow, [string, string, string, string]>(
+      `
+        SELECT s.id, s.project_id, s.task_id, s.session_id, s.command_id, s.body, s.status, s.error_message,
+          s.created_at, s.delivered_at, c.payload_json AS command_payload_json
+        FROM steering_messages s
+        LEFT JOIN orchestrator_commands c ON c.project_id = s.project_id AND c.id = s.command_id
+        WHERE s.project_id = ?
+          AND (
+            s.task_id = ?
+            OR s.session_id IN (SELECT id FROM sessions WHERE project_id = ? AND task_id = ?)
+          )
+        ORDER BY s.created_at ASC, s.rowid ASC, s.id ASC
+      `,
+    )
+    .all(projectId, taskId, projectId, taskId)
+    .map(publicSteeringMessageSummary);
+}
+
 function readReplayAfterRowid(database: WebSandboxSqliteDatabase, projectId: string, lastEventId: string | null | undefined): number {
   const eventId = lastEventId?.trim();
   if (!eventId) return 0;
@@ -2983,6 +3005,22 @@ function publicEventSummary(row: PublicEventRow): PublicEventSummary {
     type: row.type,
     payload: parsePublicJsonObject(row.payload_json),
     createdAt: row.created_at,
+  };
+}
+
+function publicSteeringMessageSummary(row: PublicSteeringMessageRow): PublicSteeringMessageSummary {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    taskId: row.task_id,
+    sessionId: row.session_id,
+    commandId: row.command_id,
+    body: row.body,
+    status: row.status,
+    errorMessage: row.error_message,
+    createdAt: row.created_at,
+    deliveredAt: row.delivered_at,
+    attachments: row.command_payload_json ? readAttachmentsFromCommandPayload(row.command_payload_json) : [],
   };
 }
 

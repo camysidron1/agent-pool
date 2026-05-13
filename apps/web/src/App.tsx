@@ -43,7 +43,7 @@ import {
   type BoardColumnId,
 } from "./board";
 import { shouldRefreshBoardForEvent, subscribeProjectEvents } from "./sse";
-import { getSteeringAvailability, submitSteeringDraft } from "./steering";
+import { getSteeringAvailability, getVisibleSteeringMessages, shouldUseIncomingTaskDetail, submitSteeringDraft } from "./steering";
 
 export type AppProps = {
   readonly apiBaseUrl?: string;
@@ -159,7 +159,7 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
         if (!cancelled) setTasks(response.tasks);
         if (selectedTaskId) {
           const detailResponse = await api.readTask(selectedProjectId, selectedTaskId);
-          if (!cancelled) setTaskDetail(detailResponse.task);
+          if (!cancelled) setTaskDetail((current) => (shouldUseIncomingTaskDetail(current, detailResponse.task) ? detailResponse.task : current));
         }
       } catch (error) {
         if (!cancelled) setTaskMutationError(formatApiError(error));
@@ -203,7 +203,7 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
       .readTask(selectedProjectId, selectedTaskId)
       .then((response) => {
         if (cancelled) return;
-        setTaskDetail(response.task);
+        setTaskDetail((current) => (shouldUseIncomingTaskDetail(current, response.task) ? response.task : current));
         setTaskDetailLoadState("ready");
       })
       .catch((error: unknown) => {
@@ -383,7 +383,7 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
 
     const updatedTask = response.task;
     if (updatedTask) {
-      setTaskDetail(updatedTask);
+      setTaskDetail((current) => (shouldUseIncomingTaskDetail(current, updatedTask) ? updatedTask : current));
       setTasks((current) => replaceTask(current, updatedTask));
     }
   }
@@ -602,6 +602,7 @@ function TaskPanel({
   const activeSession = detail ? selectActiveSession(detail) : null;
   const resultSummary = detail ? getTaskResultSummary(detail) : null;
   const steeringAvailability = getSteeringAvailability(detail, activeSession);
+  const visibleSteeringMessages = detail ? getVisibleSteeringMessages(detail) : [];
   const steeringDisabled = !steeringAvailability.available || steeringSubmitState === "submitting";
   const canSubmitSteering = steeringAvailability.available && steeringDraft.trim().length > 0 && steeringSubmitState !== "submitting";
 
@@ -751,6 +752,43 @@ function TaskPanel({
 
           <section className="panel-section" aria-label="Steering">
             <h3>Steering</h3>
+            {visibleSteeringMessages.length > 0 ? (
+              <ul className="steering-message-list" aria-label="Queued and failed steering">
+                {visibleSteeringMessages.map((message) => (
+                  <li key={message.id} className={`steering-message steering-message-${message.status}`}>
+                    <div className="steering-message-header">
+                      <strong>{message.displayStatus}</strong>
+                      <time>{formatTimestamp(message.deliveredAt ?? message.createdAt)}</time>
+                    </div>
+                    <p>{message.body}</p>
+                    {message.attachments.length > 0 ? (
+                      <ul className="attachment-list" aria-label="Steering message attachments">
+                        {message.attachments.map((attachment) => (
+                          <li key={attachment.key}>
+                            <span>{attachment.fileName ?? attachment.key}</span>
+                            <small>{attachment.contentType ?? attachment.bucket ?? "planned upload"}</small>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    {message.errorMessage ? <p className="form-error">{message.errorMessage}</p> : null}
+                    {message.status === "failed" ? (
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={() => {
+                          setSteeringDraft(message.body);
+                          setSteeringError(null);
+                          setSteeringNotice(null);
+                        }}
+                      >
+                        Retry
+                      </button>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
             <form className="steering-form" onSubmit={(event: FormEvent<HTMLFormElement>) => void submitSteering(event)}>
               <textarea
                 disabled={steeringDisabled}

@@ -25,6 +25,7 @@ export function shouldRefreshBoardForEvent(event: PublicEventSummary, projectId:
   if (event.type.startsWith("task.")) return true;
   if (event.type.startsWith("session.")) return true;
   if (event.type.startsWith("command.")) return true;
+  if (event.type.startsWith("steering.")) return true;
 
   return false;
 }

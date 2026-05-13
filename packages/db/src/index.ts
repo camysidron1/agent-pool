@@ -144,6 +144,7 @@ export {
   type PublicLogStreamSummary,
   type PublicProjectSummary,
   type PublicSessionSummary,
+  type PublicSteeringMessageSummary,
   type PublicTaskDetail,
   type PublicTaskSummary,
   type ListPublicEventsInput,

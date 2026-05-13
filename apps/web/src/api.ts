@@ -160,7 +160,7 @@ export type PublicSteeringMessageSummary = {
   readonly requestedBy: string | null;
   readonly createdAt: string;
   readonly deliveredAt: string | null;
-  readonly metadata: JsonRecord;
+  readonly attachments: readonly PublicSteeringAttachmentReference[];
 };
 
 export type PublicTaskDetail = PublicTaskSummary & {
@@ -168,6 +168,7 @@ export type PublicTaskDetail = PublicTaskSummary & {
   readonly artifacts: readonly PublicArtifactSummary[];
   readonly events: readonly PublicEventSummary[];
   readonly logStreams: readonly PublicLogStreamSummary[];
+  readonly steeringMessages: readonly PublicSteeringMessageSummary[];
 };
 
 export type PublicSteeringMutation = {
