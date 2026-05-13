@@ -8,6 +8,11 @@ import {
   DEFAULT_CONTROL_PLANE_RECONCILE_INTERVAL_MS,
   DEFAULT_CONTROL_PLANE_SMOKE_PROJECT_ID,
   DEFAULT_CONTROL_PLANE_WORKER_POLL_INTERVAL_MS,
+  DEFAULT_E2B_API_KEY_ENV_NAME,
+  DEFAULT_E2B_CLEANUP_TIMEOUT_MS,
+  DEFAULT_E2B_GITHUB_TOKEN_ENV_NAME,
+  DEFAULT_E2B_STARTUP_TIMEOUT_MS,
+  DEFAULT_E2B_WORKING_DIRECTORY,
   DEFAULT_ORCHESTRATOR_URL,
   DEFAULT_RABBITMQ_MANAGEMENT_URL,
   DEFAULT_RABBITMQ_URL,
@@ -60,6 +65,18 @@ describe("loadConfig", () => {
         workerPollIntervalMs: DEFAULT_CONTROL_PLANE_WORKER_POLL_INTERVAL_MS,
         outboxPublishIntervalMs: DEFAULT_CONTROL_PLANE_OUTBOX_PUBLISH_INTERVAL_MS,
         reconcileIntervalMs: DEFAULT_CONTROL_PLANE_RECONCILE_INTERVAL_MS,
+        e2b: {
+          apiKeyEnvName: DEFAULT_E2B_API_KEY_ENV_NAME,
+          apiKeyConfigured: false,
+          templateId: null,
+          sandboxImageId: null,
+          workingDirectory: DEFAULT_E2B_WORKING_DIRECTORY,
+          startupTimeoutMs: DEFAULT_E2B_STARTUP_TIMEOUT_MS,
+          cleanupTimeoutMs: DEFAULT_E2B_CLEANUP_TIMEOUT_MS,
+          githubTokenEnvName: DEFAULT_E2B_GITHUB_TOKEN_ENV_NAME,
+          githubTokenConfigured: false,
+          allowedSecretEnvNames: [],
+        },
       },
     });
   });
@@ -106,6 +123,16 @@ describe("loadConfig", () => {
         CONTROL_PLANE_WORKER_POLL_INTERVAL_MS: "250",
         CONTROL_PLANE_OUTBOX_PUBLISH_INTERVAL_MS: "500",
         CONTROL_PLANE_RECONCILE_INTERVAL_MS: "1500",
+        E2B_API_KEY_ENV_NAME: "CUSTOM_E2B_KEY",
+        CUSTOM_E2B_KEY: "not-returned",
+        E2B_TEMPLATE_ID: "template-1",
+        E2B_SANDBOX_IMAGE_ID: "image:1",
+        E2B_WORKING_DIRECTORY: "/workspace/custom/",
+        E2B_STARTUP_TIMEOUT_MS: "90000",
+        E2B_CLEANUP_TIMEOUT_MS: "45000",
+        E2B_GITHUB_TOKEN_ENV_NAME: "CUSTOM_GITHUB_TOKEN",
+        CUSTOM_GITHUB_TOKEN: "also-not-returned",
+        E2B_ALLOWED_SECRET_ENV_NAMES: "CUSTOM_E2B_KEY,CUSTOM_GITHUB_TOKEN,CUSTOM_E2B_KEY",
       }),
     ).toEqual({
       authMode: "local",
@@ -150,7 +177,51 @@ describe("loadConfig", () => {
         workerPollIntervalMs: 250,
         outboxPublishIntervalMs: 500,
         reconcileIntervalMs: 1500,
+        e2b: {
+          apiKeyEnvName: "CUSTOM_E2B_KEY",
+          apiKeyConfigured: true,
+          templateId: "template-1",
+          sandboxImageId: "image:1",
+          workingDirectory: "/workspace/custom",
+          startupTimeoutMs: 90000,
+          cleanupTimeoutMs: 45000,
+          githubTokenEnvName: "CUSTOM_GITHUB_TOKEN",
+          githubTokenConfigured: true,
+          allowedSecretEnvNames: ["CUSTOM_E2B_KEY", "CUSTOM_GITHUB_TOKEN"],
+        },
       },
+    });
+  });
+
+  test("validates required E2B settings only when E2B provider is selected", () => {
+    expect(loadConfig({ AUTH_MODE: "test", RUNTIME_PROVIDER: "fake", E2B_TEMPLATE_ID: "template-1" }).controlPlane.e2b).toMatchObject({
+      apiKeyEnvName: DEFAULT_E2B_API_KEY_ENV_NAME,
+      apiKeyConfigured: false,
+      templateId: "template-1",
+    });
+
+    expect(() => loadConfig({ AUTH_MODE: "test", RUNTIME_PROVIDER: "e2b", E2B_TEMPLATE_ID: "template-1" })).toThrow(
+      "E2B_API_KEY is required when RUNTIME_PROVIDER=e2b",
+    );
+    expect(() =>
+      loadConfig({
+        AUTH_MODE: "test",
+        RUNTIME_PROVIDER: "e2b",
+        E2B_API_KEY: "secret",
+      }),
+    ).toThrow("E2B_TEMPLATE_ID or E2B_SANDBOX_IMAGE_ID is required when RUNTIME_PROVIDER=e2b");
+
+    expect(
+      loadConfig({
+        AUTH_MODE: "test",
+        RUNTIME_PROVIDER: "e2b",
+        E2B_API_KEY: "secret",
+        E2B_TEMPLATE_ID: "template-1",
+      }).controlPlane.e2b,
+    ).toMatchObject({
+      apiKeyConfigured: true,
+      templateId: "template-1",
+      sandboxImageId: null,
     });
   });
 
@@ -171,5 +242,10 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ AUTH_MODE: "test", COMPOSE_SMOKE_ENABLED: "sometimes" })).toThrow(ConfigError);
     expect(() => loadConfig({ AUTH_MODE: "test", COMPOSE_SMOKE_PROJECT_ID: "../bad" })).toThrow(ConfigError);
     expect(() => loadConfig({ AUTH_MODE: "test", CONTROL_PLANE_WORKER_POLL_INTERVAL_MS: "0" })).toThrow(ConfigError);
+    expect(() => loadConfig({ AUTH_MODE: "test", E2B_API_KEY_ENV_NAME: "E2B-Key" })).toThrow(ConfigError);
+    expect(() => loadConfig({ AUTH_MODE: "test", E2B_TEMPLATE_ID: "../template" })).toThrow(ConfigError);
+    expect(() => loadConfig({ AUTH_MODE: "test", E2B_WORKING_DIRECTORY: "relative/path" })).toThrow(ConfigError);
+    expect(() => loadConfig({ AUTH_MODE: "test", E2B_STARTUP_TIMEOUT_MS: "0" })).toThrow(ConfigError);
+    expect(() => loadConfig({ AUTH_MODE: "test", E2B_ALLOWED_SECRET_ENV_NAMES: "GOOD,bad" })).toThrow(ConfigError);
   });
 });

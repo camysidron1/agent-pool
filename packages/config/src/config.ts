@@ -45,6 +45,19 @@ export type StorageConfig = {
   readonly bucket: string;
 };
 
+export type E2BRuntimeConfig = {
+  readonly apiKeyEnvName: string;
+  readonly apiKeyConfigured: boolean;
+  readonly templateId: string | null;
+  readonly sandboxImageId: string | null;
+  readonly workingDirectory: string;
+  readonly startupTimeoutMs: number;
+  readonly cleanupTimeoutMs: number;
+  readonly githubTokenEnvName: string;
+  readonly githubTokenConfigured: boolean;
+  readonly allowedSecretEnvNames: readonly string[];
+};
+
 export type ControlPlaneRuntimeConfig = {
   readonly runtimeProvider: RuntimeProviderName;
   readonly smokeEnabled: boolean;
@@ -52,6 +65,7 @@ export type ControlPlaneRuntimeConfig = {
   readonly workerPollIntervalMs: number;
   readonly outboxPublishIntervalMs: number;
   readonly reconcileIntervalMs: number;
+  readonly e2b: E2BRuntimeConfig;
 };
 
 export type AppConfig = {
@@ -90,6 +104,11 @@ export const DEFAULT_RABBITMQ_URL = "amqp://127.0.0.1:5672" as const;
 export const DEFAULT_RABBITMQ_MANAGEMENT_URL = "http://guest:guest@127.0.0.1:15672" as const;
 export const DEFAULT_STORAGE_LOCAL_ROOT = ".agent-pool/web-sandbox/storage" as const;
 export const DEFAULT_RUNTIME_PROVIDER = "fake" as const;
+export const DEFAULT_E2B_API_KEY_ENV_NAME = "E2B_API_KEY" as const;
+export const DEFAULT_E2B_GITHUB_TOKEN_ENV_NAME = "GITHUB_TOKEN" as const;
+export const DEFAULT_E2B_WORKING_DIRECTORY = "/workspace/agent-pool" as const;
+export const DEFAULT_E2B_STARTUP_TIMEOUT_MS = 120_000;
+export const DEFAULT_E2B_CLEANUP_TIMEOUT_MS = 30_000;
 export const DEFAULT_CONTROL_PLANE_SMOKE_PROJECT_ID = "compose-smoke" as const;
 export const DEFAULT_CONTROL_PLANE_WORKER_POLL_INTERVAL_MS = 1000;
 export const DEFAULT_CONTROL_PLANE_OUTBOX_PUBLISH_INTERVAL_MS = 1000;
@@ -102,6 +121,8 @@ const RUNTIME_PROVIDERS = new Set<RuntimeProviderName>(["fake", "e2b", "docker"]
 export function loadConfig(env: EnvSource = readProcessEnv()): AppConfig {
   const authMode = readAuthMode(env.AUTH_MODE);
   const serviceToken = readServiceTokenConfig(authMode, env);
+  const runtimeProvider = readRuntimeProvider(env.RUNTIME_PROVIDER);
+  const e2b = readE2BRuntimeConfig(env, runtimeProvider);
   const backend = {
     port: readPort(env.API_PORT, DEFAULT_BACKEND_PORT, "API_PORT"),
     publicUrl: readOptionalUrl(env.API_PUBLIC_URL, DEFAULT_BACKEND_INTERNAL_URL, "API_PUBLIC_URL"),
@@ -140,7 +161,7 @@ export function loadConfig(env: EnvSource = readProcessEnv()): AppConfig {
       bucket: env.STORAGE_BUCKET?.trim() || "agent-pool-web-sandbox",
     },
     controlPlane: {
-      runtimeProvider: readRuntimeProvider(env.RUNTIME_PROVIDER),
+      runtimeProvider,
       smokeEnabled: readBoolean(env.COMPOSE_SMOKE_ENABLED, authMode === "test", "COMPOSE_SMOKE_ENABLED"),
       smokeProjectId: readRequiredIdentifier(
         env.COMPOSE_SMOKE_PROJECT_ID,
@@ -162,8 +183,52 @@ export function loadConfig(env: EnvSource = readProcessEnv()): AppConfig {
         DEFAULT_CONTROL_PLANE_RECONCILE_INTERVAL_MS,
         "CONTROL_PLANE_RECONCILE_INTERVAL_MS",
       ),
+      e2b,
     },
   };
+}
+
+function readE2BRuntimeConfig(env: EnvSource, runtimeProvider: RuntimeProviderName): E2BRuntimeConfig {
+  const apiKeyEnvName = readEnvVarName(env.E2B_API_KEY_ENV_NAME, DEFAULT_E2B_API_KEY_ENV_NAME, "E2B_API_KEY_ENV_NAME");
+  const githubTokenEnvName = readEnvVarName(
+    env.E2B_GITHUB_TOKEN_ENV_NAME,
+    DEFAULT_E2B_GITHUB_TOKEN_ENV_NAME,
+    "E2B_GITHUB_TOKEN_ENV_NAME",
+  );
+  const allowedSecretEnvNames = readEnvVarNameList(env.E2B_ALLOWED_SECRET_ENV_NAMES, "E2B_ALLOWED_SECRET_ENV_NAMES");
+  const templateId = readOptionalIdentifier(env.E2B_TEMPLATE_ID, "E2B_TEMPLATE_ID");
+  const sandboxImageId = readOptionalIdentifier(env.E2B_SANDBOX_IMAGE_ID, "E2B_SANDBOX_IMAGE_ID");
+  const config: E2BRuntimeConfig = {
+    apiKeyEnvName,
+    apiKeyConfigured: Boolean(env[apiKeyEnvName]?.trim()),
+    templateId,
+    sandboxImageId,
+    workingDirectory: readSandboxWorkingDirectory(env.E2B_WORKING_DIRECTORY),
+    startupTimeoutMs: readPositiveInteger(
+      env.E2B_STARTUP_TIMEOUT_MS,
+      DEFAULT_E2B_STARTUP_TIMEOUT_MS,
+      "E2B_STARTUP_TIMEOUT_MS",
+    ),
+    cleanupTimeoutMs: readPositiveInteger(
+      env.E2B_CLEANUP_TIMEOUT_MS,
+      DEFAULT_E2B_CLEANUP_TIMEOUT_MS,
+      "E2B_CLEANUP_TIMEOUT_MS",
+    ),
+    githubTokenEnvName,
+    githubTokenConfigured: Boolean(env[githubTokenEnvName]?.trim()),
+    allowedSecretEnvNames,
+  };
+
+  if (runtimeProvider === "e2b") {
+    if (!config.apiKeyConfigured) {
+      throw new ConfigError(`${config.apiKeyEnvName} is required when RUNTIME_PROVIDER=e2b.`);
+    }
+    if (!config.templateId && !config.sandboxImageId) {
+      throw new ConfigError("E2B_TEMPLATE_ID or E2B_SANDBOX_IMAGE_ID is required when RUNTIME_PROVIDER=e2b.");
+    }
+  }
+
+  return config;
 }
 
 function readBridgeSessionConfig(
@@ -240,6 +305,37 @@ function readRuntimeProvider(value: string | undefined): RuntimeProviderName {
   }
 
   throw new ConfigError(`RUNTIME_PROVIDER must be one of: ${Array.from(RUNTIME_PROVIDERS).join(", ")}.`);
+}
+
+function readOptionalIdentifier(value: string | undefined, name: string): string | null {
+  const raw = value?.trim();
+  if (!raw) return null;
+  if (/^[a-zA-Z0-9._:-]+$/.test(raw)) return raw;
+  throw new ConfigError(`${name} must contain only letters, numbers, dots, underscores, colons, or hyphens.`);
+}
+
+function readEnvVarName(value: string | undefined, defaultValue: string, name: string): string {
+  const raw = value?.trim() || defaultValue;
+  if (/^[A-Z_][A-Z0-9_]*$/.test(raw)) return raw;
+  throw new ConfigError(`${name} must be an uppercase environment variable name.`);
+}
+
+function readEnvVarNameList(value: string | undefined, name: string): readonly string[] {
+  const raw = value?.trim();
+  if (!raw) return [];
+  const names = raw.split(",").map((part) => readEnvVarName(part, "", name));
+  return [...new Set(names)];
+}
+
+function readSandboxWorkingDirectory(value: string | undefined): string {
+  const raw = value?.trim() || DEFAULT_E2B_WORKING_DIRECTORY;
+  if (!raw.startsWith("/")) {
+    throw new ConfigError("E2B_WORKING_DIRECTORY must be an absolute sandbox path.");
+  }
+  if (raw.includes("..") || raw.includes("~") || raw.includes(".agent-pool/data/agent-pool.db")) {
+    throw new ConfigError("E2B_WORKING_DIRECTORY must not escape the sandbox workspace or reference the TUI database.");
+  }
+  return raw.replace(/\/+$/, "") || "/";
 }
 
 function readBoolean(value: string | undefined, defaultValue: boolean, name: string): boolean {
