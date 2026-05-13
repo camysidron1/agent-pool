@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  applyTaskPriority,
   chooseSelectedProjectId,
+  getPriorityLabel,
+  getTaskColumnId,
+  groupTasksByColumn,
   readStoredSelectedProjectId,
+  replaceTask,
   saveStoredSelectedProjectId,
   SELECTED_PROJECT_STORAGE_KEY,
   sortTasksForBoard,
@@ -40,6 +45,36 @@ describe("web board state", () => {
       ]).map((item) => item.id),
     ).toEqual(["task-high-early", "task-high-late", "task-low"]);
   });
+
+  test("groups canonical backend statuses into web Kanban columns", () => {
+    const grouped = groupTasksByColumn([
+      task("attention-blocked", 0, 1, "Blocked task", "blocked"),
+      task("attention-failed", 0, 2, "Failed task", "failed"),
+      task("ready", 0, 3, "Ready task", "queued"),
+      task("backlog", -50, 4, "Backlog task", "queued"),
+      task("in-progress", 0, 5, "Running task", "running"),
+      task("done", 0, 6, "Done task", "completed"),
+    ]);
+
+    expect(grouped.attention.map((item) => item.id)).toEqual(["attention-blocked", "attention-failed"]);
+    expect(grouped.ready.map((item) => item.id)).toEqual(["ready"]);
+    expect(grouped.backlog.map((item) => item.id)).toEqual(["backlog"]);
+    expect(grouped.in_progress.map((item) => item.id)).toEqual(["in-progress"]);
+    expect(grouped.done.map((item) => item.id)).toEqual(["done"]);
+  });
+
+  test("updates priority labels and task lists immutably", () => {
+    const original = [task("task-a", 0, 1, "A task"), task("task-b", 50, 2, "B task")];
+    const prioritized = applyTaskPriority(original, { taskId: "task-a", priority: -50 });
+    const replaced = replaceTask(prioritized, task("task-b", 100, 2, "B task"));
+
+    expect(original[0]?.priority).toBe(0);
+    expect(prioritized[0]?.priority).toBe(-50);
+    expect(getTaskColumnId(prioritized[0] as PublicTaskSummary)).toBe("backlog");
+    expect(getPriorityLabel(100)).toBe("Urgent");
+    expect(getPriorityLabel(-50)).toBe("Backlog");
+    expect(replaced[1]?.priority).toBe(100);
+  });
 });
 
 function project(id: string): PublicProjectSummary {
@@ -55,14 +90,20 @@ function project(id: string): PublicProjectSummary {
   };
 }
 
-function task(id: string, priority: number, displayId: number, title: string): PublicTaskSummary {
+function task(
+  id: string,
+  priority: number,
+  displayId: number,
+  title: string,
+  status: PublicTaskSummary["status"] = "queued",
+): PublicTaskSummary {
   return {
     id,
     projectId: "project-a",
     displayId,
     title,
     description: null,
-    status: "queued",
+    status,
     priority,
     runtimeSource: null,
     createdAt: "2026-05-13T00:00:00.000Z",
