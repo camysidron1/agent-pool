@@ -8,6 +8,8 @@ import type {
   PublicEventSummary,
   PublicTaskDetail,
   RequestCommandResult,
+  RequestSteeringResult,
+  SteeringAttachmentReference,
   TaskMutationResult,
   TaskRuntimeSourceMetadata,
 } from "@agent-pool/db";
@@ -36,6 +38,7 @@ type PublicApiServices = Pick<
   | "listProjects"
   | "readTaskDetail"
   | "requestCommand"
+  | "requestSteering"
   | "unblockTask"
   | "updateTaskPriority"
 > & {
@@ -351,6 +354,10 @@ export function registerPublicApiRoutes(app: Express, options: PublicApiOptions)
 
   app.post("/api/public/projects/:projectId/tasks/:taskId/sessions/:sessionId/interrupt", requirePublicOperator, (request: PublicOperatorRequest, response) => {
     respondSessionCommand(options, sseHub, request, response, "interrupt");
+  });
+
+  app.post("/api/public/projects/:projectId/tasks/:taskId/sessions/:sessionId/steer", requirePublicOperator, (request: PublicOperatorRequest, response) => {
+    respondSteeringCommand(options, sseHub, request, response);
   });
 
   app.post("/api/public/projects/:projectId/tasks/:taskId/sessions/:sessionId/cleanup", requirePublicOperator, (request: PublicOperatorRequest, response) => {
@@ -684,6 +691,39 @@ function respondSessionCommand(
   respondCommandMutation(response, sseHub, services, { ...scope, sessionId }, result);
 }
 
+function respondSteeringCommand(
+  options: PublicApiOptions,
+  sseHub: PublicSseHub,
+  request: PublicOperatorRequest,
+  response: Response,
+): void {
+  const services = requirePublicServices(options, response);
+  if (!services) return;
+
+  const scope = readTaskScope(request, response);
+  if (!scope) return;
+
+  const sessionId = readPathParam(request, "sessionId");
+  if (!sessionId) {
+    response.status(400).json(publicError("validation_error", "sessionId is required"));
+    return;
+  }
+
+  try {
+    const body = parsePublicBody(request.body);
+    const result = services.requestSteering({
+      ...scope,
+      sessionId,
+      body: readRequiredBodyString(body, "body"),
+      attachments: readSteeringAttachments(body.attachments),
+      requestedBy: request.publicOperator?.id ?? null,
+    });
+    respondSteeringMutation(response, sseHub, services, { ...scope, sessionId }, result);
+  } catch (error) {
+    respondPublicException(response, error);
+  }
+}
+
 function respondCommandMutation(
   response: Response,
   sseHub: PublicSseHub,
@@ -715,9 +755,41 @@ function respondCommandMutation(
   );
 }
 
+function respondSteeringMutation(
+  response: Response,
+  sseHub: PublicSseHub,
+  services: PublicApiServices,
+  scope: { readonly projectId: string; readonly taskId: string; readonly sessionId: string },
+  result: RequestSteeringResult,
+): void {
+  if (!result.ok) {
+    response.status(commandErrorStatus(result.error.code)).json(publicError(result.error.code, result.error.message));
+    return;
+  }
+
+  const detail = services.readTaskDetail(scope);
+  response.status(200).json({
+    ok: true,
+    steering: result.steering,
+    command: result.command,
+    event: result.event,
+    outbox: result.outbox,
+    task: detail.ok ? detail.task : null,
+    pendingCommands: detail.ok ? detail.task.pendingCommands : [],
+  });
+  sseHub.publish(
+    publicEventFromMutation(result.event, {
+      projectId: scope.projectId,
+      taskId: scope.taskId,
+      sessionId: scope.sessionId,
+      commandId: result.command.id,
+    }),
+  );
+}
+
 function commandErrorStatus(code: string): number {
   if (code === "not_found") return 404;
-  if (code === "missing_scope") return 400;
+  if (code === "missing_scope" || code === "validation_error") return 400;
   return 409;
 }
 
@@ -785,6 +857,23 @@ function readOptionalRuntimeSource(value: unknown): TaskRuntimeSourceMetadata | 
     baseRef: readRequiredBodyString(body, "baseRef"),
     taskBranchPrefix: readRequiredBodyString(body, "taskBranchPrefix"),
   };
+}
+
+function readSteeringAttachments(value: unknown): readonly SteeringAttachmentReference[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new Error("attachments must be an array");
+  }
+
+  return value.map((entry) => {
+    const body = parsePublicBody(entry);
+    return {
+      key: readRequiredBodyString(body, "key"),
+      bucket: readOptionalBodyString(body.bucket),
+      fileName: readOptionalBodyString(body.fileName),
+      contentType: readOptionalBodyString(body.contentType),
+    };
+  });
 }
 
 function respondPublicException(response: Response, error: unknown): void {

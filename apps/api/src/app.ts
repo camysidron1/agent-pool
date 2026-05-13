@@ -212,6 +212,12 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
   app.post("/callbacks/:kind", (request, response) => {
     respondWithBridgeCallback(response, services, request);
   });
+  app.post("/steering/poll", (request, response) => {
+    respondWithBridgeSteeringPoll(response, services, request);
+  });
+  app.post("/steering/report", (request, response) => {
+    respondWithBridgeSteeringReport(response, services, request);
+  });
 
   app.get("/metrics", (_request, response) => {
     const loopState = outboxPublisherLoop?.state;
@@ -722,6 +728,99 @@ function respondWithBridgeCallback(
   });
 }
 
+function respondWithBridgeSteeringPoll(response: Response, services: ApiBackendServices | null, request: Request): void {
+  const scope = readValidatedBridgeScope(response, services, request);
+  if (!scope || !services) return;
+
+  const result = services.pollQueuedSteering(scope);
+  if (!result.ok) {
+    response.status(404).json({ ok: false, error: result.error });
+    return;
+  }
+
+  response.status(200).json({
+    ok: true,
+    messages: result.messages.map((message) => ({
+      id: message.id,
+      body: message.body,
+      commandId: message.commandId,
+      metadata: { attachments: message.attachments },
+    })),
+  });
+}
+
+function respondWithBridgeSteeringReport(response: Response, services: ApiBackendServices | null, request: Request): void {
+  const scope = readValidatedBridgeScope(response, services, request);
+  if (!scope || !services) return;
+
+  const body = parseObjectBody(request.body);
+  const steeringMessageId = readOptionalString(body.steeringMessageId);
+  const status = readSteeringReportStatus(body.status);
+
+  if (!steeringMessageId || !status) {
+    response.status(400).json({ ok: false, error: "invalid_steering_report" });
+    return;
+  }
+
+  const result = services.reportSteeringDelivery({
+    ...scope,
+    steeringMessageId,
+    status,
+    errorMessage: readOptionalString(body.errorMessage),
+  });
+
+  if (!result.ok) {
+    response.status(result.error.code === "not_found" ? 404 : 409).json({ ok: false, error: result.error });
+    return;
+  }
+
+  response.status(200).json({
+    ok: true,
+    steering: result.steering,
+    event: result.event,
+    outbox: result.outbox,
+    idempotent: result.idempotent,
+  });
+}
+
+function readValidatedBridgeScope(
+  response: Response,
+  services: ApiBackendServices | null,
+  request: Request,
+): { readonly projectId: string; readonly taskId: string; readonly sessionId: string } | null {
+  if (!services) {
+    response.status(503).json({ ok: false, error: "database_unavailable" });
+    return null;
+  }
+
+  const body = parseObjectBody(request.body);
+  const projectId = readOptionalString(body.projectId);
+  const taskId = readOptionalString(body.taskId);
+  const sessionId = readOptionalString(body.sessionId);
+  if (!projectId || !taskId || !sessionId) {
+    response.status(400).json({ ok: false, error: "missing_callback_scope" });
+    return null;
+  }
+
+  const bridge = services.readBridgeSessionCallbackConfig({ projectId, taskId, sessionId });
+  if (!bridge.ok) {
+    response.status(bridge.error.code === "not_found" ? 404 : 409).json({ ok: false, error: bridge.error });
+    return null;
+  }
+
+  const token = readHeader(request, bridge.bridge.sessionToken.headerName);
+  if (!token) {
+    response.status(401).json({ ok: false, error: "invalid_session_token", reason: "missing" });
+    return null;
+  }
+  if (token !== bridge.bridge.sessionToken.token) {
+    response.status(403).json({ ok: false, error: "invalid_session_token", reason: "invalid" });
+    return null;
+  }
+
+  return { projectId, taskId, sessionId };
+}
+
 function parseObjectBody(body: unknown): Record<string, unknown> {
   return body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
 }
@@ -730,6 +829,10 @@ function readOptionalString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function readSteeringReportStatus(value: unknown): "delivered" | "failed" | undefined {
+  return value === "delivered" || value === "failed" ? value : undefined;
 }
 
 function readHeader(request: Request, name: string): string | undefined {

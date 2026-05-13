@@ -244,13 +244,13 @@ describe("API service skeleton", () => {
       const runningTask = services.createTask({ id: "task_running", projectId: project.id, title: "Running", priority: 10 }).task;
       const cleanupTask = services.createTask({ id: "task_cleanup", projectId: project.id, title: "Cleanup", priority: 5 }).task;
 
-      expect(
-        services.claimNextTask({
-          projectId: project.id,
-          sessionId: "session_running",
-          bridgeSessionToken: "bridge-token-session",
-        }),
-      ).toMatchObject({ ok: true, task: { id: runningTask.id } });
+      const runningClaim = services.claimNextTask({
+        projectId: project.id,
+        sessionId: "session_running",
+        bridgeSessionToken: "bridge-token-session",
+      });
+      expect(runningClaim).toMatchObject({ ok: true, task: { id: runningTask.id } });
+      if (!runningClaim.ok) throw new Error("expected running task claim to succeed");
       expect(services.reportStartupSucceeded({ projectId: project.id, sessionId: "session_running", runtimeSessionId: "runtime_running" })).toMatchObject({
         ok: true,
       });
@@ -314,6 +314,67 @@ describe("API service skeleton", () => {
         command: { type: "interrupt", taskId: runningTask.id, sessionId: "session_running" },
         pendingCommands: [{ type: "interrupt", status: "queued" }],
       });
+
+      const steer = await postPublic(baseUrl, config, `/projects/${project.id}/tasks/${runningTask.id}/sessions/session_running/steer`, {
+        body: "Focus on the failing tests",
+        attachments: [{ key: `projects/${project.id}/${runningTask.id}/uploads/context.txt`, fileName: "context.txt" }],
+      });
+      const steerBody = await steer.json();
+      expect(steer.status).toBe(200);
+      expect(steerBody).toMatchObject({
+        ok: true,
+        steering: { status: "queued", body: "Focus on the failing tests" },
+        command: { type: "steer", taskId: runningTask.id, sessionId: "session_running" },
+        pendingCommands: expect.arrayContaining([expect.objectContaining({ type: "steer", status: "queued" })]),
+      });
+
+      const steeringPoll = await fetch(`${baseUrl}/steering/poll`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [runningClaim.session.bridge.sessionToken.headerName]: runningClaim.session.bridge.sessionToken.token,
+        },
+        body: JSON.stringify({ projectId: project.id, taskId: runningTask.id, sessionId: "session_running" }),
+      });
+      const steeringPollBody = await steeringPoll.json();
+      expect(steeringPoll.status).toBe(200);
+      expect(steeringPollBody).toMatchObject({
+        ok: true,
+        messages: [
+          {
+            id: steerBody.steering.id,
+            body: "Focus on the failing tests",
+            metadata: { attachments: [{ key: `projects/${project.id}/${runningTask.id}/uploads/context.txt` }] },
+          },
+        ],
+      });
+
+      const steeringReport = await fetch(`${baseUrl}/steering/report`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [runningClaim.session.bridge.sessionToken.headerName]: runningClaim.session.bridge.sessionToken.token,
+        },
+        body: JSON.stringify({
+          projectId: project.id,
+          taskId: runningTask.id,
+          sessionId: "session_running",
+          steeringMessageId: steerBody.steering.id,
+          status: "delivered",
+        }),
+      });
+      expect(steeringReport.status).toBe(200);
+      expect(await steeringReport.json()).toMatchObject({
+        ok: true,
+        steering: { id: steerBody.steering.id, status: "delivered" },
+        event: { type: "steering.delivered" },
+      });
+
+      const invalidSteer = await postPublic(baseUrl, config, `/projects/${project.id}/tasks/${runningTask.id}/sessions/session_running/steer`, {
+        body: "bad attachment",
+        attachments: [{ key: "projects/other/task/uploads/context.txt" }],
+      });
+      expect(invalidSteer.status).toBe(400);
 
       const cleanup = await postPublic(baseUrl, config, `/projects/${project.id}/tasks/${cleanupTask.id}/sessions/session_cleanup/cleanup`, {
         reason: "demo cleanup",

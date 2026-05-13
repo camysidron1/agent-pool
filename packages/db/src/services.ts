@@ -214,6 +214,23 @@ export type RequestCommandInput = {
   readonly requestedBy?: string | null;
 };
 
+export type SteeringAttachmentReference = {
+  readonly key: string;
+  readonly bucket?: string | null;
+  readonly fileName?: string | null;
+  readonly contentType?: string | null;
+};
+
+export type RequestSteeringInput = {
+  readonly id?: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly body: string;
+  readonly attachments?: readonly SteeringAttachmentReference[];
+  readonly requestedBy?: string | null;
+};
+
 export type CommandRecord = {
   readonly id: string;
   readonly projectId: string;
@@ -221,6 +238,68 @@ export type CommandRecord = {
   readonly sessionId: string | null;
   readonly type: CommandType;
 };
+
+export type SteeringMessageRecord = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly commandId: string | null;
+  readonly body: string;
+  readonly status: "queued" | "delivered" | "failed" | "canceled";
+  readonly errorMessage: string | null;
+  readonly createdAt: string;
+  readonly deliveredAt: string | null;
+};
+
+export type BridgeSteeringMessageRecord = {
+  readonly id: string;
+  readonly body: string;
+  readonly commandId: string | null;
+  readonly attachments: readonly SteeringAttachmentReference[];
+};
+
+export type RequestSteeringResult =
+  | {
+      readonly ok: true;
+      readonly steering: SteeringMessageRecord;
+      readonly command: CommandRecord;
+      readonly event: EventRecord;
+      readonly outbox: OutboxRecord;
+    }
+  | {
+      readonly ok: false;
+      readonly error: { readonly code: "not_found" | "missing_scope" | "invalid_state" | "conflict" | "validation_error"; readonly message: string };
+    };
+
+export type PollQueuedSteeringInput = {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string;
+};
+
+export type PollQueuedSteeringResult =
+  | { readonly ok: true; readonly messages: readonly BridgeSteeringMessageRecord[] }
+  | { readonly ok: false; readonly error: { readonly code: "not_found"; readonly message: string } };
+
+export type ReportSteeringDeliveryInput = {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly steeringMessageId: string;
+  readonly status: "delivered" | "failed";
+  readonly errorMessage?: string | null;
+};
+
+export type ReportSteeringDeliveryResult =
+  | {
+      readonly ok: true;
+      readonly steering: SteeringMessageRecord;
+      readonly event: EventRecord;
+      readonly outbox: OutboxRecord;
+      readonly idempotent: boolean;
+    }
+  | { readonly ok: false; readonly error: { readonly code: "not_found" | "invalid_state"; readonly message: string } };
 
 export type ClaimedCommandRecord = CommandRecord & {
   readonly status: "running";
@@ -911,6 +990,18 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
           outbox,
         } as const;
       });
+    },
+
+    requestSteering(input: RequestSteeringInput): RequestSteeringResult {
+      return requestSteering(database, input);
+    },
+
+    pollQueuedSteering(input: PollQueuedSteeringInput): PollQueuedSteeringResult {
+      return pollQueuedSteering(database, input);
+    },
+
+    reportSteeringDelivery(input: ReportSteeringDeliveryInput): ReportSteeringDeliveryResult {
+      return reportSteeringDelivery(database, input);
     },
 
     recordFinalAssistantResponse(input: RecordFinalAssistantResponseInput): FinalAssistantResponseResult {
@@ -1638,6 +1729,263 @@ function validateCommand(database: WebSandboxSqliteDatabase, input: RequestComma
       }
       return { ok: true };
   }
+}
+
+function requestSteering(database: WebSandboxSqliteDatabase, input: RequestSteeringInput): RequestSteeringResult {
+  const body = input.body.trim();
+  if (!body) {
+    return { ok: false, error: { code: "validation_error", message: "steering body is required" } };
+  }
+
+  const attachments = normalizeSteeringAttachments(input.projectId, input.attachments ?? []);
+  if (!attachments.ok) return attachments;
+
+  const admissibility = validateCommand(database, {
+    projectId: input.projectId,
+    taskId: input.taskId,
+    sessionId: input.sessionId,
+    type: "steer",
+    payload: {},
+    requestedBy: input.requestedBy,
+  });
+  if (!admissibility.ok) return admissibility;
+
+  return transaction(database, () => {
+    const commandId = createId("command");
+    const steeringId = input.id ?? createId("steer");
+    const payload = { steeringMessageId: steeringId, body, attachments: attachments.attachments };
+
+    database
+      .query(
+        "INSERT INTO orchestrator_commands (id, project_id, task_id, session_id, type, payload_json, requested_by) VALUES (?, ?, ?, ?, 'steer', ?, ?)",
+      )
+      .run(commandId, input.projectId, input.taskId, input.sessionId, JSON.stringify(payload), input.requestedBy ?? null);
+    database
+      .query("INSERT INTO steering_messages (id, project_id, task_id, session_id, command_id, body) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(steeringId, input.projectId, input.taskId, input.sessionId, commandId, body);
+
+    const event = appendEvent(database, {
+      projectId: input.projectId,
+      taskId: input.taskId,
+      sessionId: input.sessionId,
+      commandId,
+      type: "steering.queued",
+      payload: { steeringMessageId: steeringId, commandId, attachmentCount: attachments.attachments.length },
+    });
+    const outbox = enqueueOutbox(database, {
+      projectId: input.projectId,
+      eventId: event.id,
+      routingKey: projectRoutingKey(input.projectId, "control"),
+      payload: { eventId: event.id, commandId, steeringMessageId: steeringId, type: event.type },
+    });
+    const steering = readSteeringMessage(database, input.projectId, steeringId);
+
+    if (!steering) {
+      throw new Error(`queued steering disappeared: ${steeringId}`);
+    }
+
+    return {
+      ok: true,
+      steering,
+      command: {
+        id: commandId,
+        projectId: input.projectId,
+        taskId: input.taskId,
+        sessionId: input.sessionId,
+        type: "steer",
+      },
+      event,
+      outbox,
+    } as const;
+  });
+}
+
+function pollQueuedSteering(database: WebSandboxSqliteDatabase, input: PollQueuedSteeringInput): PollQueuedSteeringResult {
+  const session = database
+    .query<{ task_id: string }, [string, string]>("SELECT task_id FROM sessions WHERE project_id = ? AND id = ?")
+    .get(input.projectId, input.sessionId);
+  if (!session || session.task_id !== input.taskId) {
+    return { ok: false, error: { code: "not_found", message: `session not found: ${input.sessionId}` } };
+  }
+
+  const rows = database
+    .query<
+      {
+        id: string;
+        body: string;
+        command_id: string | null;
+        payload_json: string | null;
+      },
+      [string, string, string]
+    >(
+      `
+        SELECT s.id, s.body, s.command_id, c.payload_json
+        FROM steering_messages s
+        LEFT JOIN orchestrator_commands c ON c.project_id = s.project_id AND c.id = s.command_id
+        WHERE s.project_id = ? AND s.task_id = ? AND s.session_id = ? AND s.status = 'queued'
+        ORDER BY s.created_at ASC, s.rowid ASC, s.id ASC
+      `,
+    )
+    .all(input.projectId, input.taskId, input.sessionId);
+
+  for (const row of rows) {
+    if (row.command_id) {
+      database
+        .query(
+          "UPDATE orchestrator_commands SET status = 'running', claimed_at = COALESCE(claimed_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) WHERE project_id = ? AND id = ? AND status = 'queued'",
+        )
+        .run(input.projectId, row.command_id);
+    }
+  }
+
+  return {
+    ok: true,
+    messages: rows.map((row) => ({
+      id: row.id,
+      body: row.body,
+      commandId: row.command_id,
+      attachments: readAttachmentsFromCommandPayload(row.payload_json),
+    })),
+  };
+}
+
+function reportSteeringDelivery(database: WebSandboxSqliteDatabase, input: ReportSteeringDeliveryInput): ReportSteeringDeliveryResult {
+  const current = readSteeringMessage(database, input.projectId, input.steeringMessageId);
+  if (!current || current.taskId !== input.taskId || current.sessionId !== input.sessionId) {
+    return { ok: false, error: { code: "not_found", message: `steering message not found: ${input.steeringMessageId}` } };
+  }
+
+  if (current.status !== "queued" && current.status !== input.status) {
+    return {
+      ok: false,
+      error: { code: "invalid_state", message: `cannot report ${input.status} steering from ${current.status}` },
+    };
+  }
+
+  return transaction(database, () => {
+    const idempotent = current.status === input.status;
+    const errorMessage = input.status === "failed" ? input.errorMessage?.trim() || "steering delivery failed" : null;
+
+    if (!idempotent) {
+      database
+        .query(
+          "UPDATE steering_messages SET status = ?, error_message = ?, delivered_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ?",
+        )
+        .run(input.status, errorMessage, input.projectId, input.steeringMessageId);
+
+      if (current.commandId) {
+        database
+          .query(
+            "UPDATE orchestrator_commands SET status = ?, error_message = ?, completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ? AND status IN ('queued', 'running')",
+          )
+          .run(input.status === "delivered" ? "succeeded" : "failed", errorMessage, input.projectId, current.commandId);
+      }
+    }
+
+    const eventType = input.status === "delivered" ? "steering.delivered" : "steering.failed";
+    const event = appendEvent(database, {
+      projectId: input.projectId,
+      taskId: input.taskId,
+      sessionId: input.sessionId,
+      commandId: current.commandId,
+      type: idempotent ? `${eventType}.idempotent` : eventType,
+      payload: { steeringMessageId: input.steeringMessageId, errorMessage },
+    });
+    const outbox = enqueueOutbox(database, {
+      projectId: input.projectId,
+      eventId: event.id,
+      routingKey: projectRoutingKey(input.projectId, "events"),
+      payload: { eventId: event.id, steeringMessageId: input.steeringMessageId, type: event.type },
+    });
+    const steering = readSteeringMessage(database, input.projectId, input.steeringMessageId);
+
+    if (!steering) {
+      throw new Error(`reported steering disappeared: ${input.steeringMessageId}`);
+    }
+
+    return { ok: true, steering, event, outbox, idempotent } as const;
+  });
+}
+
+function normalizeSteeringAttachments(
+  projectId: string,
+  attachments: readonly SteeringAttachmentReference[],
+):
+  | { readonly ok: true; readonly attachments: readonly SteeringAttachmentReference[] }
+  | { readonly ok: false; readonly error: { readonly code: "validation_error"; readonly message: string } } {
+  const normalized: SteeringAttachmentReference[] = [];
+
+  for (const attachment of attachments) {
+    const key = attachment.key?.trim();
+    if (!key) {
+      return { ok: false, error: { code: "validation_error", message: "attachment key is required" } };
+    }
+    if (!key.startsWith(`projects/${projectId}/`)) {
+      return { ok: false, error: { code: "validation_error", message: "attachment key is outside project scope" } };
+    }
+
+    normalized.push({
+      key,
+      bucket: attachment.bucket?.trim() || null,
+      fileName: attachment.fileName?.trim() || null,
+      contentType: attachment.contentType?.trim() || null,
+    });
+  }
+
+  return { ok: true, attachments: normalized };
+}
+
+function readAttachmentsFromCommandPayload(payloadJson: string | null): readonly SteeringAttachmentReference[] {
+  if (!payloadJson) return [];
+  const payload = parseJsonObject(payloadJson);
+  const attachments = payload.attachments;
+  if (!Array.isArray(attachments)) return [];
+
+  return attachments.filter(isSteeringAttachmentReference);
+}
+
+function isSteeringAttachmentReference(value: unknown): value is SteeringAttachmentReference {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as { readonly key?: unknown };
+
+  return typeof candidate.key === "string";
+}
+
+function readSteeringMessage(database: WebSandboxSqliteDatabase, projectId: string, steeringMessageId: string): SteeringMessageRecord | null {
+  const row = database
+    .query<
+      {
+        id: string;
+        project_id: string;
+        task_id: string;
+        session_id: string;
+        command_id: string | null;
+        body: string;
+        status: "queued" | "delivered" | "failed" | "canceled";
+        error_message: string | null;
+        created_at: string;
+        delivered_at: string | null;
+      },
+      [string, string]
+    >(
+      "SELECT id, project_id, task_id, session_id, command_id, body, status, error_message, created_at, delivered_at FROM steering_messages WHERE project_id = ? AND id = ?",
+    )
+    .get(projectId, steeringMessageId);
+
+  return row
+    ? {
+        id: row.id,
+        projectId: row.project_id,
+        taskId: row.task_id,
+        sessionId: row.session_id,
+        commandId: row.command_id,
+        body: row.body,
+        status: row.status,
+        errorMessage: row.error_message,
+        createdAt: row.created_at,
+        deliveredAt: row.delivered_at,
+      }
+    : null;
 }
 
 function reportCommandTransition(

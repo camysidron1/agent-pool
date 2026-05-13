@@ -186,6 +186,101 @@ describe("canonical state services", () => {
     }
   });
 
+  test("queues polls and reports steering through canonical state", () => {
+    const database = createMigratedMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      services.createTask({ id: "task_1", projectId: "project_a", title: "First" });
+      const claim = services.claimNextTask({ projectId: "project_a", sessionId: "session_1" });
+      expect(claim).toMatchObject({ ok: true });
+      services.reportStartupSucceeded({ projectId: "project_a", sessionId: "session_1", runtimeSessionId: "runtime_1" });
+
+      const queued = services.requestSteering({
+        id: "steer_1",
+        projectId: "project_a",
+        taskId: "task_1",
+        sessionId: "session_1",
+        body: "Focus on tests",
+        attachments: [{ key: "projects/project_a/task_1/uploads/context.txt", fileName: "context.txt" }],
+        requestedBy: "operator_test",
+      });
+
+      expect(queued).toMatchObject({
+        ok: true,
+        steering: { id: "steer_1", status: "queued", body: "Focus on tests" },
+        command: { type: "steer" },
+        event: { type: "steering.queued" },
+      });
+      const polled = services.pollQueuedSteering({ projectId: "project_a", taskId: "task_1", sessionId: "session_1" });
+      expect(polled).toMatchObject({
+        ok: true,
+        messages: [
+          {
+            id: "steer_1",
+            body: "Focus on tests",
+            attachments: [{ key: "projects/project_a/task_1/uploads/context.txt" }],
+          },
+        ],
+      });
+      expect(
+        database.query<{ status: string }, []>("SELECT status FROM orchestrator_commands WHERE type = 'steer'").get(),
+      ).toEqual({ status: "running" });
+
+      const delivered = services.reportSteeringDelivery({
+        projectId: "project_a",
+        taskId: "task_1",
+        sessionId: "session_1",
+        steeringMessageId: "steer_1",
+        status: "delivered",
+      });
+
+      expect(delivered).toMatchObject({
+        ok: true,
+        steering: { id: "steer_1", status: "delivered" },
+        event: { type: "steering.delivered" },
+      });
+      expect(
+        database.query<{ status: string }, []>("SELECT status FROM orchestrator_commands WHERE type = 'steer'").get(),
+      ).toEqual({ status: "succeeded" });
+    } finally {
+      database.close();
+    }
+  });
+
+  test("rejects steering for inactive sessions and out-of-scope attachments", () => {
+    const database = createMigratedMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      services.createProject({ id: "project_b", slug: "project-b", name: "Project B" });
+      services.createTask({ id: "task_1", projectId: "project_a", title: "First" });
+      services.createSessionAttempt({ id: "session_1", projectId: "project_a", taskId: "task_1", status: "failed" });
+
+      expect(
+        services.requestSteering({
+          projectId: "project_a",
+          taskId: "task_1",
+          sessionId: "session_1",
+          body: "Try this",
+        }),
+      ).toMatchObject({ ok: false, error: { code: "invalid_state" } });
+      expect(
+        services.requestSteering({
+          projectId: "project_a",
+          taskId: "task_1",
+          sessionId: "session_1",
+          body: "Try this",
+          attachments: [{ key: "projects/project_b/task_1/uploads/context.txt" }],
+        }),
+      ).toMatchObject({ ok: false, error: { code: "validation_error" } });
+    } finally {
+      database.close();
+    }
+  });
+
   test("creates immutable session attempts with event/outbox rows", () => {
     const database = createMigratedMemoryDatabase();
 
