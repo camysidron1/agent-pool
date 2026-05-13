@@ -100,12 +100,13 @@ export {
 } from "./worker-loops";
 
 if (isDirectRun()) {
-  const config = loadConfig(readProcessEnv());
+  const env = readProcessEnv();
+  const config = loadConfig(env);
   const queue = createRabbitMqManagementHttpAdapter(config.rabbitmq);
   const backend = createBackendInternalApiClient({ config });
   const capacityLimiter = createCapacityLimiter({ maxConcurrent: 1 });
   const metrics = createOrchestratorMetrics();
-  const workerLoops = createOrchestratorWorkerLoops({ config, queue, backend, capacityLimiter, metrics });
+  const workerLoops = createOrchestratorWorkerLoops({ config, queue, backend, capacityLimiter, metrics, env });
 
   const server = startOrchestratorService({ config, port: config.orchestrator.port, queue, capacityLimiter, metrics, workerLoops });
   workerLoops.start();

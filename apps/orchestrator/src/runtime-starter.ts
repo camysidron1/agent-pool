@@ -1,5 +1,7 @@
 import {
   createRuntimeProvider,
+  type E2BRuntimeClient,
+  type E2BRuntimeProviderConfig,
   type FakeRuntimeProviderOptions,
   type RuntimeBridgeSessionOptions,
   type RuntimeProvider,
@@ -11,6 +13,12 @@ import type { TaskRuntimeStarter, TaskRuntimeStartupRequest, TaskRuntimeStartupR
 export type RuntimeStarterOptions = {
   readonly provider?: RuntimeProvider;
   readonly providerKind?: RuntimeProviderKind;
+  readonly e2b?: {
+    readonly client?: E2BRuntimeClient;
+    readonly config: E2BRuntimeProviderConfig;
+    readonly env?: Readonly<Record<string, string | undefined>>;
+    readonly secretEnvNames?: readonly string[];
+  };
   readonly fake?: FakeRuntimeProviderOptions;
   readonly workspaceRoot?: string;
 };
@@ -18,9 +26,11 @@ export type RuntimeStarterOptions = {
 export function createRuntimeStarter(options: RuntimeStarterOptions = {}): TaskRuntimeStarter {
   const provider =
     options.provider ??
-    (options.providerKind && options.providerKind !== "fake"
-      ? createRuntimeProvider({ kind: options.providerKind })
-      : createRuntimeProvider({ kind: "fake", fake: options.fake }));
+    (options.providerKind === "e2b"
+      ? createRuntimeProvider({ kind: "e2b", e2b: options.e2b })
+      : options.providerKind && options.providerKind !== "fake"
+        ? createRuntimeProvider({ kind: options.providerKind })
+        : createRuntimeProvider({ kind: "fake", fake: options.fake }));
 
   return async (request) => startRuntimeSession(provider, request, options.workspaceRoot);
 }

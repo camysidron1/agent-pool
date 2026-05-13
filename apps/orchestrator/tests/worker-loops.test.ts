@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { loadConfig } from "@agent-pool/config";
 import { createRabbitMqAdapter } from "@agent-pool/queue";
+import type { E2BCommandRunOptions, E2BRuntimeClient, E2BSandboxCreateInput } from "@agent-pool/runtime";
 
 import type { BackendInternalApiClient } from "../src/backend-client";
 import { createCapacityLimiter } from "../src/capacity";
@@ -176,6 +177,99 @@ describe("orchestrator worker loops", () => {
     expect(loops.state.reconcile).toMatchObject({ ticks: 1, failures: 0, inFlight: false });
   });
 
+  test("configures E2B runtime starter from control-plane config without changing backend boundaries", async () => {
+    const env = {
+      AUTH_MODE: "test",
+      RUNTIME_PROVIDER: "e2b",
+      E2B_API_KEY: "e2b-secret",
+      E2B_TEMPLATE_ID: "template-1",
+      E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN",
+      GITHUB_TOKEN: "github-secret",
+    };
+    const config = loadConfig(env);
+    const queue = createRabbitMqAdapter(config.rabbitmq);
+    const backendCalls: Array<{ readonly method: string; readonly input: unknown }> = [];
+    const e2bCalls: E2BClientCall[] = [];
+    const backend = createBackend({
+      claimNextTask: async (input) => {
+        backendCalls.push({ method: "claimNextTask", input });
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            ok: true,
+            claimed: true,
+            task: {
+              id: "compose-smoke-task-1",
+              title: "E2B smoke",
+              runtimeSource: {
+                repositoryUrl: "https://github.com/example/tiny-fixture.git",
+                baseRef: "main",
+                taskBranchPrefix: "agent-pool/task",
+              },
+            },
+            session: {
+              id: "session_e2b",
+              bridge: {
+                projectId: "compose-smoke",
+                taskId: "compose-smoke-task-1",
+                sessionId: "session_e2b",
+                callbackBaseUrl: "http://api.test",
+                sessionToken: {
+                  headerName: "x-agent-pool-session-token",
+                  token: "bridge-token",
+                },
+              },
+            },
+            event: { id: "event_task", projectId: "compose-smoke", type: "task.claimed" },
+            outbox: { id: "outbox_task", projectId: "compose-smoke", eventId: "event_task", routingKey: "project.compose-smoke.control" },
+          },
+        };
+      },
+      reportStartupSucceeded: async (input) => {
+        backendCalls.push({ method: "reportStartupSucceeded", input });
+        return {
+          ok: true,
+          status: 200,
+          body: { ok: true, idempotent: false, session: { id: input.sessionId }, task: { id: "compose-smoke-task-1" }, event: null, outbox: null },
+        };
+      },
+    });
+    const loops = createOrchestratorWorkerLoops({
+      config,
+      queue,
+      backend,
+      env,
+      e2bRuntimeClient: createE2BClient(e2bCalls),
+    });
+
+    queue.publishProjectTaskHint("compose-smoke", { taskId: "compose-smoke-task-1" });
+
+    const task = await loops.tickTask();
+    const createCall = e2bCalls.find((call) => call.kind === "create");
+    const commandCalls = e2bCalls.filter((call) => call.kind === "command");
+
+    expect(task).toMatchObject({
+      processed: 1,
+      acked: 1,
+      claimed: 1,
+      startupsSucceeded: 1,
+      startupsFailed: 0,
+    });
+    expect(backendCalls).toEqual([
+      { method: "claimNextTask", input: { projectId: "compose-smoke", sessionId: undefined, runtimeProvider: "e2b" } },
+      { method: "reportStartupSucceeded", input: { projectId: "compose-smoke", sessionId: "session_e2b", runtimeSessionId: "sandbox_loop" } },
+    ]);
+    expect(createCall?.input.launchSpec.sandbox).toMatchObject({
+      templateId: "template-1",
+      workingDirectory: "/workspace/agent-pool",
+    });
+    expect(createCall?.input.launchSpec.environment.secrets).toEqual({ GITHUB_TOKEN: "github-secret" });
+    expect(JSON.stringify(createCall?.input.redactedLaunchSpec)).not.toContain("github-secret");
+    expect(commandCalls).toHaveLength(4);
+    expect(commandCalls[0]?.options.env).toMatchObject({ GITHUB_TOKEN: "github-secret" });
+  });
+
   test("starts and stops all worker timers with configured cadence", () => {
     const intervals: number[] = [];
     const cleared: unknown[] = [];
@@ -254,6 +348,31 @@ describe("orchestrator worker loops", () => {
     ]);
   });
 });
+
+type E2BClientCall =
+  | { readonly kind: "create"; readonly input: E2BSandboxCreateInput }
+  | {
+      readonly kind: "command";
+      readonly sandboxId: string;
+      readonly command: readonly string[];
+      readonly options: E2BCommandRunOptions;
+    };
+
+function createE2BClient(calls: E2BClientCall[]): E2BRuntimeClient {
+  return {
+    async createSandbox(input) {
+      calls.push({ kind: "create", input });
+      return { sandboxId: "sandbox_loop" };
+    },
+    async runCommand(sandboxId, command, options) {
+      calls.push({ kind: "command", sandboxId, command, options });
+      return { ok: true, exitCode: 0 };
+    },
+    async destroySandbox() {
+      return undefined;
+    },
+  };
+}
 
 function createBackend(overrides: Partial<BackendInternalApiClient> = {}): BackendInternalApiClient {
   return {

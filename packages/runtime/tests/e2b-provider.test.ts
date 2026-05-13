@@ -201,6 +201,24 @@ describe("E2B runtime provider", () => {
     expect(message).not.toContain("github-secret");
   });
 
+  test("redacts bootstrap-only GitHub tokens when they are not projected into the launch spec", async () => {
+    const { client } = createRecordingClient({
+      runCommand: async () => {
+        throw new Error("bootstrap failed with github-secret");
+      },
+    });
+    const provider = createE2BRuntimeProvider({
+      client,
+      config: { ...config, allowedSecretEnvNames: [] },
+      env: { GITHUB_TOKEN: "github-secret" },
+    });
+
+    const message = await rejectedMessage(provider.startSession(request));
+
+    expect(message).toContain("[REDACTED]");
+    expect(message).not.toContain("github-secret");
+  });
+
   test("destroys E2B sandboxes once with the configured cleanup deadline", async () => {
     const { client, calls } = createRecordingClient();
     const provider = createE2BRuntimeProvider({

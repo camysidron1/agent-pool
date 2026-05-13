@@ -1,6 +1,6 @@
 import type { AppConfig } from "@agent-pool/config";
 import type { RabbitMqAdapter } from "@agent-pool/queue";
-import type { FakeRuntimeProviderOptions } from "@agent-pool/runtime";
+import type { E2BCommandRunOptions, E2BCommandResult, E2BDestroySandboxOptions, E2BRuntimeClient, FakeRuntimeProviderOptions } from "@agent-pool/runtime";
 
 import type { BackendInternalApiClient } from "./backend-client";
 import type { CapacityLimiter } from "./capacity";
@@ -53,6 +53,8 @@ export type OrchestratorWorkerLoopsOptions = {
   readonly scheduler?: OrchestratorWorkerLoopScheduler;
   readonly clock?: ReconciliationClock;
   readonly fetch?: typeof fetch;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly e2bRuntimeClient?: E2BRuntimeClient;
   readonly fakeRuntime?: FakeRuntimeProviderOptions;
   readonly onError?: (loop: "task" | "control" | "reconcile", error: unknown) => void;
 };
@@ -135,6 +137,19 @@ export function createOrchestratorWorkerLoops(options: OrchestratorWorkerLoopsOp
 }
 
 function createConfiguredRuntimeStarter(options: OrchestratorWorkerLoopsOptions): TaskRuntimeStarter {
+  if (options.config.controlPlane.runtimeProvider === "e2b") {
+    const e2b = options.config.controlPlane.e2b;
+    return createRuntimeStarter({
+      providerKind: "e2b",
+      e2b: {
+        client: options.e2bRuntimeClient ?? createUnavailableE2BClient(),
+        config: e2b,
+        env: options.env ?? readProcessEnv(),
+        secretEnvNames: e2b.allowedSecretEnvNames,
+      },
+    });
+  }
+
   if (options.config.controlPlane.runtimeProvider !== "fake") {
     return createRuntimeStarter({ providerKind: options.config.controlPlane.runtimeProvider });
   }
@@ -147,6 +162,34 @@ function createConfiguredRuntimeStarter(options: OrchestratorWorkerLoopsOptions)
       fetch: options.fakeRuntime?.fetch ?? options.fetch ?? fetch,
     },
   });
+}
+
+function createUnavailableE2BClient(): E2BRuntimeClient {
+  return {
+    async createSandbox(): Promise<never> {
+      throw new Error("e2b runtime client is not configured for this orchestrator process");
+    },
+    async runCommand(
+      _sandboxId: string,
+      _command: readonly string[],
+      _options: E2BCommandRunOptions,
+    ): Promise<E2BCommandResult> {
+      throw new Error("e2b runtime client is not configured for this orchestrator process");
+    },
+    async destroySandbox(_sandboxId: string, _options?: E2BDestroySandboxOptions): Promise<void> {
+      throw new Error("e2b runtime client is not configured for this orchestrator process");
+    },
+  };
+}
+
+function readProcessEnv(): Readonly<Record<string, string | undefined>> {
+  const processLike = globalThis as typeof globalThis & {
+    process?: {
+      env?: Readonly<Record<string, string | undefined>>;
+    };
+  };
+
+  return processLike.process?.env ?? {};
 }
 
 function createWorkerLoop<TResult>(options: {

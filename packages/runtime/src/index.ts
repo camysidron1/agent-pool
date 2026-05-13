@@ -540,11 +540,12 @@ async function startE2BSession(
       githubTokenEnvName: config.githubTokenEnvName,
       githubTokenConfigured: config.githubTokenConfigured,
     });
+    const bootstrapSecretEnv = pickSecretEnvironment(options.env ?? {}, bootstrapPlan.environment.secretEnvNames);
     const bootstrapEnv = {
       ...bootstrapPlan.environment.variables,
-      ...pickSecretEnvironment(options.env ?? {}, bootstrapPlan.environment.secretEnvNames),
+      ...bootstrapSecretEnv,
     };
-    secretValues = collectE2BSecretValues(launchSpec, bridgeStartup.env, options);
+    secretValues = collectE2BSecretValues(launchSpec, bridgeStartup.env, options, bootstrapSecretEnv);
 
     const sandbox = await client.createSandbox({ launchSpec, redactedLaunchSpec });
     sandboxId = normalizeE2BSandboxId(sandbox.sandboxId);
@@ -688,9 +689,11 @@ function collectE2BSecretValues(
   spec: E2BLaunchSpec,
   bridgeEnv: SandboxBridgeStartupCommand["env"],
   options: E2BRuntimeProviderOptions,
+  bootstrapSecretEnv: Readonly<Record<string, string>>,
 ): readonly string[] {
   return [
     ...collectOptionSecretValues(options),
+    ...Object.values(bootstrapSecretEnv),
     ...Object.values(spec.environment.secrets),
     spec.bridge.sessionToken.token,
     bridgeEnv.AGENT_POOL_BRIDGE_SESSION_TOKEN,
