@@ -3,10 +3,12 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, normalize, relative } from "node:path";
 
 import {
+  buildSandboxBridgeStartupCommand,
   createBridgeRunner,
   type BridgeLogStreamKind,
   type BridgeRunnerRunOnceResult,
   type BridgeScheduler,
+  type SandboxBridgeStartupCommand,
 } from "@agent-pool/session-bridge";
 
 export type RuntimeProviderKind = "fake" | "e2b" | "docker";
@@ -145,6 +147,12 @@ export type GitHubBootstrapPlan = {
   readonly environment: {
     readonly variables: Readonly<Record<string, string>>;
     readonly secretEnvNames: readonly string[];
+  };
+};
+
+export type SandboxBridgeStartupPlan = SandboxBridgeStartupCommand & {
+  readonly redactedEnv: Omit<SandboxBridgeStartupCommand["env"], "AGENT_POOL_BRIDGE_SESSION_TOKEN"> & {
+    readonly AGENT_POOL_BRIDGE_SESSION_TOKEN: "[REDACTED]";
   };
 };
 
@@ -467,6 +475,21 @@ export function buildGitHubBootstrapPlan(input: {
         AGENT_POOL_GITHUB_TOKEN_ENV: githubTokenEnvName,
       },
       secretEnvNames: [githubTokenEnvName],
+    },
+  };
+}
+
+export function buildSandboxBridgeStartupPlan(spec: E2BLaunchSpec): SandboxBridgeStartupPlan {
+  const startup = buildSandboxBridgeStartupCommand({
+    session: spec.bridge,
+    workspaceRoot: spec.sandbox.workingDirectory,
+  });
+
+  return {
+    ...startup,
+    redactedEnv: {
+      ...startup.env,
+      AGENT_POOL_BRIDGE_SESSION_TOKEN: "[REDACTED]",
     },
   };
 }

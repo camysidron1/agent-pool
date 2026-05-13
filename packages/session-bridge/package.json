@@ -7,6 +7,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./sandbox-entry": {
+      "types": "./src/sandbox-entry.ts",
+      "default": "./src/sandbox-entry.ts"
     }
   },
   "scripts": {

@@ -213,6 +213,15 @@ export {
   type BridgeRunnerRunOnceResult,
 } from "./runner";
 export {
+  SANDBOX_BRIDGE_ENTRYPOINT,
+  bridgeSessionFromSandboxEnv,
+  buildSandboxBridgeStartupCommand,
+  createSandboxBridgeStartupEnv,
+  redactSandboxBridgeStartupEnv,
+  type SandboxBridgeStartupCommand,
+  type SandboxBridgeStartupEnv,
+} from "./sandbox-startup";
+export {
   createBridgeSteeringPoller,
   type BridgeSteeringPoller,
   type BridgeSteeringPollerOptions,

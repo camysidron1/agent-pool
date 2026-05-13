@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
-import { buildE2BLaunchSpec, redactE2BLaunchSpec, type E2BRuntimeProviderConfig, type RuntimeBridgeSessionOptions } from "../src";
+import {
+  buildE2BLaunchSpec,
+  buildSandboxBridgeStartupPlan,
+  redactE2BLaunchSpec,
+  type E2BRuntimeProviderConfig,
+  type RuntimeBridgeSessionOptions,
+} from "../src";
 
 const bridge: RuntimeBridgeSessionOptions = {
   projectId: "project_a",
@@ -97,6 +103,32 @@ describe("E2B launch spec", () => {
     expect(redacted.environment.secrets).toEqual({ GITHUB_TOKEN: "[REDACTED]" });
     expect(JSON.stringify(redacted)).not.toContain("github-secret");
     expect(JSON.stringify(redacted)).not.toContain("session-secret");
+  });
+
+  test("builds sandbox bridge startup command without token arguments", () => {
+    const spec = buildE2BLaunchSpec(
+      {
+        projectId: "project_a",
+        taskId: "task_1",
+        bridge,
+      },
+      { config },
+    );
+    const startup = buildSandboxBridgeStartupPlan(spec);
+
+    expect(startup.command).toEqual(["bun", "run", "node_modules/@agent-pool/session-bridge/src/sandbox-entry.ts"]);
+    expect(startup.env).toMatchObject({
+      AGENT_POOL_PROJECT_ID: "project_a",
+      AGENT_POOL_TASK_ID: "task_1",
+      AGENT_POOL_SESSION_ID: "session_1",
+      AGENT_POOL_BRIDGE_CALLBACK_BASE_URL: "https://api.internal.test",
+      AGENT_POOL_BRIDGE_SESSION_TOKEN_HEADER: "x-agent-pool-session-token",
+      AGENT_POOL_BRIDGE_SESSION_TOKEN: "session-secret",
+      AGENT_POOL_WORKSPACE_ROOT: "/workspace/agent-pool",
+    });
+    expect(startup.redactedEnv.AGENT_POOL_BRIDGE_SESSION_TOKEN).toBe("[REDACTED]");
+    expect(JSON.stringify(startup.command)).not.toContain("session-secret");
+    expect(JSON.stringify(startup.redactedEnv)).not.toContain("session-secret");
   });
 
   test("rejects invalid launch specs before provider calls", () => {
