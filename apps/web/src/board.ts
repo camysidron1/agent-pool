@@ -23,6 +23,15 @@ export type PriorityOption = {
   readonly label: string;
 };
 
+export type TaskResultSummary = {
+  readonly kind: "completed" | "blocked" | "none";
+  readonly title: string;
+  readonly body: string;
+  readonly finalResponseUrls: readonly string[];
+  readonly latestLogSummary: string | null;
+  readonly commandStates: readonly string[];
+};
+
 export const PRIORITY_OPTIONS: readonly PriorityOption[] = [
   { value: 100, label: "Urgent" },
   { value: 50, label: "High" },
@@ -184,6 +193,71 @@ export function selectActiveSession(task: PublicTaskDetail): PublicSessionSummar
 export function summarizeLogStream(logStream: PublicLogStreamSummary): string {
   const lineLabel = logStream.lineCount === 1 ? "line" : "lines";
   return `${logStream.kind} · ${logStream.lineCount} ${lineLabel} · offset ${logStream.byteOffset}`;
+}
+
+export function getTaskResultSummary(task: PublicTaskDetail): TaskResultSummary {
+  const finalResponseUrls = task.artifacts.filter((artifact) => artifact.kind === "final_response_url").map((artifact) => artifact.uri);
+  const latestLog = task.logStreams.at(-1) ?? null;
+  const latestLogSummary = latestLog ? summarizeLogStream(latestLog) : null;
+
+  if (task.status === "completed") {
+    return {
+      kind: "completed",
+      title: "Completed",
+      body: finalResponseUrls.length > 0 ? "Final response artifacts are available." : "Task completed without a final response artifact.",
+      finalResponseUrls,
+      latestLogSummary,
+      commandStates: task.pendingCommands.map(formatCommandState),
+    };
+  }
+
+  if (task.status === "blocked" || task.status === "failed") {
+    return {
+      kind: "blocked",
+      title: task.status === "failed" ? "Failed" : "Blocked",
+      body: readBlockingReason(task) ?? "Task requires operator attention.",
+      finalResponseUrls,
+      latestLogSummary,
+      commandStates: readRecoveryCommandStates(task),
+    };
+  }
+
+  return {
+    kind: "none",
+    title: "No result yet",
+    body: "Result summary is available when a task completes or needs attention.",
+    finalResponseUrls,
+    latestLogSummary,
+    commandStates: task.pendingCommands.map(formatCommandState),
+  };
+}
+
+function readBlockingReason(task: PublicTaskDetail): string | null {
+  const event = [...task.events]
+    .reverse()
+    .find((candidate) => candidate.type.includes("failed") || candidate.type.includes("blocked") || candidate.type.includes("lost"));
+  if (!event) return null;
+
+  return readPayloadString(event.payload, "reason") ?? readPayloadString(event.payload, "message") ?? readPayloadString(event.payload, "error");
+}
+
+function readRecoveryCommandStates(task: PublicTaskDetail): readonly string[] {
+  const pending = task.pendingCommands.map(formatCommandState);
+  if (pending.length > 0) return pending;
+
+  if (task.status === "blocked") return ["Cancel available", "Retry unavailable"];
+  if (task.status === "failed") return ["Retry available", "Cancel unavailable"];
+
+  return [];
+}
+
+function formatCommandState(command: { readonly type: string; readonly status: string }): string {
+  return `${command.type}: ${command.status}`;
+}
+
+function readPayloadString(payload: Readonly<Record<string, unknown>>, key: string): string | null {
+  const value = payload[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function normalizeProjectId(value: string | null): string | null {

@@ -24,6 +24,7 @@ import {
   BOARD_COLUMNS,
   findTask,
   getPriorityLabel,
+  getTaskResultSummary,
   getSupportedMoveAction,
   groupTasksByColumn,
   PRIORITY_OPTIONS,
@@ -148,6 +149,10 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
       try {
         const response = await api.listTasks(selectedProjectId);
         if (!cancelled) setTasks(response.tasks);
+        if (selectedTaskId) {
+          const detailResponse = await api.readTask(selectedProjectId, selectedTaskId);
+          if (!cancelled) setTaskDetail(detailResponse.task);
+        }
       } catch (error) {
         if (!cancelled) setTaskMutationError(formatApiError(error));
       }
@@ -172,7 +177,7 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
       cancelled = true;
       unsubscribe();
     };
-  }, [api, apiBaseUrl, operatorId, selectedProjectId]);
+  }, [api, apiBaseUrl, operatorId, selectedProjectId, selectedTaskId]);
 
   useEffect(() => {
     if (!api || !selectedProjectId || !selectedTaskId) {
@@ -547,6 +552,7 @@ function TaskPanel({
   readonly onClose: () => void;
 }) {
   const activeSession = detail ? selectActiveSession(detail) : null;
+  const resultSummary = detail ? getTaskResultSummary(detail) : null;
 
   return (
     <aside className="task-panel" aria-label="Task detail">
@@ -619,6 +625,32 @@ function TaskPanel({
               </ul>
             )}
           </section>
+
+          {resultSummary && resultSummary.kind !== "none" ? (
+            <section className={`panel-section result-summary result-summary-${resultSummary.kind}`} aria-label="Result summary">
+              <h3>{resultSummary.title}</h3>
+              <p>{resultSummary.body}</p>
+              {resultSummary.finalResponseUrls.length > 0 ? (
+                <ul className="artifact-list">
+                  {resultSummary.finalResponseUrls.map((url) => (
+                    <li key={url}>
+                      <a href={url} target="_blank" rel="noreferrer">
+                        {url}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              {resultSummary.latestLogSummary ? <p>{resultSummary.latestLogSummary}</p> : null}
+              {resultSummary.commandStates.length > 0 ? (
+                <ul className="command-state-list">
+                  {resultSummary.commandStates.map((commandState) => (
+                    <li key={commandState}>{commandState}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </section>
+          ) : null}
 
           <section className="panel-section" aria-label="Steering">
             <h3>Steering</h3>

@@ -5,6 +5,7 @@ import {
   applyTaskPriority,
   chooseSelectedProjectId,
   getPriorityLabel,
+  getTaskResultSummary,
   getSupportedMoveAction,
   getTaskColumnId,
   groupTasksByColumn,
@@ -130,6 +131,64 @@ describe("web board state", () => {
     expect(selectActiveSession(detail)?.id).toBe("session-active");
     expect(summarizeLogStream(detail.logStreams[0])).toBe("stdout · 2 lines · offset 128");
   });
+
+  test("summarizes completed final response artifacts", () => {
+    const summary = getTaskResultSummary({
+      ...detailTask("completed"),
+      artifacts: [
+        {
+          id: "artifact-a",
+          projectId: "project-a",
+          taskId: "task-a",
+          sessionId: "session-a",
+          kind: "final_response_url",
+          uri: "https://example.test/result",
+          title: "Final response URL",
+          metadata: {},
+          createdAt: "2026-05-13T00:00:00.000Z",
+        },
+      ],
+    });
+
+    expect(summary.kind).toBe("completed");
+    expect(summary.finalResponseUrls).toEqual(["https://example.test/result"]);
+  });
+
+  test("summarizes blocked reason latest log and recovery command state", () => {
+    const summary = getTaskResultSummary({
+      ...detailTask("blocked"),
+      events: [
+        {
+          id: "event-a",
+          projectId: "project-a",
+          taskId: "task-a",
+          sessionId: "session-a",
+          commandId: null,
+          type: "session.startup.failed",
+          payload: { reason: "startup failed" },
+          createdAt: "2026-05-13T00:00:00.000Z",
+        },
+      ],
+      logStreams: [
+        {
+          id: "log-a",
+          projectId: "project-a",
+          taskId: "task-a",
+          sessionId: "session-a",
+          kind: "stderr",
+          byteOffset: 256,
+          lineCount: 1,
+          createdAt: "2026-05-13T00:00:00.000Z",
+          updatedAt: "2026-05-13T00:01:00.000Z",
+        },
+      ],
+    });
+
+    expect(summary.kind).toBe("blocked");
+    expect(summary.body).toBe("startup failed");
+    expect(summary.latestLogSummary).toBe("stderr · 1 line · offset 256");
+    expect(summary.commandStates).toEqual(["Cancel available", "Retry unavailable"]);
+  });
 });
 
 function project(id: string): PublicProjectSummary {
@@ -185,6 +244,16 @@ function session(id: string, status: string, attemptNumber: number) {
     heartbeatStatus: "unknown",
     staleAt: null,
     lostAt: null,
+  };
+}
+
+function detailTask(status: PublicTaskSummary["status"]) {
+  return {
+    ...task("task-a", 0, 1, "A task", status),
+    sessions: [session("session-a", status === "completed" ? "succeeded" : "failed", 1)],
+    artifacts: [],
+    events: [],
+    logStreams: [],
   };
 }
 

@@ -195,6 +195,16 @@ export function createPublicApiClient(options: PublicApiClientOptions) {
         `/projects/${encodePath(projectId)}/tasks/${encodePath(taskId)}/unblock`,
         { method: "POST" },
       ),
+    cancelTask: (projectId: string, taskId: string) =>
+      request<PublicApiSuccess<{ readonly task: PublicTaskSummary | null; readonly pendingCommands: readonly PublicCommandSummary[] }>>(
+        `/projects/${encodePath(projectId)}/tasks/${encodePath(taskId)}/cancel`,
+        { method: "POST" },
+      ),
+    retryTask: (projectId: string, taskId: string) =>
+      request<PublicApiSuccess<{ readonly task: PublicTaskSummary | null; readonly pendingCommands: readonly PublicCommandSummary[] }>>(
+        `/projects/${encodePath(projectId)}/tasks/${encodePath(taskId)}/retry`,
+        { method: "POST" },
+      ),
   };
 }
 
