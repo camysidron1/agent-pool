@@ -10,6 +10,7 @@
   "scripts": {
     "typecheck": "bunx --package typescript tsc -p tsconfig.json --noEmit --pretty false",
     "test": "bun test apps packages",
+    "test:browser": "bun apps/web/tests/browser-smoke.ts",
     "smoke:compose": "bun run deploy/compose/smoke-compose.ts",
     "smoke:e2b": "bun run deploy/compose/e2b-smoke.ts"
   }

@@ -22,6 +22,7 @@ docs/
 
 # JavaScript dependencies
 node_modules/
+apps/web/dist/
 
 # Task-finished marker files
 .task-finished-*
