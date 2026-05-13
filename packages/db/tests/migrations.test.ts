@@ -16,6 +16,7 @@ import {
   SESSION_HEARTBEAT_SCHEMA_MIGRATION_ID,
   SESSION_SCHEMA_MIGRATION_ID,
   STORAGE_LOG_SCHEMA_MIGRATION_ID,
+  TASK_PRIORITY_SCHEMA_MIGRATION_ID,
   TASK_RUNTIME_SOURCE_SCHEMA_MIGRATION_ID,
   createDrizzleDatabase,
   createWebSandboxDatabaseConfig,
@@ -78,6 +79,10 @@ describe("web/sandbox database migration harness", () => {
           id: TASK_RUNTIME_SOURCE_SCHEMA_MIGRATION_ID,
           description: "Add task runtime source metadata field",
         },
+        {
+          id: TASK_PRIORITY_SCHEMA_MIGRATION_ID,
+          description: "Add task priority ordering field",
+        },
       ]);
 
       const database = new Database(dbPath, { readonly: true, strict: true });
@@ -112,6 +117,7 @@ describe("web/sandbox database migration harness", () => {
         SESSION_HEARTBEAT_SCHEMA_MIGRATION_ID,
         BRIDGE_SESSION_CALLBACK_SCHEMA_MIGRATION_ID,
         TASK_RUNTIME_SOURCE_SCHEMA_MIGRATION_ID,
+        TASK_PRIORITY_SCHEMA_MIGRATION_ID,
       ]);
       expect(second.applied).toEqual([]);
     } finally {

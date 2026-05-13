@@ -47,6 +47,7 @@ export const FINAL_RESPONSE_SCHEMA_MIGRATION_ID = "0007_final_response_schema" a
 export const SESSION_HEARTBEAT_SCHEMA_MIGRATION_ID = "0008_session_heartbeat_schema" as const;
 export const BRIDGE_SESSION_CALLBACK_SCHEMA_MIGRATION_ID = "0009_bridge_session_callback_schema" as const;
 export const TASK_RUNTIME_SOURCE_SCHEMA_MIGRATION_ID = "0010_task_runtime_source_schema" as const;
+export const TASK_PRIORITY_SCHEMA_MIGRATION_ID = "0011_task_priority_schema" as const;
 
 export const WEB_SANDBOX_MIGRATIONS: readonly SqlMigration[] = [
   {
@@ -345,6 +346,14 @@ export const WEB_SANDBOX_MIGRATIONS: readonly SqlMigration[] = [
     id: TASK_RUNTIME_SOURCE_SCHEMA_MIGRATION_ID,
     description: "Add task runtime source metadata field",
     sql: ["ALTER TABLE tasks ADD COLUMN runtime_source_json TEXT"],
+  },
+  {
+    id: TASK_PRIORITY_SCHEMA_MIGRATION_ID,
+    description: "Add task priority ordering field",
+    sql: [
+      "ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
+      "CREATE INDEX IF NOT EXISTS tasks_project_priority_idx ON tasks (project_id, status, priority, display_id)",
+    ],
   },
 ] as const;
 

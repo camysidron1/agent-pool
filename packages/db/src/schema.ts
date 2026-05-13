@@ -77,6 +77,7 @@ export const tasks = sqliteTable(
     description: text("description"),
     runtimeSourceJson: text("runtime_source_json"),
     status: text("status", { enum: taskStatusValues }).notNull().default("queued"),
+    priority: integer("priority").notNull().default(0),
     createdAt: text("created_at").notNull().default(timestampNow),
     updatedAt: text("updated_at").notNull().default(timestampNow),
   },
@@ -84,6 +85,7 @@ export const tasks = sqliteTable(
     uniqueIndex("tasks_project_display_id_unique").on(table.projectId, table.displayId),
     uniqueIndex("tasks_project_id_unique").on(table.projectId, table.id),
     index("tasks_project_status_idx").on(table.projectId, table.status),
+    index("tasks_project_priority_idx").on(table.projectId, table.status, table.priority, table.displayId),
   ],
 );
 

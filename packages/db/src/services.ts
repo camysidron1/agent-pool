@@ -18,6 +18,7 @@ export type CreateTaskInput = {
   readonly title: string;
   readonly description?: string | null;
   readonly runtimeSource?: TaskRuntimeSourceMetadata | null;
+  readonly priority?: number | null;
 };
 
 export type TaskRuntimeSourceMetadata = {
@@ -55,8 +56,119 @@ export type TaskRecord = {
   readonly projectId: string;
   readonly displayId: number;
   readonly title: string;
+  readonly priority: number;
   readonly runtimeSource: TaskRuntimeSourceMetadata | null;
 };
+
+export type PublicProjectSummary = {
+  readonly id: string;
+  readonly slug: string;
+  readonly name: string;
+  readonly description: string | null;
+  readonly status: string;
+  readonly taskCounts: Readonly<Record<"queued" | "running" | "blocked" | "completed" | "failed", number>>;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
+export type PublicTaskSummary = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly displayId: number;
+  readonly title: string;
+  readonly description: string | null;
+  readonly status: string;
+  readonly priority: number;
+  readonly runtimeSource: TaskRuntimeSourceMetadata | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly latestSession: PublicSessionSummary | null;
+  readonly pendingCommands: readonly PublicCommandSummary[];
+};
+
+export type PublicSessionSummary = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly attemptNumber: number;
+  readonly status: string;
+  readonly runtimeProvider: string | null;
+  readonly runtimeSessionId: string | null;
+  readonly createdAt: string;
+  readonly startedAt: string | null;
+  readonly endedAt: string | null;
+  readonly finalResponseRecordedAt: string | null;
+  readonly lastHeartbeatAt: string | null;
+  readonly heartbeatStatus: string;
+  readonly staleAt: string | null;
+  readonly lostAt: string | null;
+};
+
+export type PublicCommandSummary = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string | null;
+  readonly sessionId: string | null;
+  readonly type: CommandType;
+  readonly status: string;
+  readonly payload: Readonly<Record<string, unknown>>;
+  readonly errorMessage: string | null;
+  readonly requestedBy: string | null;
+  readonly createdAt: string;
+  readonly claimedAt: string | null;
+  readonly completedAt: string | null;
+};
+
+export type PublicArtifactSummary = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string | null;
+  readonly sessionId: string | null;
+  readonly kind: string;
+  readonly uri: string;
+  readonly title: string | null;
+  readonly metadata: Readonly<Record<string, unknown>>;
+  readonly createdAt: string;
+};
+
+export type PublicEventSummary = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string | null;
+  readonly sessionId: string | null;
+  readonly commandId: string | null;
+  readonly type: string;
+  readonly payload: Readonly<Record<string, unknown>>;
+  readonly createdAt: string;
+};
+
+export type PublicLogStreamSummary = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string | null;
+  readonly sessionId: string | null;
+  readonly kind: string;
+  readonly byteOffset: number;
+  readonly lineCount: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
+export type PublicTaskDetail = PublicTaskSummary & {
+  readonly sessions: readonly PublicSessionSummary[];
+  readonly artifacts: readonly PublicArtifactSummary[];
+  readonly events: readonly PublicEventSummary[];
+  readonly logStreams: readonly PublicLogStreamSummary[];
+};
+
+export type ReadTaskDetailInput = {
+  readonly projectId: string;
+  readonly taskId: string;
+};
+
+export type ReadTaskDetailResult =
+  | { readonly ok: true; readonly task: PublicTaskDetail }
+  | { readonly ok: false; readonly error: { readonly code: "not_found"; readonly message: string } };
 
 export type EventRecord = {
   readonly id: string;
@@ -409,15 +521,33 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
       return { id, slug: input.slug, name: input.name };
     },
 
+    listProjects(): readonly PublicProjectSummary[] {
+      return listPublicProjects(database);
+    },
+
+    listProjectTasks(input: { readonly projectId: string }): readonly PublicTaskSummary[] {
+      return listPublicTaskSummaries(database, input.projectId);
+    },
+
+    readTaskDetail(input: ReadTaskDetailInput): ReadTaskDetailResult {
+      const task = readPublicTaskDetail(database, input.projectId, input.taskId);
+      if (!task) {
+        return { ok: false, error: { code: "not_found", message: `task not found: ${input.taskId}` } };
+      }
+
+      return { ok: true, task };
+    },
+
     createTask(input: CreateTaskInput): { readonly task: TaskRecord; readonly event: EventRecord; readonly outbox: OutboxRecord } {
       return transaction(database, () => {
         const taskId = input.id ?? createId("task");
         const displayId = allocateTaskDisplayId(database, input.projectId);
 
         const runtimeSource = sanitizeTaskRuntimeSource(input.runtimeSource);
+        const priority = normalizeTaskPriority(input.priority);
 
         database
-          .query("INSERT INTO tasks (id, project_id, display_id, title, description, runtime_source_json) VALUES (?, ?, ?, ?, ?, ?)")
+          .query("INSERT INTO tasks (id, project_id, display_id, title, description, runtime_source_json, priority) VALUES (?, ?, ?, ?, ?, ?, ?)")
           .run(
             taskId,
             input.projectId,
@@ -425,13 +555,14 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
             input.title,
             input.description ?? null,
             runtimeSource ? JSON.stringify(runtimeSource) : null,
+            priority,
           );
 
         const event = appendEvent(database, {
           projectId: input.projectId,
           taskId,
           type: "task.created",
-          payload: { taskId, displayId, title: input.title, runtimeSource },
+          payload: { taskId, displayId, title: input.title, runtimeSource, priority },
         });
         const outbox = enqueueOutbox(database, {
           projectId: input.projectId,
@@ -441,11 +572,38 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
         });
 
         return {
-          task: { id: taskId, projectId: input.projectId, displayId, title: input.title, runtimeSource },
+          task: { id: taskId, projectId: input.projectId, displayId, title: input.title, priority, runtimeSource },
           event,
           outbox,
         };
       });
+    },
+
+    updateTaskPriority(input: { readonly projectId: string; readonly taskId: string; readonly priority: number }): ReadTaskDetailResult {
+      const priority = normalizeTaskPriority(input.priority);
+      const updated = database
+        .query<{ id: string }, [number, string, string]>(
+          "UPDATE tasks SET priority = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ? RETURNING id",
+        )
+        .get(priority, input.projectId, input.taskId);
+
+      if (!updated) {
+        return { ok: false, error: { code: "not_found", message: `task not found: ${input.taskId}` } };
+      }
+
+      appendEvent(database, {
+        projectId: input.projectId,
+        taskId: input.taskId,
+        type: "task.priority_updated",
+        payload: { taskId: input.taskId, priority },
+      });
+
+      const task = readPublicTaskDetail(database, input.projectId, input.taskId);
+      if (!task) {
+        return { ok: false, error: { code: "not_found", message: `task not found: ${input.taskId}` } };
+      }
+
+      return { ok: true, task };
     },
 
     appendEvent(input: AppendEventInput): EventRecord {
@@ -543,6 +701,7 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
             projectId: task.project_id,
             displayId: task.display_id,
             title: task.title,
+            priority: task.priority,
             runtimeSource: readRuntimeSourceJson(task.runtime_source_json),
             status: "running",
           },
@@ -2006,6 +2165,375 @@ function commandReportRecord(
   };
 }
 
+type PublicProjectRow = {
+  readonly id: string;
+  readonly slug: string;
+  readonly name: string;
+  readonly description: string | null;
+  readonly status: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+};
+
+type PublicTaskRow = {
+  readonly id: string;
+  readonly project_id: string;
+  readonly display_id: number;
+  readonly title: string;
+  readonly description: string | null;
+  readonly status: string;
+  readonly priority: number;
+  readonly runtime_source_json: string | null;
+  readonly created_at: string;
+  readonly updated_at: string;
+};
+
+type PublicSessionRow = {
+  readonly id: string;
+  readonly project_id: string;
+  readonly task_id: string;
+  readonly attempt_number: number;
+  readonly status: string;
+  readonly runtime_provider: string | null;
+  readonly runtime_session_id: string | null;
+  readonly created_at: string;
+  readonly started_at: string | null;
+  readonly ended_at: string | null;
+  readonly final_response_recorded_at: string | null;
+  readonly last_heartbeat_at: string | null;
+  readonly heartbeat_status: string;
+  readonly stale_at: string | null;
+  readonly lost_at: string | null;
+};
+
+type PublicCommandRow = {
+  readonly id: string;
+  readonly project_id: string;
+  readonly task_id: string | null;
+  readonly session_id: string | null;
+  readonly type: CommandType;
+  readonly status: string;
+  readonly payload_json: string;
+  readonly error_message: string | null;
+  readonly requested_by: string | null;
+  readonly created_at: string;
+  readonly claimed_at: string | null;
+  readonly completed_at: string | null;
+};
+
+type PublicArtifactRow = {
+  readonly id: string;
+  readonly project_id: string;
+  readonly task_id: string | null;
+  readonly session_id: string | null;
+  readonly kind: string;
+  readonly uri: string;
+  readonly title: string | null;
+  readonly metadata_json: string;
+  readonly created_at: string;
+};
+
+type PublicEventRow = {
+  readonly id: string;
+  readonly project_id: string;
+  readonly task_id: string | null;
+  readonly session_id: string | null;
+  readonly command_id: string | null;
+  readonly type: string;
+  readonly payload_json: string;
+  readonly created_at: string;
+};
+
+type PublicLogStreamRow = {
+  readonly id: string;
+  readonly project_id: string;
+  readonly task_id: string | null;
+  readonly session_id: string | null;
+  readonly kind: string;
+  readonly byte_offset: number;
+  readonly line_count: number;
+  readonly created_at: string;
+  readonly updated_at: string;
+};
+
+function listPublicProjects(database: WebSandboxSqliteDatabase): readonly PublicProjectSummary[] {
+  const rows = database
+    .query<PublicProjectRow, []>(
+      "SELECT id, slug, name, description, status, created_at, updated_at FROM projects ORDER BY created_at ASC, id ASC",
+    )
+    .all();
+  const countRows = database
+    .query<{ project_id: string; status: "queued" | "running" | "blocked" | "completed" | "failed"; count: number }, []>(
+      "SELECT project_id, status, COUNT(*) AS count FROM tasks GROUP BY project_id, status",
+    )
+    .all();
+  const countsByProject = new Map<string, Record<"queued" | "running" | "blocked" | "completed" | "failed", number>>();
+
+  for (const countRow of countRows) {
+    const counts = countsByProject.get(countRow.project_id) ?? emptyTaskCounts();
+    counts[countRow.status] = countRow.count;
+    countsByProject.set(countRow.project_id, counts);
+  }
+
+  return rows.map((row) => ({
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    description: row.description,
+    status: row.status,
+    taskCounts: countsByProject.get(row.id) ?? emptyTaskCounts(),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+}
+
+function listPublicTaskSummaries(database: WebSandboxSqliteDatabase, projectId: string): readonly PublicTaskSummary[] {
+  return database
+    .query<PublicTaskRow, [string]>(
+      `
+        SELECT id, project_id, display_id, title, description, status, priority, runtime_source_json, created_at, updated_at
+        FROM tasks
+        WHERE project_id = ?
+        ORDER BY priority DESC, display_id ASC, created_at ASC, id ASC
+      `,
+    )
+    .all(projectId)
+    .map((row) => publicTaskSummary(database, row));
+}
+
+function readPublicTaskDetail(database: WebSandboxSqliteDatabase, projectId: string, taskId: string): PublicTaskDetail | null {
+  const row = database
+    .query<PublicTaskRow, [string, string]>(
+      `
+        SELECT id, project_id, display_id, title, description, status, priority, runtime_source_json, created_at, updated_at
+        FROM tasks
+        WHERE project_id = ? AND id = ?
+      `,
+    )
+    .get(projectId, taskId);
+
+  if (!row) return null;
+
+  return {
+    ...publicTaskSummary(database, row),
+    sessions: listPublicSessionsForTask(database, projectId, taskId),
+    artifacts: listPublicArtifactsForTask(database, projectId, taskId),
+    events: listPublicEventsForTask(database, projectId, taskId),
+    logStreams: listPublicLogStreamsForTask(database, projectId, taskId),
+  };
+}
+
+function publicTaskSummary(database: WebSandboxSqliteDatabase, row: PublicTaskRow): PublicTaskSummary {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    displayId: row.display_id,
+    title: row.title,
+    description: row.description,
+    status: row.status,
+    priority: row.priority,
+    runtimeSource: readRuntimeSourceJson(row.runtime_source_json),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    latestSession: readLatestPublicSessionForTask(database, row.project_id, row.id),
+    pendingCommands: listPendingPublicCommandsForTask(database, row.project_id, row.id),
+  };
+}
+
+function readLatestPublicSessionForTask(database: WebSandboxSqliteDatabase, projectId: string, taskId: string): PublicSessionSummary | null {
+  const row = database
+    .query<PublicSessionRow, [string, string]>(
+      `
+        SELECT id, project_id, task_id, attempt_number, status, runtime_provider, runtime_session_id, created_at, started_at, ended_at,
+          final_response_recorded_at, last_heartbeat_at, heartbeat_status, stale_at, lost_at
+        FROM sessions
+        WHERE project_id = ? AND task_id = ?
+        ORDER BY attempt_number DESC, created_at DESC, id DESC
+        LIMIT 1
+      `,
+    )
+    .get(projectId, taskId);
+
+  return row ? publicSessionSummary(row) : null;
+}
+
+function listPublicSessionsForTask(database: WebSandboxSqliteDatabase, projectId: string, taskId: string): readonly PublicSessionSummary[] {
+  return database
+    .query<PublicSessionRow, [string, string]>(
+      `
+        SELECT id, project_id, task_id, attempt_number, status, runtime_provider, runtime_session_id, created_at, started_at, ended_at,
+          final_response_recorded_at, last_heartbeat_at, heartbeat_status, stale_at, lost_at
+        FROM sessions
+        WHERE project_id = ? AND task_id = ?
+        ORDER BY attempt_number ASC, created_at ASC, id ASC
+      `,
+    )
+    .all(projectId, taskId)
+    .map(publicSessionSummary);
+}
+
+function listPendingPublicCommandsForTask(database: WebSandboxSqliteDatabase, projectId: string, taskId: string): readonly PublicCommandSummary[] {
+  return database
+    .query<PublicCommandRow, [string, string, string, string]>(
+      `
+        SELECT c.id, c.project_id, c.task_id, c.session_id, c.type, c.status, c.payload_json, c.error_message, c.requested_by,
+          c.created_at, c.claimed_at, c.completed_at
+        FROM orchestrator_commands c
+        WHERE c.project_id = ?
+          AND c.status IN ('queued', 'running')
+          AND (
+            c.task_id = ?
+            OR c.session_id IN (SELECT id FROM sessions WHERE project_id = ? AND task_id = ?)
+          )
+        ORDER BY c.created_at ASC, c.rowid ASC, c.id ASC
+      `,
+    )
+    .all(projectId, taskId, projectId, taskId)
+    .map(publicCommandSummary);
+}
+
+function listPublicArtifactsForTask(database: WebSandboxSqliteDatabase, projectId: string, taskId: string): readonly PublicArtifactSummary[] {
+  return database
+    .query<PublicArtifactRow, [string, string, string, string]>(
+      `
+        SELECT id, project_id, task_id, session_id, kind, uri, title, metadata_json, created_at
+        FROM artifacts
+        WHERE project_id = ?
+          AND (
+            task_id = ?
+            OR session_id IN (SELECT id FROM sessions WHERE project_id = ? AND task_id = ?)
+          )
+        ORDER BY created_at ASC, rowid ASC, id ASC
+      `,
+    )
+    .all(projectId, taskId, projectId, taskId)
+    .map(publicArtifactSummary);
+}
+
+function listPublicEventsForTask(database: WebSandboxSqliteDatabase, projectId: string, taskId: string): readonly PublicEventSummary[] {
+  return database
+    .query<PublicEventRow, [string, string, string, string]>(
+      `
+        SELECT id, project_id, task_id, session_id, command_id, type, payload_json, created_at
+        FROM events
+        WHERE project_id = ?
+          AND (
+            task_id = ?
+            OR session_id IN (SELECT id FROM sessions WHERE project_id = ? AND task_id = ?)
+          )
+        ORDER BY created_at ASC, rowid ASC, id ASC
+      `,
+    )
+    .all(projectId, taskId, projectId, taskId)
+    .map(publicEventSummary);
+}
+
+function listPublicLogStreamsForTask(database: WebSandboxSqliteDatabase, projectId: string, taskId: string): readonly PublicLogStreamSummary[] {
+  return database
+    .query<PublicLogStreamRow, [string, string, string, string]>(
+      `
+        SELECT id, project_id, task_id, session_id, kind, byte_offset, line_count, created_at, updated_at
+        FROM log_streams
+        WHERE project_id = ?
+          AND (
+            task_id = ?
+            OR session_id IN (SELECT id FROM sessions WHERE project_id = ? AND task_id = ?)
+          )
+        ORDER BY created_at ASC, rowid ASC, id ASC
+      `,
+    )
+    .all(projectId, taskId, projectId, taskId)
+    .map(publicLogStreamSummary);
+}
+
+function publicSessionSummary(row: PublicSessionRow): PublicSessionSummary {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    taskId: row.task_id,
+    attemptNumber: row.attempt_number,
+    status: row.status,
+    runtimeProvider: row.runtime_provider,
+    runtimeSessionId: row.runtime_session_id,
+    createdAt: row.created_at,
+    startedAt: row.started_at,
+    endedAt: row.ended_at,
+    finalResponseRecordedAt: row.final_response_recorded_at,
+    lastHeartbeatAt: row.last_heartbeat_at,
+    heartbeatStatus: row.heartbeat_status,
+    staleAt: row.stale_at,
+    lostAt: row.lost_at,
+  };
+}
+
+function publicCommandSummary(row: PublicCommandRow): PublicCommandSummary {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    taskId: row.task_id,
+    sessionId: row.session_id,
+    type: row.type,
+    status: row.status,
+    payload: parseJsonObject(row.payload_json),
+    errorMessage: row.error_message,
+    requestedBy: row.requested_by,
+    createdAt: row.created_at,
+    claimedAt: row.claimed_at,
+    completedAt: row.completed_at,
+  };
+}
+
+function publicArtifactSummary(row: PublicArtifactRow): PublicArtifactSummary {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    taskId: row.task_id,
+    sessionId: row.session_id,
+    kind: row.kind,
+    uri: row.uri,
+    title: row.title,
+    metadata: parseJsonObject(row.metadata_json),
+    createdAt: row.created_at,
+  };
+}
+
+function publicEventSummary(row: PublicEventRow): PublicEventSummary {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    taskId: row.task_id,
+    sessionId: row.session_id,
+    commandId: row.command_id,
+    type: row.type,
+    payload: parseJsonObject(row.payload_json),
+    createdAt: row.created_at,
+  };
+}
+
+function publicLogStreamSummary(row: PublicLogStreamRow): PublicLogStreamSummary {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    taskId: row.task_id,
+    sessionId: row.session_id,
+    kind: row.kind,
+    byteOffset: row.byte_offset,
+    lineCount: row.line_count,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function emptyTaskCounts(): Record<"queued" | "running" | "blocked" | "completed" | "failed", number> {
+  return {
+    queued: 0,
+    running: 0,
+    blocked: 0,
+    completed: 0,
+    failed: 0,
+  };
+}
+
 function selectNextQueuedCommand(
   database: WebSandboxSqliteDatabase,
   projectId?: string,
@@ -2034,10 +2562,11 @@ function selectNextEligibleTask(
   readonly project_id: string;
   readonly display_id: number;
   readonly title: string;
+  readonly priority: number;
   readonly runtime_source_json: string | null;
 } | null {
   const sql = `
-    SELECT t.id, t.project_id, t.display_id, t.title, t.runtime_source_json
+    SELECT t.id, t.project_id, t.display_id, t.title, t.priority, t.runtime_source_json
     FROM tasks t
     JOIN projects p ON p.id = t.project_id
     WHERE t.status = 'queued'
@@ -2056,16 +2585,24 @@ function selectNextEligibleTask(
           AND td.task_id = t.id
           AND dependency.status != 'completed'
       )
-    ORDER BY t.display_id ASC, t.created_at ASC, t.id ASC
+    ORDER BY t.priority DESC, t.display_id ASC, t.created_at ASC, t.id ASC
     LIMIT 1
   `;
 
   return database
     .query<
-      { id: string; project_id: string; display_id: number; title: string; runtime_source_json: string | null },
+      { id: string; project_id: string; display_id: number; title: string; priority: number; runtime_source_json: string | null },
       [string | null, string | null]
     >(sql)
     .get(projectId ?? null, projectId ?? null);
+}
+
+function normalizeTaskPriority(value: number | null | undefined): number {
+  if (value === null || value === undefined) return 0;
+  if (!Number.isInteger(value)) {
+    throw new Error("task priority must be an integer");
+  }
+  return value;
 }
 
 function sanitizeTaskRuntimeSource(input: TaskRuntimeSourceMetadata | null | undefined): TaskRuntimeSourceMetadata | null {

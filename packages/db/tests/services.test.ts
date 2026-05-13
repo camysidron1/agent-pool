@@ -14,6 +14,7 @@ describe("canonical state services", () => {
       const second = services.createTask({ id: "task_2", projectId: project.id, title: "Second" });
 
       expect(first.task.displayId).toBe(1);
+      expect(first.task.priority).toBe(0);
       expect(second.task.displayId).toBe(2);
       expect(first.event.type).toBe("task.created");
       expect(first.outbox.routingKey).toBe("project.project_a.events");
@@ -102,6 +103,89 @@ describe("canonical state services", () => {
     }
   });
 
+  test("reads public project and task models without leaking bridge credentials", () => {
+    const database = createMigratedMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A", description: "Visible project" });
+      services.createTask({ id: "task_low", projectId: "project_a", title: "Low priority", priority: 1 });
+      services.createTask({ id: "task_high", projectId: "project_a", title: "High priority", priority: 9 });
+
+      const claim = services.claimNextTask({
+        projectId: "project_a",
+        sessionId: "session_high",
+        bridgeSessionToken: "bridge-token-secret",
+      });
+      expect(claim).toMatchObject({ ok: true, task: { id: "task_high", priority: 9 } });
+      services.reportStartupSucceeded({ projectId: "project_a", sessionId: "session_high", runtimeSessionId: "runtime_high" });
+      services.requestCommand({
+        id: "command_interrupt",
+        projectId: "project_a",
+        taskId: "task_high",
+        sessionId: "session_high",
+        type: "interrupt",
+        payload: { message: "pause after current step" },
+        requestedBy: "operator_test",
+      });
+      services.recordSessionOutput({
+        projectId: "project_a",
+        taskId: "task_high",
+        sessionId: "session_high",
+        stream: "stdout",
+        sequence: 1,
+        byteOffset: 0,
+        text: "hello\n",
+      });
+      services.recordFinalAssistantResponse({
+        projectId: "project_a",
+        sessionId: "session_high",
+        text: "Finished: https://example.com/result",
+      });
+
+      const projects = services.listProjects();
+      const tasks = services.listProjectTasks({ projectId: "project_a" });
+      const detail = services.readTaskDetail({ projectId: "project_a", taskId: "task_high" });
+
+      expect(projects).toHaveLength(1);
+      expect(projects[0]).toMatchObject({
+        id: "project_a",
+        description: "Visible project",
+        taskCounts: { queued: 1, running: 1, blocked: 0, completed: 0, failed: 0 },
+      });
+      expect(tasks.map((task) => ({ id: task.id, priority: task.priority }))).toEqual([
+        { id: "task_high", priority: 9 },
+        { id: "task_low", priority: 1 },
+      ]);
+      expect(detail).toMatchObject({
+        ok: true,
+        task: {
+          id: "task_high",
+          priority: 9,
+          latestSession: {
+            id: "session_high",
+            runtimeSessionId: "runtime_high",
+          },
+          pendingCommands: [
+            {
+              id: "command_interrupt",
+              type: "interrupt",
+              status: "queued",
+              payload: { message: "pause after current step" },
+            },
+          ],
+          sessions: [{ id: "session_high", status: "running" }],
+          artifacts: [{ kind: "final_response_url", uri: "https://example.com/result" }],
+          logStreams: [{ kind: "stdout", lineCount: 1 }],
+        },
+      });
+      expect(JSON.stringify(detail)).not.toContain("bridge-token-secret");
+      expect(JSON.stringify(detail)).not.toContain("bridgeSessionToken");
+    } finally {
+      database.close();
+    }
+  });
+
   test("creates immutable session attempts with event/outbox rows", () => {
     const database = createMigratedMemoryDatabase();
 
@@ -138,7 +222,7 @@ describe("canonical state services", () => {
       const services = createCanonicalStateServices(database);
       services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
       services.createTask({ id: "task_1", projectId: "project_a", title: "First" });
-      services.createTask({ id: "task_2", projectId: "project_a", title: "Second" });
+      services.createTask({ id: "task_2", projectId: "project_a", title: "Second", priority: 10 });
 
       const claim = services.claimNextTask({
         projectId: "project_a",
@@ -151,17 +235,17 @@ describe("canonical state services", () => {
 
       expect(claim).toMatchObject({
         ok: true,
-        task: { id: "task_1", projectId: "project_a", displayId: 1, status: "running" },
+        task: { id: "task_2", projectId: "project_a", displayId: 2, priority: 10, status: "running" },
         session: {
           id: "session_1",
           projectId: "project_a",
-          taskId: "task_1",
+          taskId: "task_2",
           attemptNumber: 1,
           status: "starting",
           runtimeProvider: "test-provider",
           bridge: {
             projectId: "project_a",
-            taskId: "task_1",
+            taskId: "task_2",
             sessionId: "session_1",
             callbackBaseUrl: "http://api.internal.test",
             sessionToken: {
@@ -173,7 +257,7 @@ describe("canonical state services", () => {
         event: { projectId: "project_a", type: "task.claimed" },
         outbox: { projectId: "project_a", routingKey: "project.project_a.control" },
       });
-      expect(database.query<{ status: string }, []>("SELECT status FROM tasks WHERE id = 'task_1'").get()).toEqual({
+      expect(database.query<{ status: string }, []>("SELECT status FROM tasks WHERE id = 'task_2'").get()).toEqual({
         status: "running",
       });
       expect(

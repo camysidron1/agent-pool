@@ -31,6 +31,7 @@ describe("core project/task schema", () => {
 
     expect(project.status).toBeUndefined();
     expect(task.status).toBeUndefined();
+    expect(task.priority).toBeUndefined();
   });
 
   test("supports project-scoped task display IDs", () => {
