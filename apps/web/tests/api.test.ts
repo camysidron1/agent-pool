@@ -109,6 +109,45 @@ describe("public web API client", () => {
     expect(calls[1]?.body).not.toContain("raw-local-path");
     expect(calls[2]?.body).toContain('"steeringContext"');
   });
+
+  test("creates updates and deletes task notes through public routes", async () => {
+    const calls: { readonly method: string | undefined; readonly url: string; readonly body: string | null }[] = [];
+    const client = createPublicApiClient({
+      operatorId: "operator-test",
+      fetchImpl: async (input, init) => {
+        calls.push({ method: init?.method, url: String(input), body: typeof init?.body === "string" ? init.body : null });
+        return jsonResponse({
+          ok: true,
+          note: { id: "note/id", body: "note" },
+          event: { type: "note.created" },
+          outbox: {},
+          task: { id: "task/id", notes: [] },
+        });
+      },
+    });
+
+    await client.createTaskNote("project/id", "task/id", { body: "new note", sessionId: "session/id" });
+    await client.updateTaskNote("project/id", "task/id", "note/id", { body: "updated note" });
+    await client.deleteTaskNote("project/id", "task/id", "note/id");
+
+    expect(calls).toEqual([
+      {
+        method: "POST",
+        url: "/api/public/projects/project%2Fid/tasks/task%2Fid/notes",
+        body: '{"body":"new note","sessionId":"session/id"}',
+      },
+      {
+        method: "PATCH",
+        url: "/api/public/projects/project%2Fid/tasks/task%2Fid/notes/note%2Fid",
+        body: '{"body":"updated note"}',
+      },
+      {
+        method: "DELETE",
+        url: "/api/public/projects/project%2Fid/tasks/task%2Fid/notes/note%2Fid",
+        body: null,
+      },
+    ]);
+  });
 });
 
 function jsonResponse(body: unknown, status = 200): Response {

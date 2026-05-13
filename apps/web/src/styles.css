@@ -759,6 +759,51 @@ label {
   white-space: pre-wrap;
 }
 
+.note-form,
+.note-list,
+.note-edit,
+.note-item {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.note-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.note-item {
+  border: 1px solid #e2e7ee;
+  border-radius: 8px;
+  padding: 0.75rem;
+}
+
+.note-item header,
+.note-actions {
+  align-items: center;
+  display: flex;
+  gap: 0.65rem;
+  justify-content: space-between;
+}
+
+.note-item header div {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.note-item time,
+.note-item header span,
+.note-actions p {
+  color: #607084;
+  font-size: 0.8rem;
+}
+
+.note-item p,
+.note-actions p {
+  margin: 0;
+}
+
 .steering-form {
   display: grid;
   gap: 0.65rem;
@@ -919,6 +964,12 @@ label {
   .artifact-group header,
   .artifact-item-actions,
   .artifact-modal header {
+    align-items: stretch;
+    display: grid;
+  }
+
+  .note-item header,
+  .note-actions {
     align-items: stretch;
     display: grid;
   }

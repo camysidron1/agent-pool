@@ -202,6 +202,13 @@ export type PublicSteeringMutation = {
   readonly pendingCommands: readonly PublicCommandSummary[];
 };
 
+export type PublicNoteMutation = {
+  readonly note: PublicNoteSummary;
+  readonly event: PublicEventSummary;
+  readonly outbox: unknown;
+  readonly task: PublicTaskDetail;
+};
+
 export class PublicApiError extends Error {
   readonly status: number;
   readonly code: string;
@@ -273,6 +280,20 @@ export function createPublicApiClient(options: PublicApiClientOptions) {
         `/projects/${encodePath(projectId)}/tasks/${encodePath(taskId)}/sessions/${encodePath(sessionId)}/interrupt`,
         { method: "POST", body: JSON.stringify(payload) },
       ),
+    createTaskNote: (projectId: string, taskId: string, input: { readonly body: string; readonly sessionId?: string | null }) =>
+      request<PublicApiSuccess<PublicNoteMutation>>(`/projects/${encodePath(projectId)}/tasks/${encodePath(taskId)}/notes`, {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    updateTaskNote: (projectId: string, taskId: string, noteId: string, input: { readonly body: string }) =>
+      request<PublicApiSuccess<PublicNoteMutation>>(
+        `/projects/${encodePath(projectId)}/tasks/${encodePath(taskId)}/notes/${encodePath(noteId)}`,
+        { method: "PATCH", body: JSON.stringify(input) },
+      ),
+    deleteTaskNote: (projectId: string, taskId: string, noteId: string) =>
+      request<PublicApiSuccess<PublicNoteMutation>>(`/projects/${encodePath(projectId)}/tasks/${encodePath(taskId)}/notes/${encodePath(noteId)}`, {
+        method: "DELETE",
+      }),
     updateTaskPriority: (projectId: string, taskId: string, priority: number) =>
       request<PublicApiSuccess<{ readonly task: PublicTaskSummary; readonly pendingCommands: readonly PublicCommandSummary[] }>>(
         `/projects/${encodePath(projectId)}/tasks/${encodePath(taskId)}/priority`,

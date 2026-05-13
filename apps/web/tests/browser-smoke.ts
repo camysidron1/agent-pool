@@ -62,6 +62,8 @@ async function assertServedBundle(): Promise<void> {
       ["full-page detail", "Full-page task detail"],
       ["raw output log", "Raw output log"],
       ["artifact modal", "Document artifact preview"],
+      ["operator notes", "Operator Notes"],
+      ["note mutation", "/notes"],
       ["steering composer", "Steering message"],
       ["steering state", "Queued and failed steering"],
       ["interrupt confirmation", "Confirm interrupt"],

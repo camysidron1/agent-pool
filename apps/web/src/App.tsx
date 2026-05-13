@@ -14,6 +14,7 @@ import {
   createPublicApiClient,
   PublicApiError,
   type PublicArtifactSummary,
+  type PublicNoteSummary,
   type PublicProjectSummary,
   type PublicSessionSummary,
   type PublicTaskDetail,
@@ -439,6 +440,39 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
     }
   }
 
+  async function createTaskNote(input: { readonly detail: PublicTaskDetail; readonly body: string; readonly sessionId?: string | null }): Promise<void> {
+    if (!api || !selectedProjectId) {
+      throw new Error("Public API is unavailable.");
+    }
+
+    const response = await api.createTaskNote(selectedProjectId, input.detail.id, {
+      body: input.body,
+      sessionId: input.sessionId ?? null,
+    });
+    setTaskDetail((current) => (shouldUseIncomingTaskDetail(current, response.task) ? response.task : current));
+    setTasks((current) => replaceTask(current, response.task));
+  }
+
+  async function updateTaskNote(input: { readonly detail: PublicTaskDetail; readonly noteId: string; readonly body: string }): Promise<void> {
+    if (!api || !selectedProjectId) {
+      throw new Error("Public API is unavailable.");
+    }
+
+    const response = await api.updateTaskNote(selectedProjectId, input.detail.id, input.noteId, { body: input.body });
+    setTaskDetail((current) => (shouldUseIncomingTaskDetail(current, response.task) ? response.task : current));
+    setTasks((current) => replaceTask(current, response.task));
+  }
+
+  async function deleteTaskNote(input: { readonly detail: PublicTaskDetail; readonly noteId: string }): Promise<void> {
+    if (!api || !selectedProjectId) {
+      throw new Error("Public API is unavailable.");
+    }
+
+    const response = await api.deleteTaskNote(selectedProjectId, input.detail.id, input.noteId);
+    setTaskDetail((current) => (shouldUseIncomingTaskDetail(current, response.task) ? response.task : current));
+    setTasks((current) => replaceTask(current, response.task));
+  }
+
   if (!isAuthenticated) {
     return (
       <main className="app-shell auth-shell" aria-labelledby="auth-title">
@@ -609,6 +643,9 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
           onClose={closeTaskPanel}
           onSubmitSteering={submitTaskSteering}
           onInterruptSteering={interruptTaskSteering}
+          onCreateNote={createTaskNote}
+          onUpdateNote={updateTaskNote}
+          onDeleteNote={deleteTaskNote}
         />
       ) : null}
     </main>
@@ -641,6 +678,9 @@ function TaskPanel({
   onClose,
   onSubmitSteering,
   onInterruptSteering,
+  onCreateNote,
+  onUpdateNote,
+  onDeleteNote,
 }: {
   readonly detail: PublicTaskDetail | null;
   readonly loadState: LoadState;
@@ -656,6 +696,9 @@ function TaskPanel({
     readonly files: readonly File[];
   }) => Promise<void>;
   readonly onInterruptSteering: (input: { readonly detail: PublicTaskDetail; readonly activeSession: PublicSessionSummary | null }) => Promise<void>;
+  readonly onCreateNote: (input: { readonly detail: PublicTaskDetail; readonly body: string; readonly sessionId?: string | null }) => Promise<void>;
+  readonly onUpdateNote: (input: { readonly detail: PublicTaskDetail; readonly noteId: string; readonly body: string }) => Promise<void>;
+  readonly onDeleteNote: (input: { readonly detail: PublicTaskDetail; readonly noteId: string }) => Promise<void>;
 }) {
   const [steeringDraft, setSteeringDraft] = useState("");
   const [steeringFiles, setSteeringFiles] = useState<readonly File[]>([]);
@@ -789,6 +832,14 @@ function TaskPanel({
           </section>
 
           <ArtifactSection detail={detail} onPreview={setPreviewArtifact} />
+
+          <OperatorNotesSection
+            detail={detail}
+            activeSession={activeSession}
+            onCreateNote={onCreateNote}
+            onUpdateNote={onUpdateNote}
+            onDeleteNote={onDeleteNote}
+          />
 
           <section className="panel-section" aria-label="Active session">
             <h3>Active Session</h3>
@@ -1171,6 +1222,219 @@ function ArtifactPreviewModal({ artifact, onClose }: { readonly artifact: Public
         ) : null}
       </section>
     </div>
+  );
+}
+
+function OperatorNotesSection({
+  detail,
+  activeSession,
+  onCreateNote,
+  onUpdateNote,
+  onDeleteNote,
+}: {
+  readonly detail: PublicTaskDetail;
+  readonly activeSession: PublicSessionSummary | null;
+  readonly onCreateNote: (input: { readonly detail: PublicTaskDetail; readonly body: string; readonly sessionId?: string | null }) => Promise<void>;
+  readonly onUpdateNote: (input: { readonly detail: PublicTaskDetail; readonly noteId: string; readonly body: string }) => Promise<void>;
+  readonly onDeleteNote: (input: { readonly detail: PublicTaskDetail; readonly noteId: string }) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState("");
+  const [mutating, setMutating] = useState<"create" | string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const canCreate = draft.trim().length > 0 && mutating !== "create";
+
+  useEffect(() => {
+    setDraft("");
+    setMutating(null);
+    setError(null);
+    setNotice(null);
+  }, [detail.id]);
+
+  async function submitNote(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!canCreate) return;
+
+    setMutating("create");
+    setError(null);
+    setNotice(null);
+
+    try {
+      await onCreateNote({ detail, body: draft, sessionId: activeSession?.id ?? null });
+      setDraft("");
+      setNotice("Note saved.");
+    } catch (submitError) {
+      setError(formatApiError(submitError));
+    } finally {
+      setMutating(null);
+    }
+  }
+
+  async function updateNote(note: PublicNoteSummary, body: string): Promise<void> {
+    setMutating(note.id);
+    setError(null);
+    setNotice(null);
+
+    try {
+      await onUpdateNote({ detail, noteId: note.id, body });
+      setNotice("Note updated.");
+    } catch (submitError) {
+      setError(formatApiError(submitError));
+      throw submitError;
+    } finally {
+      setMutating(null);
+    }
+  }
+
+  async function deleteNote(note: PublicNoteSummary): Promise<void> {
+    setMutating(note.id);
+    setError(null);
+    setNotice(null);
+
+    try {
+      await onDeleteNote({ detail, noteId: note.id });
+      setNotice("Note deleted.");
+    } catch (submitError) {
+      setError(formatApiError(submitError));
+    } finally {
+      setMutating(null);
+    }
+  }
+
+  return (
+    <section className="panel-section notes-section" aria-label="Operator notes">
+      <h3>Operator Notes</h3>
+      <form className="note-form" onSubmit={(event: FormEvent<HTMLFormElement>) => void submitNote(event)}>
+        <textarea
+          rows={3}
+          value={draft}
+          onChange={(event: ChangeEvent<HTMLTextAreaElement>) => {
+            setDraft(event.currentTarget.value);
+            setError(null);
+            setNotice(null);
+          }}
+          aria-label="New operator note"
+        />
+        <div className="note-actions">
+          <p>{activeSession ? `Attached to attempt ${activeSession.attemptNumber}` : "Task-level note"}</p>
+          <button type="submit" disabled={!canCreate}>
+            {mutating === "create" ? "Saving" : "Save note"}
+          </button>
+        </div>
+      </form>
+      {detail.notes.length === 0 ? (
+        <p>No notes yet.</p>
+      ) : (
+        <ul className="note-list">
+          {detail.notes.map((note) => (
+            <li key={note.id} className="note-item">
+              <OperatorNoteItem
+                note={note}
+                busy={mutating === note.id}
+                onUpdate={(body) => updateNote(note, body)}
+                onDelete={() => deleteNote(note)}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
+      {error ? <p className="form-error">{error}</p> : null}
+      {notice ? <p className="form-success">{notice}</p> : null}
+    </section>
+  );
+}
+
+function OperatorNoteItem({
+  note,
+  busy,
+  onUpdate,
+  onDelete,
+}: {
+  readonly note: PublicNoteSummary;
+  readonly busy: boolean;
+  readonly onUpdate: (body: string) => Promise<void>;
+  readonly onDelete: () => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(note.body);
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDraft(note.body);
+    setEditing(false);
+    setLocalError(null);
+  }, [note.id, note.body]);
+
+  async function saveEdit(): Promise<void> {
+    const body = draft.trim();
+    if (!body) {
+      setLocalError("Note body is required.");
+      return;
+    }
+
+    try {
+      await onUpdate(body);
+      setEditing(false);
+      setLocalError(null);
+    } catch {
+      setLocalError("Unable to update note.");
+    }
+  }
+
+  return (
+    <>
+      <header>
+        <div>
+          <strong>{note.authorId ?? "operator"}</strong>
+          <time>{formatTimestamp(note.updatedAt)}</time>
+        </div>
+        <span>{note.sessionId ? "session note" : "task note"}</span>
+      </header>
+      {editing ? (
+        <div className="note-edit">
+          <textarea
+            rows={3}
+            value={draft}
+            disabled={busy}
+            onChange={(event: ChangeEvent<HTMLTextAreaElement>) => {
+              setDraft(event.currentTarget.value);
+              setLocalError(null);
+            }}
+            aria-label="Edit operator note"
+          />
+          <div className="note-actions">
+            <button type="button" disabled={busy || draft.trim().length === 0} onClick={() => void saveEdit()}>
+              {busy ? "Saving" : "Save"}
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={busy}
+              onClick={() => {
+                setDraft(note.body);
+                setEditing(false);
+                setLocalError(null);
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+          {localError ? <p className="form-error">{localError}</p> : null}
+        </div>
+      ) : (
+        <>
+          <p>{note.body}</p>
+          <div className="note-actions">
+            <button type="button" className="secondary-button" disabled={busy} onClick={() => setEditing(true)}>
+              Edit
+            </button>
+            <button type="button" className="secondary-button" disabled={busy} onClick={() => void onDelete()}>
+              {busy ? "Deleting" : "Delete"}
+            </button>
+          </div>
+        </>
+      )}
+    </>
   );
 }
 
