@@ -196,7 +196,16 @@ describe("API service skeleton", () => {
         "content-type": "application/json",
         [config.serviceToken.headerName]: config.serviceToken.token,
       };
-      const firstSeed = await fetch(`${baseUrl}/internal/smoke/seed`, { method: "POST", headers });
+      const runtimeSource = {
+        repositoryUrl: "https://github.com/example/tiny-fixture.git",
+        baseRef: "main",
+        taskBranchPrefix: "agent-pool/e2b-smoke",
+      };
+      const firstSeed = await fetch(`${baseUrl}/internal/smoke/seed`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ runtimeSource }),
+      });
       const firstSeedBody = await firstSeed.json();
       const secondSeed = await fetch(`${baseUrl}/internal/smoke/seed`, { method: "POST", headers });
       const secondSeedBody = await secondSeed.json();
@@ -239,7 +248,8 @@ describe("API service skeleton", () => {
         body: JSON.stringify({ projectId: "compose-smoke", sessionId: "session_smoke", runtimeProvider: "fake" }),
       });
       const claimBody = await claim.json();
-      expect(claimBody).toMatchObject({ ok: true, claimed: true, task: { id: "compose-smoke-task-1" } });
+      expect(claimBody).toMatchObject({ ok: true, claimed: true, task: { id: "compose-smoke-task-1", runtimeSource } });
+      expect(JSON.stringify(claimBody.task)).not.toMatch(/token|secret|github_pat_|ghp_/i);
 
       const bridge = claimBody.session.bridge;
       const callbackHeaders = {

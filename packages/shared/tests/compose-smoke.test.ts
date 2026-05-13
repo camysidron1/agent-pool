@@ -9,6 +9,7 @@ import {
   readPrometheusVerification,
   runComposeSmokeCli,
 } from "../../../deploy/compose/smoke-compose";
+import { createE2BSmokePlan, parseE2BSmokeArgs, runE2BSmokeCli } from "../../../deploy/compose/e2b-smoke";
 
 describe("compose smoke runner", () => {
   test("keeps Docker compose smoke out of the default test script", async () => {
@@ -20,6 +21,7 @@ describe("compose smoke runner", () => {
     expect(scripts.test).toBe("bun test apps packages");
     expect(scripts.test).not.toMatch(/smoke:compose|docker|compose|rabbitmq|minio|prometheus/i);
     expect(scripts["smoke:compose"]).toBe("bun run deploy/compose/smoke-compose.ts");
+    expect(scripts["smoke:e2b"]).toBe("bun run deploy/compose/e2b-smoke.ts");
   });
 
   test("builds a bounded compose smoke plan without using the legacy TUI database", () => {
@@ -300,5 +302,195 @@ describe("compose smoke runner", () => {
         logs: "api-1 | startup failed\norchestrator-1 | waiting",
       },
     });
+  });
+
+  test("builds an opt-in E2B dry-run plan without credentials, network, Docker, or DB access", async () => {
+    const writes: string[] = [];
+    let fetches = 0;
+    const code = await runE2BSmokeCli(["--dry-run", "--api-url", "http://api.local/", "--repository-url", "https://github.com/example/tiny-fixture.git"], {
+      env: {
+        AUTH_MODE: "test",
+        E2B_TEMPLATE_ID: "template-1",
+      },
+      write: (text) => writes.push(text),
+      fetch: async () => {
+        fetches += 1;
+        return Response.json({ ok: true });
+      },
+    });
+    const plan = JSON.parse(writes.join(""));
+    const source = await readFile(join(process.cwd(), "deploy", "compose", "e2b-smoke.ts"), "utf8");
+
+    expect(code).toBe(0);
+    expect(fetches).toBe(0);
+    expect(plan).toMatchObject({
+      runtimeProvider: "e2b",
+      apiUrl: "http://api.local",
+      serviceToken: "[REDACTED]",
+      missingCredentials: ["E2B_API_KEY", "GITHUB_TOKEN"],
+      runtimeSource: {
+        repositoryUrl: "https://github.com/example/tiny-fixture.git",
+        baseRef: "main",
+        taskBranchPrefix: "agent-pool/e2b-smoke",
+      },
+      requests: {
+        seed: {
+          method: "POST",
+          url: "http://api.local/internal/smoke/seed",
+          body: {
+            runtimeSource: {
+              repositoryUrl: "https://github.com/example/tiny-fixture.git",
+            },
+          },
+        },
+        status: {
+          method: "GET",
+          url: "http://api.local/internal/smoke/status",
+        },
+      },
+      cleanup: {
+        provider: "e2b",
+        sandboxId: "<runtime-session-id>",
+        action: "destroy sandbox through RuntimeProvider.stopSession",
+      },
+    });
+    expect(plan.launchSpec.environment.secrets).toEqual({ GITHUB_TOKEN: "[REDACTED]" });
+    expect(JSON.stringify(plan)).not.toContain("dry-run-github-token");
+    expect(JSON.stringify(plan)).not.toContain("dry-run-session-token");
+    expect(source).not.toMatch(/@agent-pool\/db|bun:sqlite|openApiDatabase|openWebSandboxDatabase|AGENT_POOL_WEB_SANDBOX_DB_PATH/);
+  });
+
+  test("reports missing E2B smoke credentials before touching the API", async () => {
+    const writes: string[] = [];
+    let fetches = 0;
+    const code = await runE2BSmokeCli(["--timeout-ms", "1000"], {
+      env: {
+        AUTH_MODE: "test",
+        E2B_TEMPLATE_ID: "template-1",
+      },
+      write: (text) => writes.push(text),
+      fetch: async () => {
+        fetches += 1;
+        return Response.json({ ok: true });
+      },
+    });
+    const payload = JSON.parse(writes.join(""));
+
+    expect(code).toBe(1);
+    expect(fetches).toBe(0);
+    expect(payload).toEqual({
+      ok: false,
+      error: "missing required E2B smoke settings: E2B_API_KEY, GITHUB_TOKEN",
+      missingCredentials: ["E2B_API_KEY", "GITHUB_TOKEN"],
+      missingSettings: [],
+    });
+  });
+
+  test("uses smoke seed and status endpoints for opt-in E2B execution", async () => {
+    const writes: string[] = [];
+    const requests: Array<{
+      readonly url: string;
+      readonly method: string;
+      readonly serviceToken: string | null;
+      readonly contentType: string | null;
+      readonly body: unknown;
+    }> = [];
+    const code = await runE2BSmokeCli(["--api-url", "http://api.local", "--service-token", "service-secret", "--timeout-ms", "1000"], {
+      env: {
+        AUTH_MODE: "test",
+        E2B_API_KEY: "e2b-secret",
+        E2B_TEMPLATE_ID: "template-1",
+        E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN",
+        GITHUB_TOKEN: "github-secret",
+      },
+      write: (text) => writes.push(text),
+      fetch: async (input, init) => {
+        const body = init?.body ? JSON.parse(String(init.body)) : null;
+        requests.push({
+          url: String(input),
+          method: init?.method ?? "GET",
+          serviceToken: new Headers(init?.headers).get("x-agent-pool-service-token"),
+          contentType: new Headers(init?.headers).get("content-type"),
+          body,
+        });
+
+        if (String(input).endsWith("/internal/smoke/seed")) {
+          return Response.json({ ok: true, projectId: "compose-smoke", taskId: "compose-smoke-task-1" });
+        }
+
+        return Response.json({
+          ok: true,
+          finalResponse: { recorded: true },
+          completion: { completed: true },
+          cleanup: { completed: true },
+        });
+      },
+    });
+    const payload = JSON.parse(writes.join(""));
+
+    expect(code).toBe(0);
+    expect(requests).toEqual([
+      {
+        url: "http://api.local/internal/smoke/seed",
+        method: "POST",
+        serviceToken: "service-secret",
+        contentType: "application/json",
+        body: {
+          runtimeSource: {
+            repositoryUrl: "https://github.com/example/tiny-fixture.git",
+            baseRef: "main",
+            taskBranchPrefix: "agent-pool/e2b-smoke",
+          },
+        },
+      },
+      {
+        url: "http://api.local/internal/smoke/status",
+        method: "GET",
+        serviceToken: "service-secret",
+        contentType: null,
+        body: null,
+      },
+    ]);
+    expect(payload).toMatchObject({ ok: true, seed: { ok: true }, status: { ok: true } });
+    expect(JSON.stringify(payload)).not.toContain("github-secret");
+    expect(JSON.stringify(payload)).not.toContain("e2b-secret");
+    expect(JSON.stringify(payload)).not.toContain("service-secret");
+  });
+
+  test("parses E2B smoke flags for local execution", () => {
+    expect(
+      parseE2BSmokeArgs([
+        "--plan",
+        "--api-url",
+        "http://api.local",
+        "--service-token",
+        "token",
+        "--timeout-ms",
+        "5000",
+        "--repository-url",
+        "https://github.com/example/tiny-fixture.git",
+        "--base-ref",
+        "feature/ref",
+        "--task-branch-prefix",
+        "agent-pool/task",
+      ]),
+    ).toEqual({
+      dryRun: true,
+      apiUrl: "http://api.local",
+      serviceToken: "token",
+      timeoutMs: 5000,
+      repositoryUrl: "https://github.com/example/tiny-fixture.git",
+      baseRef: "feature/ref",
+      taskBranchPrefix: "agent-pool/task",
+    });
+
+    expect(
+      createE2BSmokePlan({
+        env: {
+          AUTH_MODE: "test",
+          E2B_TEMPLATE_ID: "template-1",
+        },
+      }).cleanup,
+    ).toMatchObject({ provider: "e2b", timeoutMs: 30_000 });
   });
 });

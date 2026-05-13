@@ -14,6 +14,13 @@ export type SmokeFixtureOptions = {
 export type SmokeSeedFixtureOptions = SmokeFixtureOptions & {
   readonly queue: RabbitMqAdapter;
   readonly services: ApiBackendServices;
+  readonly runtimeSource?: SmokeRuntimeSourceInput | null;
+};
+
+export type SmokeRuntimeSourceInput = {
+  readonly repositoryUrl: string;
+  readonly baseRef: string;
+  readonly taskBranchPrefix: string;
 };
 
 export type SmokeFixtureIds = {
@@ -176,6 +183,7 @@ export async function seedSmokeFixture(options: SmokeSeedFixtureOptions): Promis
       projectId: ids.projectId,
       title: "Run headless compose smoke",
       description: "Deterministic fixture task for the headless compose control-plane smoke.",
+      runtimeSource: options.runtimeSource ?? undefined,
     });
     task = readTask(options.database, ids.projectId, ids.taskId);
     taskCreated = true;

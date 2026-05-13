@@ -10,7 +10,7 @@ import { createApiBackendServices } from "./backend-services";
 import type { ApiDatabaseConnection } from "./database";
 import { createOutboxPublisher, type OutboxPublisher } from "./outbox-publisher";
 import type { OutboxPublisherLoop } from "./outbox-publisher-loop";
-import { isSmokeFixtureEnabled, readSmokeFixtureStatus, seedSmokeFixture } from "./smoke-fixture";
+import { isSmokeFixtureEnabled, readSmokeFixtureStatus, seedSmokeFixture, type SmokeRuntimeSourceInput } from "./smoke-fixture";
 
 type ApiBackendServices = ReturnType<typeof createApiBackendServices>;
 
@@ -97,7 +97,7 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
     });
   });
 
-  app.post("/internal/smoke/seed", requireInternalServiceToken, async (_request, response) => {
+  app.post("/internal/smoke/seed", requireInternalServiceToken, async (request, response) => {
     if (!services || !database) {
       response.status(503).json({ ok: false, error: "database_unavailable" });
       return;
@@ -107,7 +107,15 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
       return;
     }
 
-    const result = await seedSmokeFixture({ config, database, queue, services });
+    let runtimeSource: SmokeRuntimeSourceInput | null;
+    try {
+      runtimeSource = readSmokeRuntimeSource(request.body);
+    } catch (error) {
+      response.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+
+    const result = await seedSmokeFixture({ config, database, queue, services, runtimeSource });
     response.status(200).json({ ok: true, ...result });
   });
 
@@ -241,6 +249,35 @@ declare global {
       internalServiceSubject?: "internal-service";
     }
   }
+}
+
+function readSmokeRuntimeSource(body: unknown): SmokeRuntimeSourceInput | null {
+  const record = readOptionalRecord(body);
+  const value = record?.runtimeSource;
+  if (value === undefined || value === null) return null;
+
+  const runtimeSource = readOptionalRecord(value);
+  if (!runtimeSource) {
+    throw new Error("runtimeSource must be an object");
+  }
+
+  return {
+    repositoryUrl: readRequiredString(runtimeSource, "repositoryUrl", "runtimeSource"),
+    baseRef: readRequiredString(runtimeSource, "baseRef", "runtimeSource"),
+    taskBranchPrefix: readRequiredString(runtimeSource, "taskBranchPrefix", "runtimeSource"),
+  };
+}
+
+function readOptionalRecord(value: unknown): Readonly<Record<string, unknown>> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Readonly<Record<string, unknown>>) : null;
+}
+
+function readRequiredString(record: Readonly<Record<string, unknown>>, key: string, name: string): string {
+  const value = record[key];
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${name} is missing ${key}`);
+  }
+  return value.trim();
 }
 
 function createInternalServiceTokenMiddleware(config: AppConfig) {
