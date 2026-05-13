@@ -49,7 +49,8 @@ h1 {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -71,6 +72,15 @@ input {
   min-width: 0;
   border: 1px solid #c6cfdb;
   border-radius: 6px;
+  padding: 0.7rem 0.8rem;
+}
+
+select {
+  min-width: 16rem;
+  border: 1px solid #c6cfdb;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #18212f;
   padding: 0.7rem 0.8rem;
 }
 
@@ -138,16 +148,128 @@ label {
   padding: 1.25rem;
 }
 
-.empty-board {
+.board-toolbar {
+  align-items: center;
+  display: flex;
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+}
+
+.project-status {
+  border: 1px solid #d8dee8;
+  border-radius: 999px;
+  color: #46556a;
+  font-size: 0.82rem;
+  font-weight: 700;
+  padding: 0.35rem 0.65rem;
+  text-transform: capitalize;
+}
+
+.board-notice {
   display: grid;
-  min-height: 18rem;
+  min-height: 12rem;
   place-content: center;
   text-align: center;
 }
 
-.empty-board p {
+.board-notice h2 {
+  margin-bottom: 0.35rem;
+}
+
+.board-notice p {
   color: #607084;
   margin-bottom: 0;
+}
+
+.board-notice-error h2,
+.board-notice-error p {
+  color: #a33a2b;
+}
+
+.project-board-preview {
+  display: grid;
+  gap: 1rem;
+}
+
+.project-summary {
+  align-items: start;
+  border-bottom: 1px solid #e2e7ee;
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding-bottom: 1rem;
+}
+
+.project-summary h2 {
+  margin-bottom: 0.35rem;
+}
+
+.project-summary p {
+  color: #607084;
+  margin-bottom: 0;
+}
+
+.task-counts {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(5, minmax(4rem, auto));
+  margin: 0;
+}
+
+.task-counts div {
+  border: 1px solid #e2e7ee;
+  border-radius: 6px;
+  padding: 0.55rem 0.65rem;
+}
+
+.task-counts dt {
+  color: #607084;
+  font-size: 0.72rem;
+  text-transform: capitalize;
+}
+
+.task-counts dd {
+  font-weight: 800;
+  margin: 0.2rem 0 0;
+}
+
+.task-list {
+  display: grid;
+  gap: 0.65rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.task-row {
+  align-items: center;
+  border: 1px solid #e2e7ee;
+  border-radius: 8px;
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 0.8rem;
+}
+
+.task-row strong {
+  display: block;
+  margin-bottom: 0.25rem;
+}
+
+.task-row p {
+  color: #607084;
+  margin-bottom: 0;
+}
+
+.task-meta {
+  align-items: end;
+  color: #46556a;
+  display: grid;
+  font-size: 0.82rem;
+  font-weight: 700;
+  gap: 0.25rem;
+  justify-items: end;
+  white-space: nowrap;
 }
 
 @media (max-width: 680px) {
@@ -157,9 +279,26 @@ label {
 
   .auth-row,
   .topbar,
-  .operator-menu {
+  .operator-menu,
+  .board-toolbar,
+  .project-summary,
+  .task-row {
     align-items: stretch;
     display: grid;
     grid-template-columns: 1fr;
+  }
+
+  select {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .task-counts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .task-meta {
+    align-items: start;
+    justify-items: start;
   }
 }

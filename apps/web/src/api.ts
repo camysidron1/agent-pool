@@ -8,6 +8,8 @@ export type PublicApiClientOptions = {
   readonly fetchImpl?: typeof fetch;
 };
 
+export type PublicApiClient = ReturnType<typeof createPublicApiClient>;
+
 export type PublicApiErrorBody = {
   readonly ok: false;
   readonly error: {
