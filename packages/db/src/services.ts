@@ -97,6 +97,8 @@ export type PublicSessionSummary = {
   readonly createdAt: string;
   readonly startedAt: string | null;
   readonly endedAt: string | null;
+  readonly finalResponseText: string | null;
+  readonly finalResponseMetadata: Readonly<Record<string, unknown>>;
   readonly finalResponseRecordedAt: string | null;
   readonly lastHeartbeatAt: string | null;
   readonly heartbeatStatus: string;
@@ -154,12 +156,24 @@ export type PublicLogStreamSummary = {
   readonly updatedAt: string;
 };
 
+export type PublicNoteSummary = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string | null;
+  readonly authorId: string | null;
+  readonly body: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
 export type PublicTaskDetail = PublicTaskSummary & {
   readonly sessions: readonly PublicSessionSummary[];
   readonly artifacts: readonly PublicArtifactSummary[];
   readonly events: readonly PublicEventSummary[];
   readonly logStreams: readonly PublicLogStreamSummary[];
   readonly steeringMessages: readonly PublicSteeringMessageSummary[];
+  readonly notes: readonly PublicNoteSummary[];
 };
 
 export type ListPublicEventsInput = {
@@ -178,6 +192,38 @@ export type ReadTaskDetailInput = {
 export type ReadTaskDetailResult =
   | { readonly ok: true; readonly task: PublicTaskDetail }
   | { readonly ok: false; readonly error: { readonly code: "not_found"; readonly message: string } };
+
+export type CreateTaskNoteInput = {
+  readonly id?: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId?: string | null;
+  readonly authorId?: string | null;
+  readonly body: string;
+};
+
+export type UpdateTaskNoteInput = {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly noteId: string;
+  readonly body: string;
+};
+
+export type DeleteTaskNoteInput = {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly noteId: string;
+};
+
+export type NoteMutationResult =
+  | {
+      readonly ok: true;
+      readonly note: PublicNoteSummary;
+      readonly task: PublicTaskDetail;
+      readonly event: EventRecord;
+      readonly outbox: OutboxRecord;
+    }
+  | { readonly ok: false; readonly error: { readonly code: "not_found" | "validation_error"; readonly message: string } };
 
 export type TaskMutationResult =
   | { readonly ok: true; readonly task: PublicTaskDetail; readonly event: EventRecord; readonly outbox: OutboxRecord; readonly idempotent: boolean }
@@ -637,6 +683,110 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
       }
 
       return { ok: true, task };
+    },
+
+    createTaskNote(input: CreateTaskNoteInput): NoteMutationResult {
+      const body = input.body.trim();
+      if (!body) return { ok: false, error: { code: "validation_error", message: "note body is required" } };
+
+      return transaction(database, () => {
+        const scope = validateNoteScope(database, input.projectId, input.taskId, input.sessionId ?? null);
+        if (!scope.ok) return scope;
+
+        const noteId = input.id ?? createId("note");
+        database
+          .query("INSERT INTO notes (id, project_id, task_id, session_id, author_id, body) VALUES (?, ?, ?, ?, ?, ?)")
+          .run(noteId, input.projectId, input.taskId, input.sessionId ?? null, input.authorId ?? null, body);
+
+        const event = appendEvent(database, {
+          projectId: input.projectId,
+          taskId: input.taskId,
+          sessionId: input.sessionId ?? null,
+          type: "note.created",
+          payload: { noteId, taskId: input.taskId, sessionId: input.sessionId ?? null },
+        });
+        const outbox = enqueueOutbox(database, {
+          projectId: input.projectId,
+          eventId: event.id,
+          routingKey: projectRoutingKey(input.projectId, "events"),
+          payload: { eventId: event.id, taskId: input.taskId, sessionId: input.sessionId ?? null, type: event.type },
+        });
+        const note = readPublicNote(database, input.projectId, input.taskId, noteId);
+        const task = readPublicTaskDetail(database, input.projectId, input.taskId);
+        if (!note || !task) {
+          return { ok: false, error: { code: "not_found", message: `note not found: ${noteId}` } };
+        }
+
+        return { ok: true, note, task, event, outbox } as const;
+      });
+    },
+
+    updateTaskNote(input: UpdateTaskNoteInput): NoteMutationResult {
+      const body = input.body.trim();
+      if (!body) return { ok: false, error: { code: "validation_error", message: "note body is required" } };
+
+      return transaction(database, () => {
+        const note = readPublicNote(database, input.projectId, input.taskId, input.noteId);
+        if (!note) {
+          return { ok: false, error: { code: "not_found", message: `note not found: ${input.noteId}` } };
+        }
+
+        database
+          .query("UPDATE notes SET body = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND task_id = ? AND id = ?")
+          .run(body, input.projectId, input.taskId, input.noteId);
+
+        const event = appendEvent(database, {
+          projectId: input.projectId,
+          taskId: input.taskId,
+          sessionId: note.sessionId,
+          type: "note.updated",
+          payload: { noteId: input.noteId, taskId: input.taskId, sessionId: note.sessionId },
+        });
+        const outbox = enqueueOutbox(database, {
+          projectId: input.projectId,
+          eventId: event.id,
+          routingKey: projectRoutingKey(input.projectId, "events"),
+          payload: { eventId: event.id, taskId: input.taskId, sessionId: note.sessionId, type: event.type },
+        });
+        const updated = readPublicNote(database, input.projectId, input.taskId, input.noteId);
+        const task = readPublicTaskDetail(database, input.projectId, input.taskId);
+        if (!updated || !task) {
+          return { ok: false, error: { code: "not_found", message: `note not found: ${input.noteId}` } };
+        }
+
+        return { ok: true, note: updated, task, event, outbox } as const;
+      });
+    },
+
+    deleteTaskNote(input: DeleteTaskNoteInput): NoteMutationResult {
+      return transaction(database, () => {
+        const note = readPublicNote(database, input.projectId, input.taskId, input.noteId);
+        if (!note) {
+          return { ok: false, error: { code: "not_found", message: `note not found: ${input.noteId}` } };
+        }
+
+        database.query("DELETE FROM notes WHERE project_id = ? AND task_id = ? AND id = ?").run(input.projectId, input.taskId, input.noteId);
+
+        const event = appendEvent(database, {
+          projectId: input.projectId,
+          taskId: input.taskId,
+          sessionId: note.sessionId,
+          type: "note.deleted",
+          payload: { noteId: input.noteId, taskId: input.taskId, sessionId: note.sessionId },
+        });
+        const outbox = enqueueOutbox(database, {
+          projectId: input.projectId,
+          eventId: event.id,
+          routingKey: projectRoutingKey(input.projectId, "events"),
+          payload: { eventId: event.id, taskId: input.taskId, sessionId: note.sessionId, type: event.type },
+        });
+        const task = readPublicTaskDetail(database, input.projectId, input.taskId);
+        if (!task) {
+          return { ok: false, error: { code: "not_found", message: `task not found: ${input.taskId}` } };
+        }
+
+        return { ok: true, note, task, event, outbox } as const;
+      });
     },
 
     createTask(input: CreateTaskInput): { readonly task: TaskRecord; readonly event: EventRecord; readonly outbox: OutboxRecord } {
@@ -2679,6 +2829,8 @@ type PublicSessionRow = {
   readonly created_at: string;
   readonly started_at: string | null;
   readonly ended_at: string | null;
+  readonly final_response_text: string | null;
+  readonly final_response_metadata_json: string | null;
   readonly final_response_recorded_at: string | null;
   readonly last_heartbeat_at: string | null;
   readonly heartbeat_status: string;
@@ -2732,6 +2884,17 @@ type PublicLogStreamRow = {
   readonly kind: string;
   readonly byte_offset: number;
   readonly line_count: number;
+  readonly created_at: string;
+  readonly updated_at: string;
+};
+
+type PublicNoteRow = {
+  readonly id: string;
+  readonly project_id: string;
+  readonly task_id: string;
+  readonly session_id: string | null;
+  readonly author_id: string | null;
+  readonly body: string;
   readonly created_at: string;
   readonly updated_at: string;
 };
@@ -2815,6 +2978,7 @@ function readPublicTaskDetail(database: WebSandboxSqliteDatabase, projectId: str
     events: listPublicEventsForTask(database, projectId, taskId),
     logStreams: listPublicLogStreamsForTask(database, projectId, taskId),
     steeringMessages: listPublicSteeringMessagesForTask(database, projectId, taskId),
+    notes: listPublicNotesForTask(database, projectId, taskId),
   };
 }
 
@@ -2840,7 +3004,7 @@ function readLatestPublicSessionForTask(database: WebSandboxSqliteDatabase, proj
     .query<PublicSessionRow, [string, string]>(
       `
         SELECT id, project_id, task_id, attempt_number, status, runtime_provider, runtime_session_id, created_at, started_at, ended_at,
-          final_response_recorded_at, last_heartbeat_at, heartbeat_status, stale_at, lost_at
+          final_response_text, final_response_metadata_json, final_response_recorded_at, last_heartbeat_at, heartbeat_status, stale_at, lost_at
         FROM sessions
         WHERE project_id = ? AND task_id = ?
         ORDER BY attempt_number DESC, created_at DESC, id DESC
@@ -2857,7 +3021,7 @@ function listPublicSessionsForTask(database: WebSandboxSqliteDatabase, projectId
     .query<PublicSessionRow, [string, string]>(
       `
         SELECT id, project_id, task_id, attempt_number, status, runtime_provider, runtime_session_id, created_at, started_at, ended_at,
-          final_response_recorded_at, last_heartbeat_at, heartbeat_status, stale_at, lost_at
+          final_response_text, final_response_metadata_json, final_response_recorded_at, last_heartbeat_at, heartbeat_status, stale_at, lost_at
         FROM sessions
         WHERE project_id = ? AND task_id = ?
         ORDER BY attempt_number ASC, created_at ASC, id ASC
@@ -2960,6 +3124,34 @@ function listPublicSteeringMessagesForTask(
     .map(publicSteeringMessageSummary);
 }
 
+function listPublicNotesForTask(database: WebSandboxSqliteDatabase, projectId: string, taskId: string): readonly PublicNoteSummary[] {
+  return database
+    .query<PublicNoteRow, [string, string]>(
+      `
+        SELECT id, project_id, task_id, session_id, author_id, body, created_at, updated_at
+        FROM notes
+        WHERE project_id = ? AND task_id = ?
+        ORDER BY updated_at DESC, created_at DESC, rowid DESC, id ASC
+      `,
+    )
+    .all(projectId, taskId)
+    .map(publicNoteSummary);
+}
+
+function readPublicNote(database: WebSandboxSqliteDatabase, projectId: string, taskId: string, noteId: string): PublicNoteSummary | null {
+  const row = database
+    .query<PublicNoteRow, [string, string, string]>(
+      `
+        SELECT id, project_id, task_id, session_id, author_id, body, created_at, updated_at
+        FROM notes
+        WHERE project_id = ? AND task_id = ? AND id = ?
+      `,
+    )
+    .get(projectId, taskId, noteId);
+
+  return row ? publicNoteSummary(row) : null;
+}
+
 function readReplayAfterRowid(database: WebSandboxSqliteDatabase, projectId: string, lastEventId: string | null | undefined): number {
   const eventId = lastEventId?.trim();
   if (!eventId) return 0;
@@ -3001,6 +3193,8 @@ function publicSessionSummary(row: PublicSessionRow): PublicSessionSummary {
     createdAt: row.created_at,
     startedAt: row.started_at,
     endedAt: row.ended_at,
+    finalResponseText: sanitizePublicString(row.final_response_text),
+    finalResponseMetadata: row.final_response_metadata_json ? parsePublicJsonObject(row.final_response_metadata_json) : {},
     finalResponseRecordedAt: row.final_response_recorded_at,
     lastHeartbeatAt: row.last_heartbeat_at,
     heartbeatStatus: row.heartbeat_status,
@@ -3050,6 +3244,19 @@ function publicEventSummary(row: PublicEventRow): PublicEventSummary {
     type: row.type,
     payload: parsePublicJsonObject(row.payload_json),
     createdAt: row.created_at,
+  };
+}
+
+function publicNoteSummary(row: PublicNoteRow): PublicNoteSummary {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    taskId: row.task_id,
+    sessionId: row.session_id,
+    authorId: row.author_id,
+    body: sanitizePublicString(row.body) ?? "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -3206,6 +3413,28 @@ function readSessionState(database: WebSandboxSqliteDatabase, projectId: string,
     .get(projectId, sessionId);
 }
 
+function validateNoteScope(
+  database: WebSandboxSqliteDatabase,
+  projectId: string,
+  taskId: string,
+  sessionId: string | null,
+): { readonly ok: true } | { readonly ok: false; readonly error: { readonly code: "not_found"; readonly message: string } } {
+  if (!readTaskState(database, projectId, taskId)) {
+    return { ok: false, error: { code: "not_found", message: `task not found: ${taskId}` } };
+  }
+
+  if (!sessionId) return { ok: true };
+
+  const session = database
+    .query<{ id: string }, [string, string, string]>("SELECT id FROM sessions WHERE project_id = ? AND task_id = ? AND id = ?")
+    .get(projectId, taskId, sessionId);
+  if (!session) {
+    return { ok: false, error: { code: "not_found", message: `session not found: ${sessionId}` } };
+  }
+
+  return { ok: true };
+}
+
 function commandError(code: CommandAdmissibilityError["code"], message: string): { readonly ok: false; readonly error: CommandAdmissibilityError } {
   return { ok: false, error: { code, message } };
 }
@@ -3217,6 +3446,12 @@ function parseJsonObject(value: string): Readonly<Record<string, unknown>> {
 
 function parsePublicJsonObject(value: string): Readonly<Record<string, unknown>> {
   return redactPublicValue(parseJsonObject(value)) as Readonly<Record<string, unknown>>;
+}
+
+function sanitizePublicString(value: string | null): string | null {
+  if (value === null) return null;
+  const sanitized = redactPublicValue(value);
+  return typeof sanitized === "string" ? sanitized : "";
 }
 
 function redactPublicValue(value: unknown, key = ""): unknown {

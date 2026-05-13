@@ -165,6 +165,8 @@ describe("canonical state services", () => {
           latestSession: {
             id: "session_high",
             runtimeSessionId: "runtime_high",
+            finalResponseText: "Finished: https://example.com/result",
+            finalResponseMetadata: {},
           },
           pendingCommands: [
             {
@@ -181,6 +183,88 @@ describe("canonical state services", () => {
       });
       expect(JSON.stringify(detail)).not.toContain("bridge-token-secret");
       expect(JSON.stringify(detail)).not.toContain("bridgeSessionToken");
+    } finally {
+      database.close();
+    }
+  });
+
+  test("creates updates and deletes public task notes with scoped events", () => {
+    const database = createMigratedMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      services.createProject({ id: "project_b", slug: "project-b", name: "Project B" });
+      services.createTask({ id: "task_1", projectId: "project_a", title: "First" });
+      services.createTask({ id: "task_b", projectId: "project_b", title: "Other" });
+      services.createSessionAttempt({ id: "session_1", projectId: "project_a", taskId: "task_1", status: "running" });
+
+      const created = services.createTaskNote({
+        id: "note_1",
+        projectId: "project_a",
+        taskId: "task_1",
+        sessionId: "session_1",
+        authorId: "operator_test",
+        body: " Keep an eye on the deploy. ",
+      });
+
+      expect(created).toMatchObject({
+        ok: true,
+        note: {
+          id: "note_1",
+          projectId: "project_a",
+          taskId: "task_1",
+          sessionId: "session_1",
+          authorId: "operator_test",
+          body: "Keep an eye on the deploy.",
+        },
+        task: { notes: [{ id: "note_1", body: "Keep an eye on the deploy." }] },
+        event: { type: "note.created" },
+        outbox: { routingKey: "project.project_a.events" },
+      });
+
+      expect(
+        services.createTaskNote({
+          projectId: "project_a",
+          taskId: "task_1",
+          sessionId: "missing_session",
+          body: "bad",
+        }),
+      ).toMatchObject({ ok: false, error: { code: "not_found", message: "session not found: missing_session" } });
+      expect(
+        services.createTaskNote({
+          projectId: "project_b",
+          taskId: "task_1",
+          body: "cross project",
+        }),
+      ).toMatchObject({ ok: false, error: { code: "not_found", message: "task not found: task_1" } });
+      expect(services.updateTaskNote({ projectId: "project_a", taskId: "task_1", noteId: "note_1", body: "Updated note" })).toMatchObject({
+        ok: true,
+        note: { id: "note_1", body: "Updated note" },
+        task: { notes: [{ id: "note_1", body: "Updated note" }] },
+        event: { type: "note.updated" },
+      });
+      expect(services.updateTaskNote({ projectId: "project_b", taskId: "task_b", noteId: "note_1", body: "bad" })).toMatchObject({
+        ok: false,
+        error: { code: "not_found" },
+      });
+
+      const deleted = services.deleteTaskNote({ projectId: "project_a", taskId: "task_1", noteId: "note_1" });
+      expect(deleted).toMatchObject({
+        ok: true,
+        note: { id: "note_1", body: "Updated note" },
+        task: { notes: [] },
+        event: { type: "note.deleted" },
+      });
+      expect(services.readTaskDetail({ projectId: "project_a", taskId: "task_1" })).toMatchObject({
+        ok: true,
+        task: { notes: [] },
+      });
+      expect(database.query<{ type: string }, []>("SELECT type FROM events WHERE type LIKE 'note.%' ORDER BY rowid").all()).toEqual([
+        { type: "note.created" },
+        { type: "note.updated" },
+        { type: "note.deleted" },
+      ]);
     } finally {
       database.close();
     }

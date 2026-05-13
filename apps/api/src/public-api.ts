@@ -5,6 +5,7 @@ import type {
   CanonicalStateServices,
   CreateProjectInput,
   CreateTaskInput,
+  NoteMutationResult,
   PublicEventSummary,
   PublicTaskDetail,
   RequestCommandResult,
@@ -32,6 +33,8 @@ type PublicApiServices = Pick<
   CanonicalStateServices,
   | "backlogTask"
   | "createProject"
+  | "createTaskNote"
+  | "deleteTaskNote"
   | "createTask"
   | "listPublicEvents"
   | "listProjectTasks"
@@ -40,6 +43,7 @@ type PublicApiServices = Pick<
   | "requestCommand"
   | "requestSteering"
   | "unblockTask"
+  | "updateTaskNote"
   | "updateTaskPriority"
 > & {
   readonly createProjectWithQueues?: (input: CreateProjectInput) => {
@@ -227,6 +231,25 @@ export function registerPublicApiRoutes(app: Express, options: PublicApiOptions)
     }
 
     response.status(200).json({ ok: true, session, task: detail.task });
+  });
+
+  app.get("/api/public/projects/:projectId/tasks/:taskId/notes", requirePublicOperator, (request, response) => {
+    const detail = readScopedTaskDetail(response, options, request);
+    if (!detail) return;
+
+    response.status(200).json({ ok: true, notes: detail.notes });
+  });
+
+  app.post("/api/public/projects/:projectId/tasks/:taskId/notes", requirePublicOperator, (request: PublicOperatorRequest, response) => {
+    respondCreateNote(options, sseHub, request, response);
+  });
+
+  app.patch("/api/public/projects/:projectId/tasks/:taskId/notes/:noteId", requirePublicOperator, (request, response) => {
+    respondUpdateNote(options, sseHub, request, response);
+  });
+
+  app.delete("/api/public/projects/:projectId/tasks/:taskId/notes/:noteId", requirePublicOperator, (request, response) => {
+    respondDeleteNote(options, sseHub, request, response);
   });
 
   app.get("/api/public/projects/:projectId/tasks/:taskId/artifacts", requirePublicOperator, (request, response) => {
@@ -724,6 +747,66 @@ function respondSteeringCommand(
   }
 }
 
+function respondCreateNote(options: PublicApiOptions, sseHub: PublicSseHub, request: PublicOperatorRequest, response: Response): void {
+  const services = requirePublicServices(options, response);
+  if (!services) return;
+
+  const scope = readTaskScope(request, response);
+  if (!scope) return;
+
+  try {
+    const body = parsePublicBody(request.body);
+    const result = services.createTaskNote({
+      ...scope,
+      sessionId: readOptionalBodyString(body.sessionId),
+      authorId: request.publicOperator?.id ?? null,
+      body: readRequiredBodyString(body, "body"),
+    });
+    respondNoteMutation(response, sseHub, scope, result, 201);
+  } catch (error) {
+    respondPublicException(response, error);
+  }
+}
+
+function respondUpdateNote(options: PublicApiOptions, sseHub: PublicSseHub, request: Request, response: Response): void {
+  const services = requirePublicServices(options, response);
+  if (!services) return;
+
+  const scope = readTaskScope(request, response);
+  if (!scope) return;
+
+  const noteId = readPathParam(request, "noteId");
+  if (!noteId) {
+    response.status(400).json(publicError("validation_error", "noteId is required"));
+    return;
+  }
+
+  try {
+    const body = parsePublicBody(request.body);
+    const result = services.updateTaskNote({ ...scope, noteId, body: readRequiredBodyString(body, "body") });
+    respondNoteMutation(response, sseHub, scope, result, 200);
+  } catch (error) {
+    respondPublicException(response, error);
+  }
+}
+
+function respondDeleteNote(options: PublicApiOptions, sseHub: PublicSseHub, request: Request, response: Response): void {
+  const services = requirePublicServices(options, response);
+  if (!services) return;
+
+  const scope = readTaskScope(request, response);
+  if (!scope) return;
+
+  const noteId = readPathParam(request, "noteId");
+  if (!noteId) {
+    response.status(400).json(publicError("validation_error", "noteId is required"));
+    return;
+  }
+
+  const result = services.deleteTaskNote({ ...scope, noteId });
+  respondNoteMutation(response, sseHub, scope, result, 200);
+}
+
 function respondCommandMutation(
   response: Response,
   sseHub: PublicSseHub,
@@ -753,6 +836,28 @@ function respondCommandMutation(
       commandId: result.command.id,
     }),
   );
+}
+
+function respondNoteMutation(
+  response: Response,
+  sseHub: PublicSseHub,
+  scope: { readonly projectId: string; readonly taskId: string },
+  result: NoteMutationResult,
+  successStatus: number,
+): void {
+  if (!result.ok) {
+    response.status(result.error.code === "not_found" ? 404 : 400).json(publicError(result.error.code, result.error.message));
+    return;
+  }
+
+  response.status(successStatus).json({
+    ok: true,
+    note: result.note,
+    task: result.task,
+    event: result.event,
+    outbox: result.outbox,
+  });
+  sseHub.publish(publicEventFromMutation(result.event, { projectId: scope.projectId, taskId: scope.taskId, sessionId: result.note.sessionId }));
 }
 
 function respondSteeringMutation(

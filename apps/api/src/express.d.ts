@@ -28,6 +28,8 @@ declare module "express" {
     use(handler: RequestHandler): void;
     get(path: string, ...handlers: RequestHandler[]): void;
     post(path: string, ...handlers: RequestHandler[]): void;
+    patch(path: string, ...handlers: RequestHandler[]): void;
+    delete(path: string, ...handlers: RequestHandler[]): void;
     listen(port: number, callback?: () => void): unknown;
   };
 

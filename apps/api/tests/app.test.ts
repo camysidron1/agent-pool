@@ -623,6 +623,107 @@ describe("API service skeleton", () => {
     }
   });
 
+  test("public note routes mutate scoped task detail and publish SSE events", async () => {
+    const publicSseHub = createPublicSseHub();
+    const { baseUrl, config, database, close } = await startTestApi({ publicSseHub });
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      const project = services.createProject({ id: "project_public_notes", slug: "public-notes", name: "Public Notes" });
+      const task = services.createTask({ id: "task_notes", projectId: project.id, title: "Notes" }).task;
+      expect(services.createSessionAttempt({ id: "session_notes", projectId: project.id, taskId: task.id, status: "running" })).toMatchObject({
+        session: { attemptNumber: 1 },
+      });
+      expect(
+        services.recordFinalAssistantResponse({
+          projectId: project.id,
+          sessionId: "session_notes",
+          text: "Final preview: https://example.test/final",
+          metadata: { model: "fake" },
+        }),
+      ).toMatchObject({ ok: true });
+
+      const detail = await fetch(`${baseUrl}/api/public/projects/${project.id}/tasks/${task.id}`, {
+        headers: publicHeaders(config),
+      });
+      expect(detail.status).toBe(200);
+      expect(await detail.json()).toMatchObject({
+        ok: true,
+        task: {
+          notes: [],
+          latestSession: {
+            finalResponseText: "Final preview: https://example.test/final",
+            finalResponseMetadata: { model: "fake" },
+          },
+        },
+      });
+
+      const streamPromise = readSseUntil(`${baseUrl}/api/public/projects/${project.id}/events`, publicHeaders(config), "note.created");
+      await waitForSseClients(publicSseHub, 1);
+      const created = await postPublic(baseUrl, config, `/projects/${project.id}/tasks/${task.id}/notes`, {
+        sessionId: "session_notes",
+        body: "Initial operator note",
+      });
+      const createdBody = await created.json();
+      const noteId = createdBody.note.id as string;
+      const stream = await streamPromise;
+      expect(stream.text).toContain("note.created");
+      await stream.close();
+      expect(created.status).toBe(201);
+      expect(typeof noteId).toBe("string");
+      expect(createdBody).toMatchObject({
+        ok: true,
+        note: {
+          id: expect.any(String),
+          authorId: config.operator.id,
+          body: "Initial operator note",
+          sessionId: "session_notes",
+        },
+        task: { notes: [{ body: "Initial operator note" }] },
+        event: { type: "note.created" },
+      });
+
+      const notes = await fetch(`${baseUrl}/api/public/projects/${project.id}/tasks/${task.id}/notes`, {
+        headers: publicHeaders(config),
+      });
+      expect(notes.status).toBe(200);
+      expect(await notes.json()).toMatchObject({ ok: true, notes: [{ id: noteId, body: "Initial operator note" }] });
+
+      const updated = await fetch(`${baseUrl}/api/public/projects/${project.id}/tasks/${task.id}/notes/${noteId}`, {
+        method: "PATCH",
+        headers: publicHeaders(config),
+        body: JSON.stringify({ body: "Updated operator note" }),
+      });
+      const updatedBody = await updated.json();
+      expect(updated.status).toBe(200);
+      expect(updatedBody).toMatchObject({
+        ok: true,
+        note: { id: noteId, body: "Updated operator note" },
+        task: { notes: [{ id: noteId, body: "Updated operator note" }] },
+        event: { type: "note.updated" },
+      });
+
+      const deleted = await fetch(`${baseUrl}/api/public/projects/${project.id}/tasks/${task.id}/notes/${noteId}`, {
+        method: "DELETE",
+        headers: publicHeaders(config),
+      });
+      expect(deleted.status).toBe(200);
+      expect(await deleted.json()).toMatchObject({
+        ok: true,
+        note: { id: noteId, body: "Updated operator note" },
+        task: { notes: [] },
+        event: { type: "note.deleted" },
+      });
+
+      const blank = await postPublic(baseUrl, config, `/projects/${project.id}/tasks/${task.id}/notes`, { body: " " });
+      expect(blank.status).toBe(400);
+      const wrongScope = await postPublic(baseUrl, config, `/projects/project_missing/tasks/${task.id}/notes`, { body: "bad" });
+      expect(wrongScope.status).toBe(404);
+    } finally {
+      await close();
+    }
+  });
+
   test("public SSE streams replay scoped events and clean up clients", async () => {
     const publicSseHub = createPublicSseHub();
     const { baseUrl, config, database, close } = await startTestApi({ publicSseHub });
