@@ -53,13 +53,28 @@ async function assertServedBundle(): Promise<void> {
     if (!html.includes('<div id="root"></div>')) {
       throw new Error("served HTML is missing the React root");
     }
-    if (!script.includes("agent-pool.operatorId") || !script.includes("x-agent-pool-operator-id")) {
-      throw new Error("served bundle is missing auth shell markers");
-    }
+    assertBundleMarkers(script, [
+      ["auth storage", "agent-pool.operatorId"],
+      ["public auth header", "x-agent-pool-operator-id"],
+      ["project selector", "project-selector"],
+      ["kanban board", "Loaded project Kanban board"],
+      ["task panel", "Task detail"],
+      ["priority mutation", "/priority"],
+      ["unblock mutation", "/unblock"],
+      ["backlog mutation", "/backlog"],
+    ]);
 
     console.log(`browser smoke ok ${server.url}`);
   } finally {
     server.stop(true);
+  }
+}
+
+function assertBundleMarkers(script: string, markers: readonly (readonly [string, string])[]): void {
+  const missing = markers.filter(([, marker]) => !script.includes(marker)).map(([label]) => label);
+
+  if (missing.length > 0) {
+    throw new Error(`served bundle is missing browser acceptance markers: ${missing.join(", ")}`);
   }
 }
 
