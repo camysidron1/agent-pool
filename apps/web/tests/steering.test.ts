@@ -328,6 +328,7 @@ function detailTask(status: PublicTaskDetail["status"], activeSession: PublicSes
     events: [],
     logStreams: [],
     steeringMessages: [],
+    notes: [],
   };
 }
 
@@ -343,6 +344,8 @@ function session(id: string, status: string): PublicSessionSummary {
     createdAt: "2026-05-13T00:00:00.000Z",
     startedAt: null,
     endedAt: null,
+    finalResponseText: null,
+    finalResponseMetadata: {},
     finalResponseRecordedAt: null,
     lastHeartbeatAt: null,
     heartbeatStatus: "fresh",

@@ -416,6 +416,17 @@ label {
   z-index: 20;
 }
 
+.task-panel-full {
+  left: 1rem;
+  right: 1rem;
+  top: 1rem;
+  bottom: 1rem;
+  width: auto;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  box-shadow: 0 18px 55px rgba(24, 33, 47, 0.18);
+}
+
 .task-panel-header {
   align-items: start;
   border-bottom: 1px solid #e2e7ee;
@@ -423,6 +434,14 @@ label {
   gap: 1rem;
   justify-content: space-between;
   padding: 1rem;
+}
+
+.task-panel-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  justify-content: end;
 }
 
 .task-panel-header h2 {
@@ -440,6 +459,19 @@ label {
   gap: 1rem;
   overflow-y: auto;
   padding: 1rem;
+}
+
+.task-panel-full .task-panel-body {
+  align-items: start;
+  grid-template-columns: minmax(0, 1fr) minmax(20rem, 0.45fr);
+}
+
+.task-panel-full .panel-section {
+  min-width: 0;
+}
+
+.task-panel-full .panel-section[aria-label="Raw logs"] {
+  grid-column: 1 / -1;
 }
 
 .panel-section {
@@ -502,6 +534,53 @@ label {
 .log-list time {
   color: #607084;
   font-size: 0.78rem;
+}
+
+.raw-log-shell {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.raw-log-meta {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+}
+
+.raw-log-meta div {
+  border: 1px solid #e2e7ee;
+  border-radius: 6px;
+  padding: 0.55rem;
+}
+
+.raw-log-meta dt {
+  color: #607084;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.raw-log-meta dd {
+  margin: 0.2rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.raw-log-output {
+  box-sizing: border-box;
+  max-height: 22rem;
+  min-height: 11rem;
+  overflow: auto;
+  border: 1px solid #162032;
+  border-radius: 6px;
+  background: #111827;
+  color: #e8edf5;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.84rem;
+  line-height: 1.45;
+  margin: 0;
+  padding: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .result-summary {
@@ -667,6 +746,16 @@ label {
   }
 
   .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .task-panel-full {
+    inset: 0;
+    border-radius: 0;
+  }
+
+  .task-panel-full .task-panel-body,
+  .raw-log-meta {
     grid-template-columns: 1fr;
   }
 

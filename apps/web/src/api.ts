@@ -65,6 +65,8 @@ export type PublicSessionSummary = {
   readonly createdAt: string;
   readonly startedAt: string | null;
   readonly endedAt: string | null;
+  readonly finalResponseText: string | null;
+  readonly finalResponseMetadata: JsonRecord;
   readonly finalResponseRecordedAt: string | null;
   readonly lastHeartbeatAt: string | null;
   readonly heartbeatStatus: string;
@@ -122,6 +124,17 @@ export type PublicLogStreamSummary = {
   readonly updatedAt: string;
 };
 
+export type PublicNoteSummary = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string | null;
+  readonly authorId: string | null;
+  readonly body: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
 export type PublicPlannedUpload = {
   readonly adapter: string;
   readonly bucket: string;
@@ -169,6 +182,7 @@ export type PublicTaskDetail = PublicTaskSummary & {
   readonly events: readonly PublicEventSummary[];
   readonly logStreams: readonly PublicLogStreamSummary[];
   readonly steeringMessages: readonly PublicSteeringMessageSummary[];
+  readonly notes: readonly PublicNoteSummary[];
 };
 
 export type PublicCommandMutation = {

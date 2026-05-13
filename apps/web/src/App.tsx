@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ChangeEvent,
   type DragEvent,
@@ -39,7 +40,6 @@ import {
   replaceTask,
   saveStoredSelectedProjectId,
   selectActiveSession,
-  summarizeLogStream,
   type BoardColumnId,
 } from "./board";
 import { shouldRefreshBoardForEvent, subscribeProjectEvents } from "./sse";
@@ -54,6 +54,7 @@ import {
   submitSteeringDraft,
   type InterruptConfirmationState,
 } from "./steering";
+import { formatRawLogEntries, getRawLogEntries, shouldFollowRawLogScroll, summarizeLogFallback, type RawLogEntry } from "./task-detail";
 
 export type AppProps = {
   readonly apiBaseUrl?: string;
@@ -80,6 +81,7 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
   const [taskDetail, setTaskDetail] = useState<PublicTaskDetail | null>(null);
   const [taskDetailLoadState, setTaskDetailLoadState] = useState<LoadState>("idle");
   const [taskDetailError, setTaskDetailError] = useState<string | null>(null);
+  const [taskDetailMode, setTaskDetailMode] = useState<TaskDetailMode>("panel");
   const isAuthenticated = operatorId.length > 0;
   const api = useMemo(
     () => (isAuthenticated ? createPublicApiClient({ baseUrl: apiBaseUrl, operatorId }) : null),
@@ -267,6 +269,7 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
     setTaskMutationError(null);
     setSelectedTaskId(null);
     setTaskDetail(null);
+    setTaskDetailMode("panel");
   }
 
   async function updatePriority(task: PublicTaskSummary, event: ChangeEvent<HTMLSelectElement>): Promise<void> {
@@ -353,6 +356,7 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
 
   function openTaskPanel(taskId: string): void {
     setSelectedTaskId(taskId);
+    setTaskDetailMode("panel");
   }
 
   function closeTaskPanel(): void {
@@ -360,6 +364,7 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
     setTaskDetail(null);
     setTaskDetailLoadState("idle");
     setTaskDetailError(null);
+    setTaskDetailMode("panel");
   }
 
   function openTaskPanelFromKeyboard(taskId: string, event: KeyboardEvent<HTMLElement>): void {
@@ -586,6 +591,9 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
           detail={taskDetail}
           loadState={taskDetailLoadState}
           error={taskDetailError}
+          mode={taskDetailMode}
+          onExpand={() => setTaskDetailMode("full")}
+          onCollapse={() => setTaskDetailMode("panel")}
           onClose={closeTaskPanel}
           onSubmitSteering={submitTaskSteering}
           onInterruptSteering={interruptTaskSteering}
@@ -596,6 +604,7 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
 }
 
 type LoadState = "idle" | "loading" | "ready" | "error";
+type TaskDetailMode = "panel" | "full";
 
 function isBoardColumnId(value: string): value is BoardColumnId {
   return BOARD_COLUMNS.some((column) => column.id === value);
@@ -614,6 +623,9 @@ function TaskPanel({
   detail,
   loadState,
   error,
+  mode,
+  onExpand,
+  onCollapse,
   onClose,
   onSubmitSteering,
   onInterruptSteering,
@@ -621,6 +633,9 @@ function TaskPanel({
   readonly detail: PublicTaskDetail | null;
   readonly loadState: LoadState;
   readonly error: string | null;
+  readonly mode: TaskDetailMode;
+  readonly onExpand: () => void;
+  readonly onCollapse: () => void;
   readonly onClose: () => void;
   readonly onSubmitSteering: (input: {
     readonly detail: PublicTaskDetail;
@@ -646,6 +661,7 @@ function TaskPanel({
   const interruptAvailability = getSteeringInterruptAvailability(detail, activeSession);
   const steeringDisabled = !steeringAvailability.available || steeringSubmitState === "submitting";
   const canSubmitSteering = steeringAvailability.available && steeringDraft.trim().length > 0 && steeringSubmitState !== "submitting";
+  const panelLabel = mode === "full" ? "Full-page task detail" : "Task detail";
 
   useEffect(() => {
     setSteeringDraft("");
@@ -714,15 +730,26 @@ function TaskPanel({
   }
 
   return (
-    <aside className="task-panel" aria-label="Task detail">
+    <aside className={`task-panel task-panel-${mode}`} aria-label={panelLabel}>
       <header className="task-panel-header">
         <div>
           <p className="eyebrow">Task detail</p>
           <h2>{detail?.title ?? "Loading task"}</h2>
         </div>
-        <button type="button" onClick={onClose} aria-label="Close task detail">
-          Close
-        </button>
+        <div className="task-panel-actions">
+          {mode === "full" ? (
+            <button type="button" className="secondary-button" onClick={onCollapse}>
+              Dock
+            </button>
+          ) : (
+            <button type="button" className="secondary-button" onClick={onExpand}>
+              Expand
+            </button>
+          )}
+          <button type="button" onClick={onClose} aria-label="Close task detail">
+            Close
+          </button>
+        </div>
       </header>
 
       {loadState === "loading" ? <BoardNotice title="Loading task" body="Fetching task detail from the public API." /> : null}
@@ -771,18 +798,7 @@ function TaskPanel({
 
           <section className="panel-section" aria-label="Raw logs">
             <h3>Raw Logs</h3>
-            {detail.logStreams.length === 0 ? (
-              <p>No logs recorded.</p>
-            ) : (
-              <ul className="log-list">
-                {detail.logStreams.map((logStream) => (
-                  <li key={logStream.id}>
-                    <span>{summarizeLogStream(logStream)}</span>
-                    <time>{formatTimestamp(logStream.updatedAt)}</time>
-                  </li>
-                ))}
-              </ul>
-            )}
+            <RawLogViewer detail={detail} />
           </section>
 
           {resultSummary && resultSummary.kind !== "none" ? (
@@ -937,6 +953,85 @@ function TaskPanel({
         </div>
       ) : null}
     </aside>
+  );
+}
+
+function RawLogViewer({ detail }: { readonly detail: PublicTaskDetail }) {
+  const rawLogs = getRawLogEntries(detail);
+  const logText = formatRawLogEntries(rawLogs);
+  const fallbackSummaries = summarizeLogFallback(detail.logStreams);
+  const outputRef = useRef<HTMLPreElement | null>(null);
+  const [followLogs, setFollowLogs] = useState(true);
+
+  useEffect(() => {
+    const node = outputRef.current;
+    if (!node || !followLogs) return;
+
+    node.scrollTop = node.scrollHeight;
+  }, [followLogs, logText]);
+
+  function updateFollowState(): void {
+    const node = outputRef.current;
+    if (!node) return;
+
+    setFollowLogs(
+      shouldFollowRawLogScroll({
+        scrollHeight: node.scrollHeight,
+        scrollTop: node.scrollTop,
+        clientHeight: node.clientHeight,
+      }),
+    );
+  }
+
+  if (rawLogs.length > 0) {
+    return (
+      <div className="raw-log-shell" data-following-logs={followLogs ? "true" : "false"}>
+        <RawLogMeta entries={rawLogs} />
+        <pre ref={outputRef} className="raw-log-output" onScroll={updateFollowState} aria-label="Raw output log">
+          {logText}
+        </pre>
+      </div>
+    );
+  }
+
+  if (fallbackSummaries.length === 0) {
+    return <p>No logs recorded.</p>;
+  }
+
+  return (
+    <ul className="log-list" aria-label="Log stream summaries">
+      {detail.logStreams.map((logStream, index) => (
+        <li key={logStream.id}>
+          <span>{fallbackSummaries[index]}</span>
+          <time>{formatTimestamp(logStream.updatedAt)}</time>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function RawLogMeta({ entries }: { readonly entries: readonly RawLogEntry[] }) {
+  const first = entries[0];
+  const latest = entries.at(-1);
+  const streams = Array.from(new Set(entries.map((entry) => entry.stream))).join(", ");
+
+  return (
+    <dl className="raw-log-meta" aria-label="Raw log metadata">
+      <div>
+        <dt>Chunks</dt>
+        <dd>{entries.length}</dd>
+      </div>
+      <div>
+        <dt>Streams</dt>
+        <dd>{streams}</dd>
+      </div>
+      <div>
+        <dt>Window</dt>
+        <dd>
+          {formatTimestamp(first?.observedAt ?? first?.createdAt ?? null)} to {formatTimestamp(latest?.observedAt ?? latest?.createdAt ?? null)}
+        </dd>
+      </div>
+    </dl>
   );
 }
 

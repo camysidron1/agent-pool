@@ -127,6 +127,7 @@ describe("web board state", () => {
         },
       ],
       steeringMessages: [],
+      notes: [],
     };
 
     expect(selectActiveSession(detail)?.id).toBe("session-active");
@@ -242,6 +243,8 @@ function session(id: string, status: string, attemptNumber: number) {
     startedAt: null,
     endedAt: null,
     finalResponseRecordedAt: null,
+    finalResponseText: null,
+    finalResponseMetadata: {},
     lastHeartbeatAt: null,
     heartbeatStatus: "unknown",
     staleAt: null,
@@ -257,6 +260,7 @@ function detailTask(status: PublicTaskSummary["status"]) {
     events: [],
     logStreams: [],
     steeringMessages: [],
+    notes: [],
   };
 }
 
