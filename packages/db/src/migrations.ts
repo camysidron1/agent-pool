@@ -46,6 +46,7 @@ export const STORAGE_LOG_SCHEMA_MIGRATION_ID = "0006_storage_log_schema" as cons
 export const FINAL_RESPONSE_SCHEMA_MIGRATION_ID = "0007_final_response_schema" as const;
 export const SESSION_HEARTBEAT_SCHEMA_MIGRATION_ID = "0008_session_heartbeat_schema" as const;
 export const BRIDGE_SESSION_CALLBACK_SCHEMA_MIGRATION_ID = "0009_bridge_session_callback_schema" as const;
+export const TASK_RUNTIME_SOURCE_SCHEMA_MIGRATION_ID = "0010_task_runtime_source_schema" as const;
 
 export const WEB_SANDBOX_MIGRATIONS: readonly SqlMigration[] = [
   {
@@ -339,6 +340,11 @@ export const WEB_SANDBOX_MIGRATIONS: readonly SqlMigration[] = [
       "ALTER TABLE sessions ADD COLUMN bridge_session_token_header TEXT",
       "ALTER TABLE sessions ADD COLUMN bridge_session_token TEXT",
     ],
+  },
+  {
+    id: TASK_RUNTIME_SOURCE_SCHEMA_MIGRATION_ID,
+    description: "Add task runtime source metadata field",
+    sql: ["ALTER TABLE tasks ADD COLUMN runtime_source_json TEXT"],
   },
 ] as const;
 

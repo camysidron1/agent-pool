@@ -16,6 +16,7 @@ export {
   SESSION_HEARTBEAT_SCHEMA_MIGRATION_ID,
   SESSION_SCHEMA_MIGRATION_ID,
   STORAGE_LOG_SCHEMA_MIGRATION_ID,
+  TASK_RUNTIME_SOURCE_SCHEMA_MIGRATION_ID,
   MIGRATION_TABLE_NAME,
   WEB_SANDBOX_MIGRATIONS,
   createDrizzleDatabase,
@@ -156,4 +157,5 @@ export {
   type StartupReportSessionRecord,
   type StartupReportTaskRecord,
   type TaskRecord,
+  type TaskRuntimeSourceMetadata,
 } from "./services";

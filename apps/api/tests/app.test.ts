@@ -354,7 +354,16 @@ describe("API service skeleton", () => {
     try {
       const services = createCanonicalStateServices(database.sqlite);
       services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
-      services.createTask({ id: "task_1", projectId: "project_a", title: "First task" });
+      services.createTask({
+        id: "task_1",
+        projectId: "project_a",
+        title: "First task",
+        runtimeSource: {
+          repositoryUrl: "https://github.com/example/tiny-fixture.git",
+          baseRef: "main",
+          taskBranchPrefix: "agent-pool/task",
+        },
+      });
 
       const claimed = await fetch(`${baseUrl}/internal/orchestrator/tasks/claim-next`, {
         method: "POST",
@@ -377,7 +386,16 @@ describe("API service skeleton", () => {
       expect(await claimed.json()).toMatchObject({
         ok: true,
         claimed: true,
-        task: { id: "task_1", projectId: "project_a", status: "running" },
+        task: {
+          id: "task_1",
+          projectId: "project_a",
+          status: "running",
+          runtimeSource: {
+            repositoryUrl: "https://github.com/example/tiny-fixture.git",
+            baseRef: "main",
+            taskBranchPrefix: "agent-pool/task",
+          },
+        },
         session: {
           id: "session_1",
           taskId: "task_1",

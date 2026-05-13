@@ -17,6 +17,13 @@ export type CreateTaskInput = {
   readonly projectId: string;
   readonly title: string;
   readonly description?: string | null;
+  readonly runtimeSource?: TaskRuntimeSourceMetadata | null;
+};
+
+export type TaskRuntimeSourceMetadata = {
+  readonly repositoryUrl: string;
+  readonly baseRef: string;
+  readonly taskBranchPrefix: string;
 };
 
 export type AppendEventInput = {
@@ -48,6 +55,7 @@ export type TaskRecord = {
   readonly projectId: string;
   readonly displayId: number;
   readonly title: string;
+  readonly runtimeSource: TaskRuntimeSourceMetadata | null;
 };
 
 export type EventRecord = {
@@ -406,15 +414,24 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
         const taskId = input.id ?? createId("task");
         const displayId = allocateTaskDisplayId(database, input.projectId);
 
+        const runtimeSource = sanitizeTaskRuntimeSource(input.runtimeSource);
+
         database
-          .query("INSERT INTO tasks (id, project_id, display_id, title, description) VALUES (?, ?, ?, ?, ?)")
-          .run(taskId, input.projectId, displayId, input.title, input.description ?? null);
+          .query("INSERT INTO tasks (id, project_id, display_id, title, description, runtime_source_json) VALUES (?, ?, ?, ?, ?, ?)")
+          .run(
+            taskId,
+            input.projectId,
+            displayId,
+            input.title,
+            input.description ?? null,
+            runtimeSource ? JSON.stringify(runtimeSource) : null,
+          );
 
         const event = appendEvent(database, {
           projectId: input.projectId,
           taskId,
           type: "task.created",
-          payload: { taskId, displayId, title: input.title },
+          payload: { taskId, displayId, title: input.title, runtimeSource },
         });
         const outbox = enqueueOutbox(database, {
           projectId: input.projectId,
@@ -424,7 +441,7 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
         });
 
         return {
-          task: { id: taskId, projectId: input.projectId, displayId, title: input.title },
+          task: { id: taskId, projectId: input.projectId, displayId, title: input.title, runtimeSource },
           event,
           outbox,
         };
@@ -526,6 +543,7 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
             projectId: task.project_id,
             displayId: task.display_id,
             title: task.title,
+            runtimeSource: readRuntimeSourceJson(task.runtime_source_json),
             status: "running",
           },
           session: {
@@ -2011,9 +2029,15 @@ function selectNextQueuedCommand(
 function selectNextEligibleTask(
   database: WebSandboxSqliteDatabase,
   projectId?: string,
-): { readonly id: string; readonly project_id: string; readonly display_id: number; readonly title: string } | null {
+): {
+  readonly id: string;
+  readonly project_id: string;
+  readonly display_id: number;
+  readonly title: string;
+  readonly runtime_source_json: string | null;
+} | null {
   const sql = `
-    SELECT t.id, t.project_id, t.display_id, t.title
+    SELECT t.id, t.project_id, t.display_id, t.title, t.runtime_source_json
     FROM tasks t
     JOIN projects p ON p.id = t.project_id
     WHERE t.status = 'queued'
@@ -2037,8 +2061,41 @@ function selectNextEligibleTask(
   `;
 
   return database
-    .query<{ id: string; project_id: string; display_id: number; title: string }, [string | null, string | null]>(sql)
+    .query<
+      { id: string; project_id: string; display_id: number; title: string; runtime_source_json: string | null },
+      [string | null, string | null]
+    >(sql)
     .get(projectId ?? null, projectId ?? null);
+}
+
+function sanitizeTaskRuntimeSource(input: TaskRuntimeSourceMetadata | null | undefined): TaskRuntimeSourceMetadata | null {
+  if (!input) return null;
+  const repositoryUrl = input.repositoryUrl.trim();
+  const baseRef = input.baseRef.trim();
+  const taskBranchPrefix = input.taskBranchPrefix.trim();
+
+  if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(repositoryUrl)) {
+    throw new Error("task runtime source repositoryUrl must be an https GitHub repository URL");
+  }
+  if (!/^[A-Za-z0-9._/-]+$/.test(baseRef) || baseRef.includes("..")) {
+    throw new Error("task runtime source baseRef is invalid");
+  }
+  if (!/^[A-Za-z0-9._/-]+$/.test(taskBranchPrefix) || taskBranchPrefix.includes("..")) {
+    throw new Error("task runtime source taskBranchPrefix is invalid");
+  }
+
+  const source = { repositoryUrl, baseRef, taskBranchPrefix };
+  const serialized = JSON.stringify(source);
+  if (/token|secret|password|github_pat_|ghp_/i.test(serialized)) {
+    throw new Error("task runtime source must not contain secret values");
+  }
+
+  return source;
+}
+
+function readRuntimeSourceJson(value: string | null): TaskRuntimeSourceMetadata | null {
+  if (!value) return null;
+  return sanitizeTaskRuntimeSource(JSON.parse(value) as TaskRuntimeSourceMetadata);
 }
 
 function readTaskState(database: WebSandboxSqliteDatabase, projectId: string, taskId: string): { readonly status: string } | null {

@@ -75,6 +75,7 @@ export const tasks = sqliteTable(
     displayId: integer("display_id").notNull(),
     title: text("title").notNull(),
     description: text("description"),
+    runtimeSourceJson: text("runtime_source_json"),
     status: text("status", { enum: taskStatusValues }).notNull().default("queued"),
     createdAt: text("created_at").notNull().default(timestampNow),
     updatedAt: text("updated_at").notNull().default(timestampNow),

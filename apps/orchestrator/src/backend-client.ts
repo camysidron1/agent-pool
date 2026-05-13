@@ -46,6 +46,17 @@ export type BackendBridgeSessionConfig = {
   };
 };
 
+export type BackendTaskRuntimeSourceMetadata = {
+  readonly repositoryUrl: string;
+  readonly baseRef: string;
+  readonly taskBranchPrefix: string;
+};
+
+export type ClaimedTaskPayload = Readonly<Record<string, unknown>> & {
+  readonly id: string;
+  readonly runtimeSource?: BackendTaskRuntimeSourceMetadata | null;
+};
+
 export type ClaimedTaskSession = Readonly<Record<string, unknown>> & {
   readonly id: string;
   readonly bridge: BackendBridgeSessionConfig;
@@ -55,7 +66,7 @@ export type ClaimNextTaskResponse =
   | {
       readonly ok: true;
       readonly claimed: true;
-      readonly task: Readonly<Record<string, unknown>>;
+      readonly task: ClaimedTaskPayload;
       readonly session: ClaimedTaskSession;
       readonly event: BackendEvent;
       readonly outbox: BackendOutbox;

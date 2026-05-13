@@ -43,6 +43,65 @@ describe("canonical state services", () => {
     }
   });
 
+  test("persists sanitized runtime source metadata and returns it on task claims", () => {
+    const database = createMigratedMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      const created = services.createTask({
+        id: "task_1",
+        projectId: "project_a",
+        title: "Run E2B",
+        runtimeSource: {
+          repositoryUrl: "https://github.com/example/tiny-fixture.git",
+          baseRef: "main",
+          taskBranchPrefix: "agent-pool/task",
+        },
+      });
+
+      expect(created.task.runtimeSource).toEqual({
+        repositoryUrl: "https://github.com/example/tiny-fixture.git",
+        baseRef: "main",
+        taskBranchPrefix: "agent-pool/task",
+      });
+      expect(
+        JSON.parse(
+          database.query<{ runtime_source_json: string | null }, []>("SELECT runtime_source_json FROM tasks WHERE id = 'task_1'").get()
+            ?.runtime_source_json ?? "{}",
+        ),
+      ).toEqual(created.task.runtimeSource);
+
+      const claim = services.claimNextTask({ projectId: "project_a", sessionId: "session_1", runtimeProvider: "e2b" });
+
+      expect(claim).toMatchObject({
+        ok: true,
+        task: {
+          id: "task_1",
+          runtimeSource: {
+            repositoryUrl: "https://github.com/example/tiny-fixture.git",
+            baseRef: "main",
+            taskBranchPrefix: "agent-pool/task",
+          },
+        },
+      });
+      expect(() =>
+        services.createTask({
+          id: "task_secret",
+          projectId: "project_a",
+          title: "Bad source",
+          runtimeSource: {
+            repositoryUrl: "https://github.com/example/tiny-fixture.git",
+            baseRef: "main",
+            taskBranchPrefix: "ghp_secret",
+          },
+        }),
+      ).toThrow("task runtime source must not contain secret values");
+    } finally {
+      database.close();
+    }
+  });
+
   test("creates immutable session attempts with event/outbox rows", () => {
     const database = createMigratedMemoryDatabase();
 
