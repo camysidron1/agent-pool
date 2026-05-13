@@ -30,6 +30,8 @@
         "OPERATOR_ID": "operator-local",
         "OPERATOR_EMAIL": "operator@example.com",
         "OPERATOR_DISPLAY_NAME": "Agent Pool Operator",
+        "OPERATOR_PASSWORD": "<replace-with-operator-password>",
+        "PUBLIC_AUTH_SESSION_SECRET": "<replace-with-public-auth-session-secret>",
         "RABBITMQ_DEFAULT_USER": "agent-pool",
         "RABBITMQ_DEFAULT_PASS": "<replace-with-rabbitmq-password>",
         "RABBITMQ_URL": "amqp://agent-pool:<replace-with-rabbitmq-password>@agent-pool-rabbitmq.agent-pool.svc.cluster.local:5672",
@@ -366,6 +368,24 @@
                       "secretKeyRef": {
                         "name": "agent-pool-secrets",
                         "key": "OPERATOR_DISPLAY_NAME"
+                      }
+                    }
+                  },
+                  {
+                    "name": "OPERATOR_PASSWORD",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "OPERATOR_PASSWORD"
+                      }
+                    }
+                  },
+                  {
+                    "name": "PUBLIC_AUTH_SESSION_SECRET",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "PUBLIC_AUTH_SESSION_SECRET"
                       }
                     }
                   },

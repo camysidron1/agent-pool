@@ -156,6 +156,8 @@ describe("production Kubernetes manifest", () => {
       "OPERATOR_DISPLAY_NAME",
       "OPERATOR_EMAIL",
       "OPERATOR_ID",
+      "OPERATOR_PASSWORD",
+      "PUBLIC_AUTH_SESSION_SECRET",
       "RABBITMQ_DEFAULT_PASS",
       "RABBITMQ_DEFAULT_USER",
       "RABBITMQ_MANAGEMENT_URL",
@@ -167,6 +169,12 @@ describe("production Kubernetes manifest", () => {
     });
     expect(envVar(apiContainer, "OPERATOR_ID")?.valueFrom).toMatchObject({
       secretKeyRef: { name: "agent-pool-secrets", key: "OPERATOR_ID" },
+    });
+    expect(envVar(apiContainer, "OPERATOR_PASSWORD")?.valueFrom).toMatchObject({
+      secretKeyRef: { name: "agent-pool-secrets", key: "OPERATOR_PASSWORD" },
+    });
+    expect(envVar(apiContainer, "PUBLIC_AUTH_SESSION_SECRET")?.valueFrom).toMatchObject({
+      secretKeyRef: { name: "agent-pool-secrets", key: "PUBLIC_AUTH_SESSION_SECRET" },
     });
     expect(envVar(apiContainer, "RABBITMQ_URL")?.valueFrom).toMatchObject({
       secretKeyRef: { name: "agent-pool-secrets", key: "RABBITMQ_URL" },

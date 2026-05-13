@@ -8,6 +8,11 @@ export type PublicApiClientOptions = {
   readonly fetchImpl?: typeof fetch;
 };
 
+export type PublicAuthClientOptions = {
+  readonly baseUrl?: string;
+  readonly fetchImpl?: typeof fetch;
+};
+
 export type PublicApiClient = ReturnType<typeof createPublicApiClient>;
 
 export type PublicApiErrorBody = {
@@ -221,6 +226,21 @@ export class PublicApiError extends Error {
   }
 }
 
+export async function loginOperator(
+  options: PublicAuthClientOptions & { readonly operatorId: string; readonly password: string },
+): Promise<PublicApiSuccess<{ readonly operator: { readonly id?: unknown }; readonly authMode: string; readonly expiresInSeconds: number }>> {
+  const response = await publicAuthRequest(options, "/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ operatorId: options.operatorId.trim(), password: options.password }),
+  });
+  return response as PublicApiSuccess<{ readonly operator: { readonly id?: unknown }; readonly authMode: string; readonly expiresInSeconds: number }>;
+}
+
+export async function logoutOperator(options: PublicAuthClientOptions = {}): Promise<PublicApiSuccess<Record<string, never>>> {
+  const response = await publicAuthRequest(options, "/auth/logout", { method: "POST" });
+  return response as PublicApiSuccess<Record<string, never>>;
+}
+
 export function createPublicApiClient(options: PublicApiClientOptions) {
   const baseUrl = normalizeBaseUrl(options.baseUrl);
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -237,6 +257,7 @@ export function createPublicApiClient(options: PublicApiClientOptions) {
 
     const response = await fetchImpl(`${baseUrl}/api/public${path}`, {
       ...init,
+      credentials: "include",
       headers,
     });
     const body = await readJson(response);
@@ -320,6 +341,29 @@ export function createPublicApiClient(options: PublicApiClientOptions) {
         { method: "POST" },
       ),
   };
+}
+
+async function publicAuthRequest(options: PublicAuthClientOptions, path: string, init: RequestInit): Promise<unknown> {
+  const baseUrl = normalizeBaseUrl(options.baseUrl);
+  const headers = new Headers(init.headers);
+  headers.set("accept", "application/json");
+  if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
+
+  const response = await (options.fetchImpl ?? fetch)(`${baseUrl}/api/public${path}`, {
+    ...init,
+    credentials: "include",
+    headers,
+  });
+  const body = await readJson(response);
+
+  if (!response.ok || isPublicApiErrorBody(body)) {
+    const error = isPublicApiErrorBody(body)
+      ? body.error
+      : { code: "http_error", message: `Request failed with status ${response.status}` };
+    throw new PublicApiError(response.status, error.code, error.message);
+  }
+
+  return body;
 }
 
 export function normalizeBaseUrl(value: string | undefined): string {

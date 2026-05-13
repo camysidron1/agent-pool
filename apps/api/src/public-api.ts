@@ -1,3 +1,5 @@
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+
 import type { Express, NextFunction, Request, RequestHandler, Response } from "express";
 
 import type { AppConfig, OperatorIdentity, RuntimeProviderName } from "@agent-pool/config";
@@ -71,6 +73,37 @@ export type PublicSseHub = {
 export function registerPublicApiRoutes(app: Express, options: PublicApiOptions): void {
   const requirePublicOperator = createPublicOperatorMiddleware(options.config);
   const sseHub = options.sseHub ?? createPublicSseHub();
+
+  app.post("/api/public/auth/login", (request, response) => {
+    const auth = requireConfiguredPublicAuth(options.config, response);
+    if (!auth) return;
+
+    try {
+      const body = parsePublicBody(request.body);
+      const operatorId = readRequiredBodyString(body, "operatorId");
+      const password = readRequiredBodyString(body, "password");
+
+      if (operatorId !== options.config.operator.id || !constantTimeEqual(password, auth.operatorPassword)) {
+        response.status(401).json(publicError("invalid_credentials", "operator credentials are invalid"));
+        return;
+      }
+
+      setPublicSessionCookie(response, options.config);
+      response.status(200).json({
+        ok: true,
+        operator: options.config.operator,
+        authMode: options.config.authMode,
+        expiresInSeconds: auth.sessionTtlSeconds,
+      });
+    } catch (error) {
+      respondPublicException(response, error);
+    }
+  });
+
+  app.post("/api/public/auth/logout", (_request, response) => {
+    clearPublicSessionCookie(response, options.config);
+    response.status(200).json({ ok: true });
+  });
 
   app.get("/api/public/me", requirePublicOperator, (request: PublicOperatorRequest, response) => {
     response.status(200).json({
@@ -406,13 +439,32 @@ export function createPublicOperatorMiddleware(config: AppConfig): RequestHandle
   return (request: PublicOperatorRequest, response: Response, next?: NextFunction): void => {
     const operatorId = readHeader(request, PUBLIC_OPERATOR_ID_HEADER);
 
-    if (!operatorId) {
-      response.status(401).json(publicError("unauthenticated", "operator auth required"));
+    if (config.authMode === "test") {
+      if (!operatorId) {
+        response.status(401).json(publicError("unauthenticated", "operator auth required"));
+        return;
+      }
+
+      if (operatorId !== config.operator.id) {
+        response.status(403).json(publicError("forbidden", "operator auth invalid"));
+        return;
+      }
+
+      request.publicOperator = config.operator;
+      next?.();
       return;
     }
 
-    if (operatorId !== config.operator.id) {
-      response.status(403).json(publicError("forbidden", "operator auth invalid"));
+    if (!requireConfiguredPublicAuth(config, response)) return;
+
+    const session = readPublicSessionCookie(request, config);
+    if (!session.ok) {
+      response.status(401).json(publicError("unauthenticated", session.reason));
+      return;
+    }
+
+    if (!operatorId || operatorId !== session.operatorId || operatorId !== config.operator.id) {
+      response.status(403).json(publicError("forbidden", "operator session identity mismatch"));
       return;
     }
 
@@ -435,6 +487,143 @@ function readHeader(request: Request, name: string): string | null {
   const raw = request.headers?.[name];
   const value = (Array.isArray(raw) ? raw[0] : raw)?.trim();
   return value && value.length > 0 ? value : null;
+}
+
+function requireConfiguredPublicAuth(
+  config: AppConfig,
+  response: Response,
+): { readonly operatorPassword: string; readonly sessionSecret: string; readonly sessionTtlSeconds: number } | null {
+  const operatorPassword = config.publicAuth.operatorPassword;
+  const sessionSecret = config.publicAuth.sessionSecret;
+
+  if (!operatorPassword || !sessionSecret) {
+    response.status(503).json(publicError("auth_misconfigured", "operator cookie auth is not configured"));
+    return null;
+  }
+
+  return {
+    operatorPassword,
+    sessionSecret,
+    sessionTtlSeconds: config.publicAuth.sessionTtlSeconds,
+  };
+}
+
+function setPublicSessionCookie(response: Response, config: AppConfig): void {
+  const auth = config.publicAuth;
+  if (!auth.sessionSecret) return;
+  const now = Math.floor(Date.now() / 1000);
+  const payload = {
+    operatorId: config.operator.id,
+    iat: now,
+    exp: now + auth.sessionTtlSeconds,
+    nonce: randomBytes(16).toString("base64url"),
+  };
+  const value = signPublicSessionPayload(payload, auth.sessionSecret);
+  response.setHeader(
+    "set-cookie",
+    serializeCookie(auth.cookieName, value, {
+      maxAge: auth.sessionTtlSeconds,
+      secure: auth.cookieSecure,
+    }),
+  );
+}
+
+function clearPublicSessionCookie(response: Response, config: AppConfig): void {
+  response.setHeader(
+    "set-cookie",
+    serializeCookie(config.publicAuth.cookieName, "", {
+      maxAge: 0,
+      secure: config.publicAuth.cookieSecure,
+    }),
+  );
+}
+
+function readPublicSessionCookie(
+  request: Request,
+  config: AppConfig,
+): { readonly ok: true; readonly operatorId: string } | { readonly ok: false; readonly reason: string } {
+  const secret = config.publicAuth.sessionSecret;
+  if (!secret) return { ok: false, reason: "operator cookie auth is not configured" };
+  const cookie = readCookie(request, config.publicAuth.cookieName);
+  if (!cookie) return { ok: false, reason: "operator session required" };
+
+  const parsed = verifyPublicSessionValue(cookie, secret);
+  if (!parsed.ok) return parsed;
+  if (parsed.operatorId !== config.operator.id) {
+    return { ok: false, reason: "operator session invalid" };
+  }
+
+  return parsed;
+}
+
+function signPublicSessionPayload(
+  payload: { readonly operatorId: string; readonly iat: number; readonly exp: number; readonly nonce: string },
+  secret: string,
+): string {
+  const encodedPayload = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  const signature = createHmac("sha256", secret).update(encodedPayload).digest("base64url");
+  return `${encodedPayload}.${signature}`;
+}
+
+function verifyPublicSessionValue(
+  value: string,
+  secret: string,
+): { readonly ok: true; readonly operatorId: string } | { readonly ok: false; readonly reason: string } {
+  const [encodedPayload, signature, extra] = value.split(".");
+  if (!encodedPayload || !signature || extra !== undefined) return { ok: false, reason: "operator session invalid" };
+
+  const expected = createHmac("sha256", secret).update(encodedPayload).digest("base64url");
+  if (!constantTimeEqual(signature, expected)) return { ok: false, reason: "operator session invalid" };
+
+  try {
+    const payload = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8")) as {
+      readonly operatorId?: unknown;
+      readonly exp?: unknown;
+    };
+    if (typeof payload.operatorId !== "string" || typeof payload.exp !== "number") {
+      return { ok: false, reason: "operator session invalid" };
+    }
+    if (!Number.isFinite(payload.exp) || payload.exp <= Math.floor(Date.now() / 1000)) {
+      return { ok: false, reason: "operator session expired" };
+    }
+
+    return { ok: true, operatorId: payload.operatorId };
+  } catch {
+    return { ok: false, reason: "operator session invalid" };
+  }
+}
+
+function readCookie(request: Request, name: string): string | null {
+  const rawCookieHeader = request.headers?.cookie;
+  const cookieHeader = Array.isArray(rawCookieHeader) ? rawCookieHeader[0] : rawCookieHeader;
+  if (!cookieHeader) return null;
+
+  for (const part of cookieHeader.split(";")) {
+    const [rawName, ...rawValue] = part.trim().split("=");
+    if (rawName === name) return rawValue.join("=") || null;
+  }
+
+  return null;
+}
+
+function serializeCookie(
+  name: string,
+  value: string,
+  options: { readonly maxAge: number; readonly secure: boolean },
+): string {
+  const parts = [
+    `${name}=${value}`,
+    `Max-Age=${options.maxAge}`,
+    "Path=/api/public",
+    "HttpOnly",
+    "SameSite=Strict",
+  ];
+  if (options.secure) parts.push("Secure");
+  return parts.join("; ");
+}
+
+function constantTimeEqual(left: string, right: string): boolean {
+  return timingSafeEqual(createHash("sha256").update(left).digest(), createHash("sha256").update(right).digest());
 }
 
 function requirePublicServices(options: PublicApiOptions, response: Response): PublicApiServices | null {

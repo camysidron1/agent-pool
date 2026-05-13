@@ -1,15 +1,15 @@
 import { describe, expect, test } from "bun:test";
 
-import { createPublicApiClient, PublicApiError, PUBLIC_OPERATOR_ID_HEADER } from "../src/api";
+import { createPublicApiClient, loginOperator, logoutOperator, PublicApiError, PUBLIC_OPERATOR_ID_HEADER } from "../src/api";
 
 describe("public web API client", () => {
-  test("sends the public operator header to the public API namespace", async () => {
-    const calls: { readonly url: string; readonly headers: Headers }[] = [];
+  test("sends public operator identity with browser cookies to the public API namespace", async () => {
+    const calls: { readonly url: string; readonly headers: Headers; readonly credentials?: RequestCredentials }[] = [];
     const client = createPublicApiClient({
       baseUrl: "https://agent-pool.example/",
       operatorId: "operator-test",
       fetchImpl: async (input, init) => {
-        calls.push({ url: String(input), headers: new Headers(init?.headers) });
+        calls.push({ url: String(input), headers: new Headers(init?.headers), credentials: init?.credentials });
         return jsonResponse({ ok: true, projects: [] });
       },
     });
@@ -20,6 +20,33 @@ describe("public web API client", () => {
     expect(calls[0]?.url).toBe("https://agent-pool.example/api/public/projects");
     expect(calls[0]?.headers.get(PUBLIC_OPERATOR_ID_HEADER)).toBe("operator-test");
     expect(calls[0]?.headers.get("accept")).toBe("application/json");
+    expect(calls[0]?.credentials).toBe("include");
+  });
+
+  test("logs in and logs out through cookie-backed auth routes", async () => {
+    const calls: { readonly url: string; readonly body: string | null; readonly credentials?: RequestCredentials }[] = [];
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), body: typeof init?.body === "string" ? init.body : null, credentials: init?.credentials });
+      return jsonResponse({ ok: true, operator: { id: "operator-test" }, authMode: "local", expiresInSeconds: 3600 });
+    };
+
+    await expect(
+      loginOperator({ baseUrl: "https://agent-pool.example/", operatorId: "operator-test", password: "operator-password", fetchImpl }),
+    ).resolves.toMatchObject({ ok: true, operator: { id: "operator-test" } });
+    await expect(logoutOperator({ baseUrl: "https://agent-pool.example/", fetchImpl })).resolves.toMatchObject({ ok: true });
+
+    expect(calls).toEqual([
+      {
+        url: "https://agent-pool.example/api/public/auth/login",
+        body: '{"operatorId":"operator-test","password":"operator-password"}',
+        credentials: "include",
+      },
+      {
+        url: "https://agent-pool.example/api/public/auth/logout",
+        body: null,
+        credentials: "include",
+      },
+    ]);
   });
 
   test("throws structured public API errors", async () => {

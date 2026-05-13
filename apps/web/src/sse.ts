@@ -48,6 +48,7 @@ export function subscribeProjectEvents(options: ProjectEventSubscriptionOptions)
   void (async () => {
     try {
       const response = await fetchImpl(projectEventsUrl(options.baseUrl, options.projectId), {
+        credentials: "include",
         headers: {
           accept: "text/event-stream",
           [PUBLIC_OPERATOR_ID_HEADER]: options.operatorId,

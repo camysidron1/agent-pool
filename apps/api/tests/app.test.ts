@@ -121,6 +121,81 @@ describe("API service skeleton", () => {
     }
   });
 
+  test("local public API requires a signed operator session cookie", async () => {
+    const { baseUrl, config, close } = await startTestApi({
+      env: {
+        AUTH_MODE: "local",
+        OPERATOR_ID: "operator-local",
+        OPERATOR_EMAIL: "operator@example.test",
+        OPERATOR_PASSWORD: "operator-password",
+        PUBLIC_AUTH_SESSION_SECRET: "public-auth-session-secret-123456",
+        INTERNAL_SERVICE_TOKEN: "internal-service-token",
+      },
+    });
+
+    try {
+      const headerOnly = await fetch(`${baseUrl}/api/public/me`, {
+        headers: { "x-agent-pool-operator-id": config.operator.id },
+      });
+      const badLogin = await fetch(`${baseUrl}/api/public/auth/login`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ operatorId: config.operator.id, password: "wrong-password" }),
+      });
+      const login = await fetch(`${baseUrl}/api/public/auth/login`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ operatorId: config.operator.id, password: config.publicAuth.operatorPassword }),
+      });
+      const setCookie = login.headers.get("set-cookie") ?? "";
+      const sessionCookie = setCookie.split(";")[0];
+      const cookieOnly = await fetch(`${baseUrl}/api/public/me`, {
+        headers: { cookie: sessionCookie },
+      });
+      const ok = await fetch(`${baseUrl}/api/public/me`, {
+        headers: {
+          cookie: sessionCookie,
+          "x-agent-pool-operator-id": config.operator.id,
+        },
+      });
+      const logout = await fetch(`${baseUrl}/api/public/auth/logout`, { method: "POST" });
+
+      expect(headerOnly.status).toBe(401);
+      expect(await headerOnly.json()).toEqual({
+        ok: false,
+        error: { code: "unauthenticated", message: "operator session required" },
+      });
+      expect(badLogin.status).toBe(401);
+      expect(await badLogin.json()).toEqual({
+        ok: false,
+        error: { code: "invalid_credentials", message: "operator credentials are invalid" },
+      });
+      expect(badLogin.headers.get("set-cookie")).toBeNull();
+      expect(login.status).toBe(200);
+      expect(await login.json()).toMatchObject({
+        ok: true,
+        authMode: "local",
+        operator: config.operator,
+      });
+      expect(setCookie).toContain(`${config.publicAuth.cookieName}=`);
+      expect(setCookie).toContain("HttpOnly");
+      expect(setCookie).toContain("SameSite=Strict");
+      expect(setCookie).toContain("Path=/api/public");
+      expect(setCookie).not.toContain(config.publicAuth.operatorPassword ?? "operator-password");
+      expect(cookieOnly.status).toBe(403);
+      expect(await cookieOnly.json()).toEqual({
+        ok: false,
+        error: { code: "forbidden", message: "operator session identity mismatch" },
+      });
+      expect(ok.status).toBe(200);
+      expect(await ok.json()).toMatchObject({ ok: true, authMode: "local", operator: config.operator });
+      expect(logout.status).toBe(200);
+      expect(logout.headers.get("set-cookie")).toContain("Max-Age=0");
+    } finally {
+      await close();
+    }
+  });
+
   test("public project and task routes expose authenticated read and mutation models", async () => {
     const { baseUrl, config, database, close } = await startTestApi();
 

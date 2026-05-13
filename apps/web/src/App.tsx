@@ -12,6 +12,8 @@ import {
 
 import {
   createPublicApiClient,
+  loginOperator,
+  logoutOperator,
   PublicApiError,
   type PublicArtifactSummary,
   type PublicNoteSummary,
@@ -80,7 +82,9 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
   const initialOperatorId = readStoredOperatorId(storage) ?? "";
   const [operatorId, setOperatorId] = useState(initialOperatorId);
   const [operatorDraft, setOperatorDraft] = useState(initialOperatorId);
+  const [operatorPasswordDraft, setOperatorPasswordDraft] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
+  const [authSubmitting, setAuthSubmitting] = useState(false);
   const [projects, setProjects] = useState<readonly PublicProjectSummary[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(() => readStoredSelectedProjectId(storage));
   const [projectLoadState, setProjectLoadState] = useState<LoadState>("idle");
@@ -245,7 +249,7 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
     };
   }, [api, selectedProjectId, selectedTaskId]);
 
-  function submitOperator(event: FormEvent<HTMLFormElement>): void {
+  async function submitOperator(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     const normalized = normalizeOperatorId(operatorDraft);
 
@@ -253,18 +257,39 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
       setAuthError("Operator id is required.");
       return;
     }
+    if (!operatorPasswordDraft) {
+      setAuthError("Password is required.");
+      return;
+    }
 
-    saveStoredOperatorId(storage, normalized);
-    setOperatorId(normalized);
-    setOperatorDraft(normalized);
     setAuthError(null);
+    setAuthSubmitting(true);
+
+    try {
+      const session = await loginOperator({
+        baseUrl: apiBaseUrl,
+        operatorId: normalized,
+        password: operatorPasswordDraft,
+      });
+      const sessionOperatorId = typeof session.operator.id === "string" ? session.operator.id : normalized;
+      saveStoredOperatorId(storage, sessionOperatorId);
+      setOperatorId(sessionOperatorId);
+      setOperatorDraft(sessionOperatorId);
+      setOperatorPasswordDraft("");
+    } catch (error) {
+      setAuthError(formatApiError(error));
+    } finally {
+      setAuthSubmitting(false);
+    }
   }
 
   function signOut(): void {
+    void logoutOperator({ baseUrl: apiBaseUrl }).catch(() => undefined);
     clearStoredOperatorId(storage);
     saveStoredSelectedProjectId(storage, null);
     setOperatorId("");
     setOperatorDraft("");
+    setOperatorPasswordDraft("");
     setAuthError(null);
     setProjects([]);
     setTasks([]);
@@ -275,6 +300,10 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
 
   function updateOperatorDraft(event: ChangeEvent<HTMLInputElement>): void {
     setOperatorDraft(event.currentTarget.value);
+  }
+
+  function updateOperatorPasswordDraft(event: ChangeEvent<HTMLInputElement>): void {
+    setOperatorPasswordDraft(event.currentTarget.value);
   }
 
   function selectProject(event: ChangeEvent<HTMLSelectElement>): void {
@@ -491,7 +520,20 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
                 value={operatorDraft}
                 onChange={updateOperatorDraft}
               />
-              <button type="submit">Continue</button>
+            </div>
+            <label htmlFor="operator-password">Password</label>
+            <div className="auth-row">
+              <input
+                id="operator-password"
+                name="operator-password"
+                type="password"
+                autoComplete="current-password"
+                value={operatorPasswordDraft}
+                onChange={updateOperatorPasswordDraft}
+              />
+              <button type="submit" disabled={authSubmitting}>
+                {authSubmitting ? "Signing in" : "Sign in"}
+              </button>
             </div>
             {authError ? <p className="form-error">{authError}</p> : null}
           </form>

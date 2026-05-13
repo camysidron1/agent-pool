@@ -15,6 +15,14 @@ export type ServiceTokenConfig = {
   readonly headerName: string;
 };
 
+export type PublicAuthConfig = {
+  readonly operatorPassword: string | null;
+  readonly sessionSecret: string | null;
+  readonly cookieName: string;
+  readonly cookieSecure: boolean;
+  readonly sessionTtlSeconds: number;
+};
+
 export type BackendServiceConfig = {
   readonly port: number;
   readonly publicUrl: string;
@@ -72,6 +80,7 @@ export type AppConfig = {
   readonly authMode: AuthMode;
   readonly operator: OperatorIdentity;
   readonly serviceToken: ServiceTokenConfig;
+  readonly publicAuth: PublicAuthConfig;
   readonly backend: BackendServiceConfig;
   readonly bridge: BridgeSessionConfig;
   readonly orchestrator: OrchestratorServiceConfig;
@@ -95,6 +104,10 @@ export const TEST_OPERATOR_IDENTITY: OperatorIdentity = {
 
 export const DEFAULT_SERVICE_TOKEN = "test-service-token" as const;
 export const DEFAULT_SERVICE_TOKEN_HEADER = "x-agent-pool-service-token" as const;
+export const DEFAULT_PUBLIC_AUTH_PASSWORD = "test-operator-password" as const;
+export const DEFAULT_PUBLIC_AUTH_SESSION_SECRET = "test-public-auth-session-secret-000000000000" as const;
+export const DEFAULT_PUBLIC_AUTH_COOKIE_NAME = "agent_pool_session" as const;
+export const DEFAULT_PUBLIC_AUTH_SESSION_TTL_SECONDS = 86_400;
 export const DEFAULT_BRIDGE_SESSION_TOKEN_HEADER = "x-agent-pool-session-token" as const;
 export const DEFAULT_BACKEND_PORT = 3000;
 export const DEFAULT_ORCHESTRATOR_PORT = 3001;
@@ -134,6 +147,7 @@ export function loadConfig(env: EnvSource = readProcessEnv()): AppConfig {
     authMode,
     operator: readOperator(authMode, env),
     serviceToken,
+    publicAuth: readPublicAuthConfig(authMode, backend, env),
     backend,
     bridge,
     orchestrator: {
@@ -270,6 +284,40 @@ function readServiceTokenConfig(authMode: AuthMode, env: EnvSource): ServiceToke
   return {
     token: token || DEFAULT_SERVICE_TOKEN,
     headerName: env.INTERNAL_SERVICE_TOKEN_HEADER?.trim().toLowerCase() || DEFAULT_SERVICE_TOKEN_HEADER,
+  };
+}
+
+function readPublicAuthConfig(authMode: AuthMode, backend: BackendServiceConfig, env: EnvSource): PublicAuthConfig {
+  const operatorPassword =
+    env.OPERATOR_PASSWORD?.trim() || (authMode === "test" ? DEFAULT_PUBLIC_AUTH_PASSWORD : null);
+  const sessionSecret =
+    env.PUBLIC_AUTH_SESSION_SECRET?.trim() || (authMode === "test" ? DEFAULT_PUBLIC_AUTH_SESSION_SECRET : null);
+  const cookieName = env.PUBLIC_AUTH_COOKIE_NAME?.trim() || DEFAULT_PUBLIC_AUTH_COOKIE_NAME;
+
+  if (operatorPassword !== null && operatorPassword.length < 12) {
+    throw new ConfigError("OPERATOR_PASSWORD must be at least 12 characters.");
+  }
+  if (sessionSecret !== null && sessionSecret.length < 32) {
+    throw new ConfigError("PUBLIC_AUTH_SESSION_SECRET must be at least 32 characters.");
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(cookieName)) {
+    throw new ConfigError("PUBLIC_AUTH_COOKIE_NAME must contain only letters, numbers, underscores, or hyphens.");
+  }
+
+  return {
+    operatorPassword,
+    sessionSecret,
+    cookieName,
+    cookieSecure: readBoolean(
+      env.PUBLIC_AUTH_COOKIE_SECURE,
+      authMode !== "test" && backend.publicUrl.startsWith("https://"),
+      "PUBLIC_AUTH_COOKIE_SECURE",
+    ),
+    sessionTtlSeconds: readPositiveInteger(
+      env.PUBLIC_AUTH_SESSION_TTL_SECONDS,
+      DEFAULT_PUBLIC_AUTH_SESSION_TTL_SECONDS,
+      "PUBLIC_AUTH_SESSION_TTL_SECONDS",
+    ),
   };
 }
 

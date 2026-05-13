@@ -14,6 +14,10 @@ import {
   DEFAULT_E2B_STARTUP_TIMEOUT_MS,
   DEFAULT_E2B_WORKING_DIRECTORY,
   DEFAULT_ORCHESTRATOR_URL,
+  DEFAULT_PUBLIC_AUTH_COOKIE_NAME,
+  DEFAULT_PUBLIC_AUTH_PASSWORD,
+  DEFAULT_PUBLIC_AUTH_SESSION_SECRET,
+  DEFAULT_PUBLIC_AUTH_SESSION_TTL_SECONDS,
   DEFAULT_RABBITMQ_MANAGEMENT_URL,
   DEFAULT_RABBITMQ_URL,
   DEFAULT_RUNTIME_PROVIDER,
@@ -32,6 +36,13 @@ describe("loadConfig", () => {
       serviceToken: {
         token: DEFAULT_SERVICE_TOKEN,
         headerName: DEFAULT_SERVICE_TOKEN_HEADER,
+      },
+      publicAuth: {
+        operatorPassword: DEFAULT_PUBLIC_AUTH_PASSWORD,
+        sessionSecret: DEFAULT_PUBLIC_AUTH_SESSION_SECRET,
+        cookieName: DEFAULT_PUBLIC_AUTH_COOKIE_NAME,
+        cookieSecure: false,
+        sessionTtlSeconds: DEFAULT_PUBLIC_AUTH_SESSION_TTL_SECONDS,
       },
       backend: {
         port: 3000,
@@ -102,6 +113,11 @@ describe("loadConfig", () => {
         OPERATOR_ID: "operator-1",
         OPERATOR_EMAIL: "operator@example.com",
         INTERNAL_SERVICE_TOKEN: "secret-token",
+        OPERATOR_PASSWORD: "operator-password",
+        PUBLIC_AUTH_SESSION_SECRET: "public-auth-session-secret-123456",
+        PUBLIC_AUTH_COOKIE_NAME: "agent_pool_local_session",
+        PUBLIC_AUTH_COOKIE_SECURE: "true",
+        PUBLIC_AUTH_SESSION_TTL_SECONDS: "3600",
         API_PORT: "4100",
         API_PUBLIC_URL: "http://api.local.test:4100/",
         API_INTERNAL_URL: "http://api.internal.test:4100/",
@@ -144,6 +160,13 @@ describe("loadConfig", () => {
       serviceToken: {
         token: "secret-token",
         headerName: DEFAULT_SERVICE_TOKEN_HEADER,
+      },
+      publicAuth: {
+        operatorPassword: "operator-password",
+        sessionSecret: "public-auth-session-secret-123456",
+        cookieName: "agent_pool_local_session",
+        cookieSecure: true,
+        sessionTtlSeconds: 3600,
       },
       backend: {
         port: 4100,
