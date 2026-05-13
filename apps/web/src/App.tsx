@@ -23,6 +23,7 @@ import {
   saveStoredSelectedProjectId,
   type BoardColumnId,
 } from "./board";
+import { shouldRefreshBoardForEvent, subscribeProjectEvents } from "./sse";
 
 export type AppProps = {
   readonly apiBaseUrl?: string;
@@ -121,6 +122,42 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
       cancelled = true;
     };
   }, [api, selectedProjectId]);
+
+  useEffect(() => {
+    if (!api || !selectedProjectId || !operatorId) return;
+    let cancelled = false;
+
+    async function refreshTasksFromEvent(): Promise<void> {
+      if (!api || !selectedProjectId || cancelled) return;
+
+      try {
+        const response = await api.listTasks(selectedProjectId);
+        if (!cancelled) setTasks(response.tasks);
+      } catch (error) {
+        if (!cancelled) setTaskMutationError(formatApiError(error));
+      }
+    }
+
+    const unsubscribe = subscribeProjectEvents({
+      baseUrl: apiBaseUrl,
+      operatorId,
+      projectId: selectedProjectId,
+      onEvent: (event) => {
+        if (shouldRefreshBoardForEvent(event, selectedProjectId)) {
+          void refreshTasksFromEvent();
+        }
+      },
+      onFallbackRefresh: () => void refreshTasksFromEvent(),
+      onError: () => {
+        if (!cancelled) setTaskMutationError("Live updates are refreshing periodically.");
+      },
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [api, apiBaseUrl, operatorId, selectedProjectId]);
 
   function submitOperator(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
