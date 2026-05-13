@@ -36,7 +36,7 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
   const requireInternalServiceToken = createInternalServiceTokenMiddleware(config);
 
   app.use(express.json());
-  registerPublicApiRoutes(app, { config });
+  registerPublicApiRoutes(app, { config, services });
 
   app.get("/health", (_request, response) => {
     response.status(200).json({

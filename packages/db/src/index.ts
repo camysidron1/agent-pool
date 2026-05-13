@@ -167,6 +167,7 @@ export {
   type StartupReportResult,
   type StartupReportSessionRecord,
   type StartupReportTaskRecord,
+  type TaskMutationResult,
   type TaskRecord,
   type TaskRuntimeSourceMetadata,
 } from "./services";

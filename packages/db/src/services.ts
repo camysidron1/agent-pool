@@ -170,6 +170,10 @@ export type ReadTaskDetailResult =
   | { readonly ok: true; readonly task: PublicTaskDetail }
   | { readonly ok: false; readonly error: { readonly code: "not_found"; readonly message: string } };
 
+export type TaskMutationResult =
+  | { readonly ok: true; readonly task: PublicTaskDetail; readonly event: EventRecord; readonly outbox: OutboxRecord; readonly idempotent: boolean }
+  | { readonly ok: false; readonly error: { readonly code: "not_found" | "invalid_state"; readonly message: string } };
+
 export type EventRecord = {
   readonly id: string;
   readonly projectId: string;
@@ -579,31 +583,66 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
       });
     },
 
-    updateTaskPriority(input: { readonly projectId: string; readonly taskId: string; readonly priority: number }): ReadTaskDetailResult {
+    updateTaskPriority(input: { readonly projectId: string; readonly taskId: string; readonly priority: number }): TaskMutationResult {
       const priority = normalizeTaskPriority(input.priority);
-      const updated = database
-        .query<{ id: string }, [number, string, string]>(
-          "UPDATE tasks SET priority = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ? RETURNING id",
-        )
-        .get(priority, input.projectId, input.taskId);
+      return transaction(database, () => {
+        const current = readTaskState(database, input.projectId, input.taskId);
 
-      if (!updated) {
-        return { ok: false, error: { code: "not_found", message: `task not found: ${input.taskId}` } };
-      }
+        if (!current) {
+          return { ok: false, error: { code: "not_found", message: `task not found: ${input.taskId}` } };
+        }
 
-      appendEvent(database, {
+        const idempotent = current.priority === priority;
+        if (!idempotent) {
+          database
+            .query("UPDATE tasks SET priority = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ?")
+            .run(priority, input.projectId, input.taskId);
+        }
+
+        const event = appendEvent(database, {
+          projectId: input.projectId,
+          taskId: input.taskId,
+          type: idempotent ? "task.priority_updated.idempotent" : "task.priority_updated",
+          payload: { taskId: input.taskId, priority },
+        });
+        const outbox = enqueueOutbox(database, {
+          projectId: input.projectId,
+          eventId: event.id,
+          routingKey: projectRoutingKey(input.projectId, "events"),
+          payload: { eventId: event.id, taskId: input.taskId, type: event.type },
+        });
+
+        const task = readPublicTaskDetail(database, input.projectId, input.taskId);
+        if (!task) {
+          return { ok: false, error: { code: "not_found", message: `task not found: ${input.taskId}` } };
+        }
+
+        return { ok: true, task, event, outbox, idempotent } as const;
+      });
+    },
+
+    backlogTask(input: { readonly projectId: string; readonly taskId: string }): TaskMutationResult {
+      return updateTaskStatus(database, {
         projectId: input.projectId,
         taskId: input.taskId,
-        type: "task.priority_updated",
-        payload: { taskId: input.taskId, priority },
+        targetStatus: "queued",
+        eventType: "task.backlogged",
+        idempotentEventType: "task.backlogged.idempotent",
+        allowedCurrentStatuses: ["blocked", "failed"],
+        idempotentCurrentStatus: "queued",
       });
+    },
 
-      const task = readPublicTaskDetail(database, input.projectId, input.taskId);
-      if (!task) {
-        return { ok: false, error: { code: "not_found", message: `task not found: ${input.taskId}` } };
-      }
-
-      return { ok: true, task };
+    unblockTask(input: { readonly projectId: string; readonly taskId: string }): TaskMutationResult {
+      return updateTaskStatus(database, {
+        projectId: input.projectId,
+        taskId: input.taskId,
+        targetStatus: "queued",
+        eventType: "task.unblocked",
+        idempotentEventType: "task.unblocked.idempotent",
+        allowedCurrentStatuses: ["blocked"],
+        idempotentCurrentStatus: "queued",
+      });
     },
 
     appendEvent(input: AppendEventInput): EventRecord {
@@ -1476,6 +1515,59 @@ function allocateTaskDisplayId(database: WebSandboxSqliteDatabase, projectId: st
   const displayId = row.task_display_sequence + 1;
   database.query("UPDATE projects SET task_display_sequence = ? WHERE id = ?").run(displayId, projectId);
   return displayId;
+}
+
+function updateTaskStatus(
+  database: WebSandboxSqliteDatabase,
+  input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly targetStatus: "queued" | "blocked" | "completed" | "failed";
+    readonly eventType: string;
+    readonly idempotentEventType: string;
+    readonly allowedCurrentStatuses: readonly string[];
+    readonly idempotentCurrentStatus: string;
+  },
+): TaskMutationResult {
+  return transaction(database, () => {
+    const current = readTaskState(database, input.projectId, input.taskId);
+    if (!current) {
+      return { ok: false, error: { code: "not_found", message: `task not found: ${input.taskId}` } } as const;
+    }
+
+    const idempotent = current.status === input.idempotentCurrentStatus;
+    if (!idempotent && !input.allowedCurrentStatuses.includes(current.status)) {
+      return {
+        ok: false,
+        error: { code: "invalid_state", message: `${input.eventType} requires ${input.allowedCurrentStatuses.join(" or ")} task; got ${current.status}` },
+      } as const;
+    }
+
+    if (!idempotent) {
+      database
+        .query("UPDATE tasks SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ?")
+        .run(input.targetStatus, input.projectId, input.taskId);
+    }
+
+    const event = appendEvent(database, {
+      projectId: input.projectId,
+      taskId: input.taskId,
+      type: idempotent ? input.idempotentEventType : input.eventType,
+      payload: { taskId: input.taskId, status: input.targetStatus },
+    });
+    const outbox = enqueueOutbox(database, {
+      projectId: input.projectId,
+      eventId: event.id,
+      routingKey: projectRoutingKey(input.projectId, "events"),
+      payload: { eventId: event.id, taskId: input.taskId, type: event.type },
+    });
+    const task = readPublicTaskDetail(database, input.projectId, input.taskId);
+    if (!task) {
+      return { ok: false, error: { code: "not_found", message: `task not found: ${input.taskId}` } } as const;
+    }
+
+    return { ok: true, task, event, outbox, idempotent } as const;
+  });
 }
 
 function nextSessionAttemptNumber(database: WebSandboxSqliteDatabase, projectId: string, taskId: string): number {
@@ -2635,8 +2727,10 @@ function readRuntimeSourceJson(value: string | null): TaskRuntimeSourceMetadata 
   return sanitizeTaskRuntimeSource(JSON.parse(value) as TaskRuntimeSourceMetadata);
 }
 
-function readTaskState(database: WebSandboxSqliteDatabase, projectId: string, taskId: string): { readonly status: string } | null {
-  return database.query<{ status: string }, [string, string]>("SELECT status FROM tasks WHERE project_id = ? AND id = ?").get(projectId, taskId);
+function readTaskState(database: WebSandboxSqliteDatabase, projectId: string, taskId: string): { readonly status: string; readonly priority: number } | null {
+  return database
+    .query<{ status: string; priority: number }, [string, string]>("SELECT status, priority FROM tasks WHERE project_id = ? AND id = ?")
+    .get(projectId, taskId);
 }
 
 function readSessionState(database: WebSandboxSqliteDatabase, projectId: string, sessionId: string): { readonly status: string } | null {

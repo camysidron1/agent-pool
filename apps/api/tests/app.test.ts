@@ -120,6 +120,119 @@ describe("API service skeleton", () => {
     }
   });
 
+  test("public project and task routes expose authenticated read and mutation models", async () => {
+    const { baseUrl, config, database, close } = await startTestApi();
+
+    try {
+      const unauthenticated = await fetch(`${baseUrl}/api/public/projects`);
+      expect(unauthenticated.status).toBe(401);
+
+      const createdProject = await postPublic(baseUrl, config, "/projects", {
+        slug: "public-project",
+        name: "Public Project",
+        description: "Visible through public API",
+      });
+      const createdProjectBody = await createdProject.json();
+      const projectId = createdProjectBody.project.id;
+      expect(createdProject.status).toBe(201);
+      expect(createdProjectBody).toMatchObject({
+        ok: true,
+        project: { id: expect.any(String), slug: "public-project", name: "Public Project" },
+        queues: expect.any(Array),
+      });
+
+      const lowTask = await postPublic(baseUrl, config, `/projects/${projectId}/tasks`, {
+        title: "Low priority",
+        priority: 1,
+      });
+      const highTask = await postPublic(baseUrl, config, `/projects/${projectId}/tasks`, {
+        title: "High priority",
+        priority: 5,
+      });
+      const lowTaskBody = await lowTask.json();
+      const highTaskBody = await highTask.json();
+      expect(lowTaskBody).toMatchObject({ ok: true });
+      expect(lowTask.status).toBe(201);
+      expect(highTask.status).toBe(201);
+      expect(highTaskBody.task).toMatchObject({ title: "High priority", priority: 5 });
+
+      const tasks = await fetch(`${baseUrl}/api/public/projects/${projectId}/tasks`, {
+        headers: publicHeaders(config),
+      });
+      const tasksBody = await tasks.json();
+      expect(tasks.status).toBe(200);
+      expect(tasksBody.tasks.map((task: { id: string; priority: number }) => ({ id: task.id, priority: task.priority }))).toEqual([
+        { id: highTaskBody.task.id, priority: 5 },
+        { id: lowTaskBody.task.id, priority: 1 },
+      ]);
+
+      const priority = await postPublic(baseUrl, config, `/projects/${projectId}/tasks/${lowTaskBody.task.id}/priority`, {
+        priority: 10,
+      });
+      const priorityBody = await priority.json();
+      expect(priority.status).toBe(200);
+      expect(priorityBody).toMatchObject({
+        ok: true,
+        idempotent: false,
+        task: { id: lowTaskBody.task.id, priority: 10 },
+        event: { type: "task.priority_updated" },
+      });
+
+      database.sqlite
+        .query("UPDATE tasks SET status = 'blocked' WHERE project_id = ? AND id = ?")
+        .run(projectId, lowTaskBody.task.id);
+      const unblock = await postPublic(baseUrl, config, `/projects/${projectId}/tasks/${lowTaskBody.task.id}/unblock`, {});
+      const unblockBody = await unblock.json();
+      expect(unblock.status).toBe(200);
+      expect(unblockBody).toMatchObject({
+        ok: true,
+        task: { id: lowTaskBody.task.id, status: "queued" },
+        event: { type: "task.unblocked" },
+      });
+
+      const cancel = await postPublic(baseUrl, config, `/projects/${projectId}/tasks/${highTaskBody.task.id}/cancel`, {
+        reason: "operator requested",
+      });
+      const cancelBody = await cancel.json();
+      expect(cancel.status).toBe(200);
+      expect(cancelBody).toMatchObject({
+        ok: true,
+        command: { type: "cancel", taskId: highTaskBody.task.id },
+        pendingCommands: [{ type: "cancel", status: "queued" }],
+      });
+
+      database.sqlite
+        .query("UPDATE tasks SET status = 'failed' WHERE project_id = ? AND id = ?")
+        .run(projectId, lowTaskBody.task.id);
+      const retry = await postPublic(baseUrl, config, `/projects/${projectId}/tasks/${lowTaskBody.task.id}/retry`, {});
+      const retryBody = await retry.json();
+      expect(retry.status).toBe(200);
+      expect(retryBody).toMatchObject({
+        ok: true,
+        command: { type: "retry", taskId: lowTaskBody.task.id },
+        pendingCommands: [{ type: "retry", status: "queued" }],
+      });
+
+      const detail = await fetch(`${baseUrl}/api/public/projects/${projectId}/tasks/${lowTaskBody.task.id}`, {
+        headers: publicHeaders(config),
+      });
+      const detailBody = await detail.json();
+      expect(detail.status).toBe(200);
+      expect(detailBody).toMatchObject({
+        ok: true,
+        task: {
+          id: lowTaskBody.task.id,
+          status: "failed",
+          priority: 10,
+          pendingCommands: [{ type: "retry", status: "queued" }],
+        },
+      });
+      expect(JSON.stringify(detailBody)).not.toMatch(/bridgeSessionToken|serviceToken|internal-service/i);
+    } finally {
+      await close();
+    }
+  });
+
   test("internal orchestrator namespace requires service-token auth", async () => {
     const { baseUrl, config, close } = await startTestApi();
 
@@ -1483,6 +1596,26 @@ async function postBridgeCallback(
   return fetch(`${baseUrl}/callbacks/${kind}`, {
     method: "POST",
     headers,
+    body: JSON.stringify(body),
+  });
+}
+
+function publicHeaders(config: ReturnType<typeof loadConfig>): HeadersInit {
+  return {
+    "content-type": "application/json",
+    "x-agent-pool-operator-id": config.operator.id,
+  };
+}
+
+async function postPublic(
+  baseUrl: string,
+  config: ReturnType<typeof loadConfig>,
+  path: string,
+  body: Readonly<Record<string, unknown>>,
+): Promise<Response> {
+  return fetch(`${baseUrl}/api/public${path}`, {
+    method: "POST",
+    headers: publicHeaders(config),
     body: JSON.stringify(body),
   });
 }
