@@ -342,6 +342,112 @@ describe("API service skeleton", () => {
     }
   });
 
+  test("public artifact log and upload planning routes expose scoped metadata without provider writes", async () => {
+    const { baseUrl, config, database, close } = await startTestApi();
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      const project = services.createProject({ id: "project_public_artifacts", slug: "public-artifacts", name: "Public Artifacts" });
+      const task = services.createTask({ id: "task_artifacts", projectId: project.id, title: "Artifacts" }).task;
+      expect(
+        services.claimNextTask({
+          projectId: project.id,
+          sessionId: "session_artifacts",
+          bridgeSessionToken: "artifact-bridge-token",
+        }),
+      ).toMatchObject({ ok: true });
+      expect(services.reportStartupSucceeded({ projectId: project.id, sessionId: "session_artifacts" })).toMatchObject({ ok: true });
+      expect(
+        services.recordDocumentArtifact({
+          projectId: project.id,
+          taskId: task.id,
+          sessionId: "session_artifacts",
+          path: "agent-docs/demo-result.md",
+          title: "demo-result.md",
+          contentType: "text/markdown",
+          sizeBytes: 256,
+        }),
+      ).toMatchObject({ ok: true, artifact: { kind: "document", uri: "agent-docs/demo-result.md" } });
+      expect(
+        services.recordFinalAssistantResponse({
+          projectId: project.id,
+          sessionId: "session_artifacts",
+          text: "Result: https://example.test/artifact",
+        }),
+      ).toMatchObject({ ok: true, artifacts: [{ kind: "final_response_url" }] });
+      expect(
+        services.recordSessionOutput({
+          projectId: project.id,
+          taskId: task.id,
+          sessionId: "session_artifacts",
+          stream: "stdout",
+          sequence: 1,
+          byteOffset: 0,
+          text: "artifact log\n",
+        }),
+      ).toMatchObject({ ok: true, output: { stream: "stdout", lineCount: 1 } });
+
+      const artifacts = await fetch(`${baseUrl}/api/public/projects/${project.id}/tasks/${task.id}/artifacts`, {
+        headers: publicHeaders(config),
+      });
+      const artifactsBody = await artifacts.json();
+      expect(artifacts.status).toBe(200);
+      expect(artifactsBody).toMatchObject({
+        ok: true,
+        artifacts: [
+          { kind: "document", uri: "agent-docs/demo-result.md", metadata: { contentType: "text/markdown", sizeBytes: 256 } },
+          { kind: "final_response_url", uri: "https://example.test/artifact" },
+        ],
+      });
+
+      const sessionArtifacts = await fetch(`${baseUrl}/api/public/projects/${project.id}/tasks/${task.id}/sessions/session_artifacts/artifacts`, {
+        headers: publicHeaders(config),
+      });
+      expect(sessionArtifacts.status).toBe(200);
+      expect((await sessionArtifacts.json()).artifacts).toHaveLength(2);
+
+      const logs = await fetch(`${baseUrl}/api/public/projects/${project.id}/tasks/${task.id}/logs`, {
+        headers: publicHeaders(config),
+      });
+      const logsBody = await logs.json();
+      expect(logs.status).toBe(200);
+      expect(logsBody).toMatchObject({
+        ok: true,
+        logStreams: [{ kind: "stdout", byteOffset: 13, lineCount: 1 }],
+      });
+      expect(JSON.stringify(logsBody)).not.toContain("artifact-bridge-token");
+
+      const upload = await postPublic(baseUrl, config, `/projects/${project.id}/uploads/plan`, {
+        taskId: task.id,
+        sessionId: "session_artifacts",
+        fileName: "../operator note.md",
+        contentType: "text/markdown",
+      });
+      const uploadBody = await upload.json();
+      expect(upload.status).toBe(200);
+      expect(uploadBody).toMatchObject({
+        ok: true,
+        upload: {
+          adapter: "local",
+          bucket: "agent-pool-web-sandbox",
+          key: `projects/${project.id}/${task.id}/session_artifacts/_/operator note.md`,
+          method: "local_path",
+          contentType: "text/markdown",
+          headers: {},
+          fields: {},
+        },
+      });
+      expect(database.sqlite.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM storage_objects").get()?.count).toBe(0);
+
+      const wrongScope = await fetch(`${baseUrl}/api/public/projects/${project.id}/tasks/${task.id}/sessions/missing_session/logs`, {
+        headers: publicHeaders(config),
+      });
+      expect(wrongScope.status).toBe(404);
+    } finally {
+      await close();
+    }
+  });
+
   test("internal orchestrator namespace requires service-token auth", async () => {
     const { baseUrl, config, close } = await startTestApi();
 

@@ -10,10 +10,12 @@ import type {
   TaskMutationResult,
   TaskRuntimeSourceMetadata,
 } from "@agent-pool/db";
+import type { StorageAdapter } from "@agent-pool/storage";
 
 export type PublicApiOptions = {
   readonly config: AppConfig;
   readonly services?: PublicApiServices | null;
+  readonly storage?: StorageAdapter | null;
 };
 
 export type PublicOperatorRequest = Request & {
@@ -183,6 +185,77 @@ export function registerPublicApiRoutes(app: Express, options: PublicApiOptions)
     response.status(200).json({ ok: true, session, task: detail.task });
   });
 
+  app.get("/api/public/projects/:projectId/tasks/:taskId/artifacts", requirePublicOperator, (request, response) => {
+    respondArtifacts(response, options, request);
+  });
+
+  app.get("/api/public/projects/:projectId/tasks/:taskId/sessions/:sessionId/artifacts", requirePublicOperator, (request, response) => {
+    respondArtifacts(response, options, request);
+  });
+
+  app.get("/api/public/projects/:projectId/tasks/:taskId/logs", requirePublicOperator, (request, response) => {
+    respondLogs(response, options, request);
+  });
+
+  app.get("/api/public/projects/:projectId/tasks/:taskId/sessions/:sessionId/logs", requirePublicOperator, (request, response) => {
+    respondLogs(response, options, request);
+  });
+
+  app.post("/api/public/projects/:projectId/uploads/plan", requirePublicOperator, (request, response) => {
+    const services = requirePublicServices(options, response);
+    const storage = requirePublicStorage(options, response);
+    if (!services || !storage) return;
+
+    const projectId = readPathParam(request, "projectId");
+    if (!projectId) {
+      response.status(400).json(publicError("validation_error", "projectId is required"));
+      return;
+    }
+
+    try {
+      const body = parsePublicBody(request.body);
+      const taskId = readOptionalBodyString(body.taskId);
+      const sessionId = readOptionalBodyString(body.sessionId);
+      const fileName = readRequiredBodyString(body, "fileName");
+      const contentType = readOptionalBodyString(body.contentType);
+      const projectExists = services.listProjects().some((project) => project.id === projectId);
+
+      if (!projectExists) {
+        response.status(404).json(publicError("not_found", `project not found: ${projectId}`));
+        return;
+      }
+      if (taskId) {
+        const detail = services.readTaskDetail({ projectId, taskId });
+        if (!detail.ok) {
+          response.status(404).json(publicError(detail.error.code, detail.error.message));
+          return;
+        }
+        if (sessionId && !detail.task.sessions.some((session) => session.id === sessionId)) {
+          response.status(404).json(publicError("not_found", `session not found: ${sessionId}`));
+          return;
+        }
+      }
+
+      const planned = storage.planObject(["projects", projectId, taskId ?? "project", sessionId ?? "uploads", fileName]);
+      response.status(200).json({
+        ok: true,
+        upload: {
+          adapter: planned.adapter,
+          bucket: planned.bucket,
+          key: planned.key,
+          localPath: planned.localPath,
+          method: planned.localPath ? "local_path" : "blob_put",
+          contentType,
+          expiresAt: null,
+          headers: {},
+          fields: {},
+        },
+      });
+    } catch (error) {
+      respondPublicException(response, error);
+    }
+  });
+
   app.post("/api/public/projects/:projectId/tasks/:taskId/priority", requirePublicOperator, (request, response) => {
     const services = requirePublicServices(options, response);
     if (!services) return;
@@ -300,6 +373,61 @@ function requirePublicServices(options: PublicApiOptions, response: Response): P
   }
 
   return options.services;
+}
+
+function requirePublicStorage(options: PublicApiOptions, response: Response): StorageAdapter | null {
+  if (!options.storage) {
+    response.status(503).json(publicError("storage_unavailable", "storage is unavailable"));
+    return null;
+  }
+
+  return options.storage;
+}
+
+function respondArtifacts(response: Response, options: PublicApiOptions, request: Request): void {
+  const detail = readScopedTaskDetail(response, options, request);
+  if (!detail) return;
+
+  const sessionId = readPathParam(request, "sessionId");
+  const artifacts = sessionId ? detail.artifacts.filter((artifact) => artifact.sessionId === sessionId) : detail.artifacts;
+
+  if (sessionId && !detail.sessions.some((session) => session.id === sessionId)) {
+    response.status(404).json(publicError("not_found", `session not found: ${sessionId}`));
+    return;
+  }
+
+  response.status(200).json({ ok: true, artifacts });
+}
+
+function respondLogs(response: Response, options: PublicApiOptions, request: Request): void {
+  const detail = readScopedTaskDetail(response, options, request);
+  if (!detail) return;
+
+  const sessionId = readPathParam(request, "sessionId");
+  const logStreams = sessionId ? detail.logStreams.filter((log) => log.sessionId === sessionId) : detail.logStreams;
+
+  if (sessionId && !detail.sessions.some((session) => session.id === sessionId)) {
+    response.status(404).json(publicError("not_found", `session not found: ${sessionId}`));
+    return;
+  }
+
+  response.status(200).json({ ok: true, logStreams });
+}
+
+function readScopedTaskDetail(response: Response, options: PublicApiOptions, request: Request): PublicTaskDetail | null {
+  const services = requirePublicServices(options, response);
+  if (!services) return null;
+
+  const scope = readTaskScope(request, response);
+  if (!scope) return null;
+
+  const detail = services.readTaskDetail(scope);
+  if (!detail.ok) {
+    response.status(404).json(publicError(detail.error.code, detail.error.message));
+    return null;
+  }
+
+  return detail.task;
 }
 
 function respondTaskMutation(response: Response, result: TaskMutationResult): void {
