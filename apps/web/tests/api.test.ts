@@ -124,6 +124,11 @@ describe("public web API client", () => {
         title: "Run sandbox",
         description: "Exercise fake runtime",
         priority: 50,
+        runtimeSource: {
+          repositoryUrl: "https://github.com/camysidron1/agent-pool.git",
+          baseRef: "web-sandbox-mvp",
+          taskBranchPrefix: "agent-pool/task",
+        },
       }),
     ).resolves.toMatchObject({ ok: true, task: { id: "task-a" } });
 
@@ -131,7 +136,8 @@ describe("public web API client", () => {
       {
         method: "POST",
         url: "/api/public/projects/project%2Fid/tasks",
-        body: '{"title":"Run sandbox","description":"Exercise fake runtime","priority":50}',
+        body:
+          '{"title":"Run sandbox","description":"Exercise fake runtime","priority":50,"runtimeSource":{"repositoryUrl":"https://github.com/camysidron1/agent-pool.git","baseRef":"web-sandbox-mvp","taskBranchPrefix":"agent-pool/task"}}',
       },
     ]);
   });

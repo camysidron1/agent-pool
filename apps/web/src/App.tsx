@@ -18,6 +18,7 @@ import {
   type PublicArtifactSummary,
   type PublicNoteSummary,
   type PublicProjectSummary,
+  type PublicRuntimeSource,
   type PublicSessionSummary,
   type PublicTaskDetail,
   type PublicTaskSummary,
@@ -78,6 +79,9 @@ export type AppProps = {
   readonly storage?: BrowserStorage | null;
 };
 
+const DEFAULT_RUNTIME_SOURCE_BASE_REF = "web-sandbox-mvp";
+const DEFAULT_RUNTIME_SOURCE_BRANCH_PREFIX = "agent-pool/task";
+
 export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
   const initialOperatorId = readStoredOperatorId(storage) ?? "";
   const [operatorId, setOperatorId] = useState(initialOperatorId);
@@ -96,6 +100,10 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
   const [newTaskTitle, setNewTaskTitle] = useState("");
   const [newTaskDescription, setNewTaskDescription] = useState("");
   const [newTaskPriority, setNewTaskPriority] = useState(0);
+  const [newTaskUsesRuntimeSource, setNewTaskUsesRuntimeSource] = useState(false);
+  const [newTaskRepositoryUrl, setNewTaskRepositoryUrl] = useState("");
+  const [newTaskBaseRef, setNewTaskBaseRef] = useState(DEFAULT_RUNTIME_SOURCE_BASE_REF);
+  const [newTaskBranchPrefix, setNewTaskBranchPrefix] = useState(DEFAULT_RUNTIME_SOURCE_BRANCH_PREFIX);
   const [taskCreateState, setTaskCreateState] = useState<"idle" | "submitting">("idle");
   const [taskCreateError, setTaskCreateError] = useState<string | null>(null);
   const [priorityMutations, setPriorityMutations] = useState<ReadonlySet<string>>(() => new Set());
@@ -314,6 +322,10 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
     setNewTaskTitle("");
     setNewTaskDescription("");
     setNewTaskPriority(0);
+    setNewTaskUsesRuntimeSource(false);
+    setNewTaskRepositoryUrl("");
+    setNewTaskBaseRef(DEFAULT_RUNTIME_SOURCE_BASE_REF);
+    setNewTaskBranchPrefix(DEFAULT_RUNTIME_SOURCE_BRANCH_PREFIX);
     setTaskCreateError(null);
   }
 
@@ -348,6 +360,23 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
     setNewTaskPriority(Number(event.currentTarget.value));
   }
 
+  function updateNewTaskUsesRuntimeSource(event: ChangeEvent<HTMLInputElement>): void {
+    setNewTaskUsesRuntimeSource(event.currentTarget.checked);
+    setTaskCreateError(null);
+  }
+
+  function updateNewTaskRepositoryUrl(event: ChangeEvent<HTMLInputElement>): void {
+    setNewTaskRepositoryUrl(event.currentTarget.value);
+  }
+
+  function updateNewTaskBaseRef(event: ChangeEvent<HTMLInputElement>): void {
+    setNewTaskBaseRef(event.currentTarget.value);
+  }
+
+  function updateNewTaskBranchPrefix(event: ChangeEvent<HTMLInputElement>): void {
+    setNewTaskBranchPrefix(event.currentTarget.value);
+  }
+
   async function submitNewTask(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (!api || !selectedProjectId) return;
@@ -356,6 +385,16 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
     const description = newTaskDescription.trim();
     if (!title) {
       setTaskCreateError("Task title is required.");
+      return;
+    }
+    const runtimeSource = readTaskRuntimeSourceInput({
+      enabled: newTaskUsesRuntimeSource,
+      repositoryUrl: newTaskRepositoryUrl,
+      baseRef: newTaskBaseRef,
+      taskBranchPrefix: newTaskBranchPrefix,
+    });
+    if (!runtimeSource.ok) {
+      setTaskCreateError(runtimeSource.message);
       return;
     }
 
@@ -368,6 +407,7 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
         title,
         description: description || null,
         priority: newTaskPriority,
+        runtimeSource: runtimeSource.source,
       });
       setTasks((current) =>
         current.some((task) => task.id === response.task.id) ? replaceTask(current, response.task) : [response.task, ...current],
@@ -706,6 +746,47 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
                   {taskCreateState === "submitting" ? "Adding" : "Add task"}
                 </button>
               </div>
+              <label className="runtime-source-toggle" htmlFor="new-task-runtime-source">
+                <input
+                  id="new-task-runtime-source"
+                  type="checkbox"
+                  checked={newTaskUsesRuntimeSource}
+                  onChange={updateNewTaskUsesRuntimeSource}
+                />
+                <span>GitHub source</span>
+              </label>
+              {newTaskUsesRuntimeSource ? (
+                <div className="task-composer-runtime" aria-label="GitHub runtime source">
+                  <label htmlFor="new-task-repository-url">
+                    <span>Repository</span>
+                    <input
+                      id="new-task-repository-url"
+                      name="new-task-repository-url"
+                      value={newTaskRepositoryUrl}
+                      onChange={updateNewTaskRepositoryUrl}
+                      placeholder="https://github.com/camysidron1/agent-pool.git"
+                    />
+                  </label>
+                  <label htmlFor="new-task-base-ref">
+                    <span>Base ref</span>
+                    <input
+                      id="new-task-base-ref"
+                      name="new-task-base-ref"
+                      value={newTaskBaseRef}
+                      onChange={updateNewTaskBaseRef}
+                    />
+                  </label>
+                  <label htmlFor="new-task-branch-prefix">
+                    <span>Branch prefix</span>
+                    <input
+                      id="new-task-branch-prefix"
+                      name="new-task-branch-prefix"
+                      value={newTaskBranchPrefix}
+                      onChange={updateNewTaskBranchPrefix}
+                    />
+                  </label>
+                </div>
+              ) : null}
               {taskCreateError ? <p className="inline-error task-composer-error">{taskCreateError}</p> : null}
             </form>
 
@@ -821,6 +902,38 @@ function BoardNotice({ title, body, tone = "neutral" }: { readonly title: string
       <p>{body}</p>
     </div>
   );
+}
+
+function readTaskRuntimeSourceInput(input: {
+  readonly enabled: boolean;
+  readonly repositoryUrl: string;
+  readonly baseRef: string;
+  readonly taskBranchPrefix: string;
+}): { readonly ok: true; readonly source: PublicRuntimeSource | null } | { readonly ok: false; readonly message: string } {
+  if (!input.enabled) return { ok: true, source: null };
+
+  const repositoryUrl = input.repositoryUrl.trim();
+  const baseRef = input.baseRef.trim();
+  const taskBranchPrefix = input.taskBranchPrefix.trim();
+  const serialized = JSON.stringify({ repositoryUrl, baseRef, taskBranchPrefix });
+
+  if (!repositoryUrl || !baseRef || !taskBranchPrefix) {
+    return { ok: false, message: "Repository, base ref, and branch prefix are required for GitHub source." };
+  }
+  if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(repositoryUrl)) {
+    return { ok: false, message: "Repository must be an HTTPS GitHub repository URL." };
+  }
+  if (!/^[A-Za-z0-9._/-]+$/.test(baseRef) || baseRef.includes("..")) {
+    return { ok: false, message: "Base ref contains unsupported characters." };
+  }
+  if (!/^[A-Za-z0-9._/-]+$/.test(taskBranchPrefix) || taskBranchPrefix.includes("..")) {
+    return { ok: false, message: "Branch prefix contains unsupported characters." };
+  }
+  if (/token|secret|password|github_pat_|ghp_/i.test(serialized)) {
+    return { ok: false, message: "GitHub source fields must not contain secret values." };
+  }
+
+  return { ok: true, source: { repositoryUrl, baseRef, taskBranchPrefix } };
 }
 
 function TaskPanel({
