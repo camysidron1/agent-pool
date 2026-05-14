@@ -16,9 +16,14 @@
     "infra:validate": "terraform -chdir=deploy/terraform/aws validate",
     "k8s:render:aws": "kubectl kustomize deploy/kubernetes",
     "k8s:deploy:aws": "kubectl apply -k deploy/kubernetes",
+    "k8s:secrets:apply": "bun run deploy/kubernetes/apply-secrets.ts",
     "smoke:compose": "bun run deploy/compose/smoke-compose.ts",
     "smoke:kubernetes": "bun run deploy/kubernetes/smoke-kubernetes.ts",
     "smoke:e2b": "bun run deploy/compose/e2b-smoke.ts",
-    "demo:evidence": "bun run deploy/kubernetes/manual-demo-evidence.ts"
+    "demo:evidence": "bun run deploy/kubernetes/manual-demo-evidence.ts",
+    "e2b:template:build": "bun run deploy/e2b/build-template.ts"
+  },
+  "devDependencies": {
+    "e2b": "2.20.0"
   }
 }

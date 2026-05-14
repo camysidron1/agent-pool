@@ -55,6 +55,12 @@ export {
   type OrchestratorServerOptions,
 } from "./server";
 export {
+  createE2BRuntimeClient,
+  serializeE2BCommand,
+  type CreateE2BRuntimeClientOptions,
+  type E2BSdkLoader,
+} from "./e2b-client";
+export {
   createOrchestratorMetrics,
   renderOrchestratorMetrics,
   type OrchestratorMetricsCounters,

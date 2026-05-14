@@ -14,7 +14,7 @@ const RULES: readonly BoundaryRule[] = [
   {
     name: "web stays browser-safe and does not import backend/runtime packages",
     roots: ["apps/web/src"],
-    forbiddenImports: ["@agent-pool/db", "@agent-pool/queue", "@agent-pool/runtime"],
+    forbiddenImports: ["@agent-pool/db", "@agent-pool/queue", "@agent-pool/runtime", "e2b", "@e2b/code-interpreter"],
   },
   {
     name: "orchestrator does not import backend-owned db package",
@@ -47,6 +47,7 @@ const RULES: readonly BoundaryRule[] = [
     forbiddenImports: [
       "@agent-pool/db",
       "@agent-pool/runtime",
+      "e2b",
       "@e2b/code-interpreter",
       "apps/api",
       "apps/web",
@@ -68,6 +69,8 @@ const RULES: readonly BoundaryRule[] = [
     roots: ["packages/runtime/src"],
     forbiddenImports: [
       "@agent-pool/db",
+      "e2b",
+      "@e2b/code-interpreter",
       "apps/api",
       "apps/web",
       "bun:sqlite",
@@ -79,6 +82,22 @@ const RULES: readonly BoundaryRule[] = [
       "../db",
       "../web",
     ],
+  },
+  {
+    name: "E2B SDK stays out of non-orchestrator production source",
+    roots: [
+      "apps/api/src",
+      "apps/web/src",
+      "deploy/compose",
+      "packages/auth/src",
+      "packages/config/src",
+      "packages/queue/src",
+      "packages/runtime/src",
+      "packages/session-bridge/src",
+      "packages/shared/src",
+      "packages/storage/src",
+    ],
+    forbiddenImports: ["e2b", "@e2b/code-interpreter"],
   },
 ];
 

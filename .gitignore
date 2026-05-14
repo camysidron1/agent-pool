@@ -31,6 +31,10 @@ deploy/terraform/**/*.tfstate.*
 deploy/terraform/**/*.tfplan
 deploy/terraform/**/*.tfvars
 
+# Local deployment secrets
+.agent-pool.secrets.env
+deploy/kubernetes/*.secrets.env
+
 # Task-finished marker files
 .task-finished-*
 

@@ -116,7 +116,7 @@ describe("E2B launch spec", () => {
     );
     const startup = buildSandboxBridgeStartupPlan(spec);
 
-    expect(startup.command).toEqual(["bun", "run", "node_modules/@agent-pool/session-bridge/src/sandbox-entry.ts"]);
+    expect(startup.command).toEqual(["bun", "run", "/workspace/agent-pool/packages/session-bridge/src/sandbox-entry.ts"]);
     expect(startup.env).toMatchObject({
       AGENT_POOL_PROJECT_ID: "project_a",
       AGENT_POOL_TASK_ID: "task_1",

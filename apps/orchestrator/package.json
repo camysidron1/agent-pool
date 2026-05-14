@@ -20,6 +20,7 @@
     "@agent-pool/queue": "workspace:*",
     "@agent-pool/runtime": "workspace:*",
     "@agent-pool/shared": "workspace:*",
-    "@agent-pool/storage": "workspace:*"
+    "@agent-pool/storage": "workspace:*",
+    "e2b": "2.20.0"
   }
 }

@@ -23,7 +23,7 @@ describe("sandbox bridge startup contract", () => {
       },
     });
 
-    expect(command.command).toEqual(["bun", "run", "node_modules/@agent-pool/session-bridge/src/sandbox-entry.ts"]);
+    expect(command.command).toEqual(["bun", "run", "/workspace/agent-pool/packages/session-bridge/src/sandbox-entry.ts"]);
     expect(command.env).toEqual({
       AGENT_POOL_PROJECT_ID: "project_a",
       AGENT_POOL_TASK_ID: "task_1",
@@ -35,6 +35,25 @@ describe("sandbox bridge startup contract", () => {
     });
     expect(JSON.stringify(command.command)).not.toContain("session-secret");
     expect(redactSandboxBridgeStartupEnv(command.env).AGENT_POOL_BRIDGE_SESSION_TOKEN).toBe("[REDACTED]");
+  });
+
+  test("rejects unsafe sandbox bridge startup entrypoints", () => {
+    expect(() =>
+      buildSandboxBridgeStartupCommand({
+        workspaceRoot: "/workspace/agent-pool",
+        entrypoint: "../escape.ts",
+        session: {
+          projectId: "project_a",
+          taskId: "task_1",
+          sessionId: "session_1",
+          callbackBaseUrl: "https://api.internal.test",
+          sessionToken: {
+            headerName: "X-Agent-Pool-Session-Token",
+            token: "session-secret",
+          },
+        },
+      }),
+    ).toThrow("sandbox bridge startup entrypoint is invalid");
   });
 
   test("reconstructs bridge session from env and rejects missing tokens", () => {

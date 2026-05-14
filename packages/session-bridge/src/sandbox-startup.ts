@@ -1,6 +1,6 @@
 import type { BridgeSessionOptions } from "./index";
 
-export const SANDBOX_BRIDGE_ENTRYPOINT = "node_modules/@agent-pool/session-bridge/src/sandbox-entry.ts" as const;
+export const SANDBOX_BRIDGE_ENTRYPOINT = "packages/session-bridge/src/sandbox-entry.ts" as const;
 
 export type SandboxBridgeStartupEnv = {
   readonly AGENT_POOL_PROJECT_ID: string;
@@ -43,10 +43,11 @@ export function buildSandboxBridgeStartupCommand(input: {
   readonly entrypoint?: string;
 }): SandboxBridgeStartupCommand {
   const entrypoint = input.entrypoint?.trim() || SANDBOX_BRIDGE_ENTRYPOINT;
+  const workspaceRoot = required(input.workspaceRoot, "workspaceRoot");
 
   return {
-    command: ["bun", "run", entrypoint],
-    env: createSandboxBridgeStartupEnv(input.session, input.workspaceRoot),
+    command: ["bun", "run", resolveSandboxEntrypoint(entrypoint, workspaceRoot)],
+    env: createSandboxBridgeStartupEnv(input.session, workspaceRoot),
   };
 }
 
@@ -75,4 +76,13 @@ function required(value: string | undefined, name: string): string {
   const trimmed = value?.trim();
   if (!trimmed) throw new Error(`sandbox bridge startup requires ${name}`);
   return trimmed;
+}
+
+function resolveSandboxEntrypoint(entrypoint: string, workspaceRoot: string): string {
+  if (entrypoint.includes("\0") || entrypoint.includes("~") || entrypoint.includes("..")) {
+    throw new Error("sandbox bridge startup entrypoint is invalid");
+  }
+  if (entrypoint.startsWith("/")) return entrypoint;
+
+  return `${workspaceRoot.replace(/\/+$/, "")}/${entrypoint.replace(/^\/+/, "")}`;
 }
