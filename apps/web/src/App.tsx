@@ -197,6 +197,7 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
         ]);
         if (!cancelled) {
           setTasks(tasksResponse.tasks);
+          setTaskMutationError(null);
           if (projectsResponse) setProjects(projectsResponse.projects);
         }
         if (selectedTaskId) {

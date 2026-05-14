@@ -67,6 +67,27 @@ describe("public web API client", () => {
     }
   });
 
+  test("describes non-json public API responses with the requested path", async () => {
+    const client = createPublicApiClient({
+      operatorId: "operator-test",
+      fetchImpl: async () =>
+        new Response("<!doctype html><html></html>", {
+          status: 502,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        }),
+    });
+
+    try {
+      await client.listProjects();
+      throw new Error("expected listProjects to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(PublicApiError);
+      expect((error as PublicApiError).status).toBe(502);
+      expect((error as PublicApiError).code).toBe("invalid_json");
+      expect((error as PublicApiError).message).toBe("Public API returned text/html for /projects (502)");
+    }
+  });
+
   test("encodes project and task path segments for mutations", async () => {
     const calls: { readonly url: string; readonly body: string | null }[] = [];
     const client = createPublicApiClient({

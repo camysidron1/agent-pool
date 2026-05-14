@@ -267,7 +267,7 @@ export function createPublicApiClient(options: PublicApiClientOptions) {
       credentials: "include",
       headers,
     });
-    const body = await readJson(response);
+    const body = await readJson(response, path);
 
     if (!response.ok || isPublicApiErrorBody(body)) {
       const error = isPublicApiErrorBody(body)
@@ -366,7 +366,7 @@ async function publicAuthRequest(options: PublicAuthClientOptions, path: string,
     credentials: "include",
     headers,
   });
-  const body = await readJson(response);
+  const body = await readJson(response, path);
 
   if (!response.ok || isPublicApiErrorBody(body)) {
     const error = isPublicApiErrorBody(body)
@@ -386,14 +386,15 @@ function encodePath(value: string): string {
   return encodeURIComponent(value);
 }
 
-async function readJson(response: Response): Promise<unknown> {
+async function readJson(response: Response, path: string): Promise<unknown> {
   const text = await response.text();
   if (!text) return null;
 
   try {
     return JSON.parse(text) as unknown;
   } catch {
-    throw new PublicApiError(response.status, "invalid_json", "Public API returned invalid JSON");
+    const contentType = response.headers.get("content-type")?.split(";")[0]?.trim() || "unknown content";
+    throw new PublicApiError(response.status, "invalid_json", `Public API returned ${contentType} for ${path} (${response.status})`);
   }
 }
 
