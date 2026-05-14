@@ -96,7 +96,12 @@ describe("E2B runtime provider", () => {
     });
     expect(createCall?.input.redactedLaunchSpec.environment.secrets).toEqual({ GITHUB_TOKEN: "[REDACTED]" });
     expect(commandCalls).toHaveLength(4);
-    expect(commandCalls.map((call) => call.command[0])).toEqual(["git", "git", "git", "bun"]);
+    expect(commandCalls.map((call) => call.command[0])).toEqual(["git", "git", "git", "sh"]);
+    expect(commandCalls[3]?.command).toEqual([
+      "sh",
+      "-lc",
+      "nohup bun run '/workspace/agent-pool/packages/session-bridge/src/sandbox-entry.ts' > /tmp/agent-pool-session-bridge.log 2>&1 &",
+    ]);
     expect(commandCalls[0]?.options.env).toMatchObject({
       GIT_TERMINAL_PROMPT: "0",
       AGENT_POOL_GITHUB_TOKEN_ENV: "GITHUB_TOKEN",

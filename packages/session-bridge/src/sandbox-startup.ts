@@ -46,7 +46,7 @@ export function buildSandboxBridgeStartupCommand(input: {
   const workspaceRoot = required(input.workspaceRoot, "workspaceRoot");
 
   return {
-    command: ["bun", "run", resolveSandboxEntrypoint(entrypoint, workspaceRoot)],
+    command: ["sh", "-lc", `nohup bun run ${quoteShellArg(resolveSandboxEntrypoint(entrypoint, workspaceRoot))} > /tmp/agent-pool-session-bridge.log 2>&1 &`],
     env: createSandboxBridgeStartupEnv(input.session, workspaceRoot),
   };
 }
@@ -85,4 +85,12 @@ function resolveSandboxEntrypoint(entrypoint: string, workspaceRoot: string): st
   if (entrypoint.startsWith("/")) return entrypoint;
 
   return `${workspaceRoot.replace(/\/+$/, "")}/${entrypoint.replace(/^\/+/, "")}`;
+}
+
+function quoteShellArg(value: string): string {
+  if (value.includes("\0")) {
+    throw new Error("sandbox bridge startup entrypoint is invalid");
+  }
+
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
