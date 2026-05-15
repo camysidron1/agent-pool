@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+
 import { loadConfig, type EnvSource } from "@agent-pool/config";
 import {
   AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST,
@@ -92,6 +95,7 @@ export type E2BSmokeCliOptions = {
   readonly fetch?: typeof fetch;
   readonly sleep?: (ms: number) => Promise<void>;
   readonly now?: () => number;
+  readonly readFile?: (path: string) => Promise<string>;
 };
 
 export type E2BReadinessStatus = "ready" | "blocked" | "warning";
@@ -125,6 +129,51 @@ export type E2BSmokeDiagnosticStage =
   | "cleanup"
   | "snapshot";
 
+export type E2BEvidenceBundle = {
+  readonly kind: "agent-pool-e2b-live-readiness-evidence";
+  readonly schemaVersion: 1;
+  readonly generatedAt: string;
+  readonly status: "dry-run" | "pass" | "blocked" | "failed";
+  readonly readinessSummary: {
+    readonly status: E2BReadinessStatus | null;
+    readonly missingCredentials: readonly string[];
+    readonly missingSettings: readonly string[];
+    readonly blockedChecks: readonly string[];
+  };
+  readonly launchSpecHash: string;
+  readonly redactedLaunchSpec: RedactedE2BLaunchSpec;
+  readonly runtimeSource: RuntimeTaskSourceMetadata;
+  readonly securityReadiness: E2BSmokeSecurityReadiness;
+  readonly smokeRequests: E2BSmokePlan["requests"];
+  readonly statusResult: unknown;
+  readonly stageDiagnostics: unknown;
+  readonly cleanup: E2BSmokePlan["cleanup"];
+  readonly snapshotDecision: {
+    readonly status: string;
+    readonly reasons: readonly string[];
+  };
+  readonly blockers: readonly { readonly field: string; readonly reason: string }[];
+  readonly redaction: {
+    readonly containsNoServiceToken: true;
+    readonly containsNoGithubToken: true;
+    readonly containsNoE2BApiKey: true;
+    readonly containsNoCodexApiKey: true;
+    readonly containsNoProxyCredentials: true;
+    readonly containsNoBridgeOrSessionToken: true;
+    readonly containsNoLegacyTuiDbPath: true;
+    readonly containsNoApiDbPath: true;
+  };
+};
+
+export type E2BEvidenceValidation = {
+  readonly ok: boolean;
+  readonly status: "pass" | "blocked" | "invalid";
+  readonly missingFields: readonly string[];
+  readonly blockers: readonly string[];
+  readonly redactionViolations: readonly string[];
+  readonly errors: readonly string[];
+};
+
 export type E2BReadinessReport = {
   readonly ok: true;
   readonly kind: "e2b-readiness";
@@ -154,6 +203,8 @@ type ParsedE2BSmokeArgs = {
   readonly maliciousFixtures: boolean;
   readonly verifyCallback: boolean;
   readonly callbackTimeoutMs: number;
+  readonly evidence: boolean;
+  readonly validateEvidencePath?: string;
 };
 
 const DEFAULT_API_URL = "http://127.0.0.1:3000";
@@ -368,6 +419,116 @@ export function createE2BReadinessReport(input: Partial<ParsedE2BSmokeArgs> & { 
   };
 }
 
+export function createE2BEvidenceBundle(input: {
+  readonly plan: E2BSmokePlan;
+  readonly status: E2BEvidenceBundle["status"];
+  readonly generatedAt?: string;
+  readonly readinessReport?: E2BReadinessReport | null;
+  readonly statusResult?: unknown;
+  readonly stageDiagnostics?: unknown;
+  readonly error?: string | null;
+}): E2BEvidenceBundle {
+  const stageDiagnostics = input.stageDiagnostics ?? readSmokeStatusDiagnostics(input.statusResult);
+  return {
+    kind: "agent-pool-e2b-live-readiness-evidence",
+    schemaVersion: 1,
+    generatedAt: input.generatedAt ?? new Date().toISOString(),
+    status: input.status,
+    readinessSummary: {
+      status: input.readinessReport?.status ?? null,
+      missingCredentials: input.plan.missingCredentials,
+      missingSettings: input.plan.missingSettings,
+      blockedChecks: input.readinessReport?.checks.filter((check) => check.status === "block").map((check) => check.id) ?? [],
+    },
+    launchSpecHash: stableSha256(input.plan.launchSpec),
+    redactedLaunchSpec: input.plan.launchSpec,
+    runtimeSource: input.plan.runtimeSource,
+    securityReadiness: input.plan.securityReadiness,
+    smokeRequests: input.plan.requests,
+    statusResult: redactEvidenceValue(input.statusResult ?? null),
+    stageDiagnostics: redactEvidenceValue(stageDiagnostics),
+    cleanup: input.plan.cleanup,
+    snapshotDecision: readSnapshotDecision(stageDiagnostics),
+    blockers: buildEvidenceBlockers(input.plan, input.readinessReport, input.error),
+    redaction: {
+      containsNoServiceToken: true,
+      containsNoGithubToken: true,
+      containsNoE2BApiKey: true,
+      containsNoCodexApiKey: true,
+      containsNoProxyCredentials: true,
+      containsNoBridgeOrSessionToken: true,
+      containsNoLegacyTuiDbPath: true,
+      containsNoApiDbPath: true,
+    },
+  };
+}
+
+export function validateE2BEvidenceBundle(input: unknown): E2BEvidenceValidation {
+  const evidence = readRecord(input);
+  if (!evidence) {
+    return {
+      ok: false,
+      status: "invalid",
+      missingFields: ["<root>"],
+      blockers: [],
+      redactionViolations: [],
+      errors: ["evidence must be a JSON object"],
+    };
+  }
+  const requiredFields = [
+    "kind",
+    "schemaVersion",
+    "generatedAt",
+    "status",
+    "readinessSummary",
+    "launchSpecHash",
+    "runtimeSource",
+    "securityReadiness",
+    "smokeRequests",
+    "stageDiagnostics",
+    "cleanup",
+    "snapshotDecision",
+    "blockers",
+    "redaction",
+  ];
+  const missingFields = requiredFields.filter((field) => !(field in evidence));
+  const errors: string[] = [];
+  if (evidence.kind !== "agent-pool-e2b-live-readiness-evidence") errors.push("kind must be agent-pool-e2b-live-readiness-evidence");
+  if (evidence.schemaVersion !== 1) errors.push("schemaVersion must be 1");
+  if (!["dry-run", "pass", "blocked", "failed"].includes(String(evidence.status))) errors.push("status must be dry-run, pass, blocked, or failed");
+  if (typeof evidence.launchSpecHash !== "string" || !/^sha256:[a-f0-9]{64}$/.test(evidence.launchSpecHash)) {
+    errors.push("launchSpecHash must be a sha256 digest");
+  }
+  const blockers = readBlockerReasons(evidence.blockers);
+  const redactionViolations = findEvidenceRedactionViolations(input);
+  const redaction = readRecord(evidence.redaction);
+  for (const flag of [
+    "containsNoServiceToken",
+    "containsNoGithubToken",
+    "containsNoE2BApiKey",
+    "containsNoCodexApiKey",
+    "containsNoProxyCredentials",
+    "containsNoBridgeOrSessionToken",
+    "containsNoLegacyTuiDbPath",
+    "containsNoApiDbPath",
+  ]) {
+    if (redaction?.[flag] !== true) redactionViolations.push(`redaction flag is not true: ${flag}`);
+  }
+  const status = errors.length > 0 || missingFields.length > 0 || redactionViolations.length > 0
+    ? "invalid"
+    : evidence.status === "blocked" || blockers.length > 0
+      ? "blocked"
+      : "pass";
+  return {
+    ok: status === "pass",
+    status,
+    missingFields,
+    blockers,
+    redactionViolations,
+    errors,
+  };
+}
+
 function withCallbackReachability(report: E2BReadinessReport, callbackReachability: E2BCallbackReachabilityResult): E2BReadinessReport {
   const checks = [
     ...report.checks,
@@ -393,6 +554,110 @@ function summarizeReadinessStatus(checks: readonly E2BReadinessCheck[]): E2BRead
   const hasBlocks = checks.some((check) => check.status === "block");
   const hasWarnings = checks.some((check) => check.status === "warn");
   return hasBlocks ? "blocked" : hasWarnings ? "warning" : "ready";
+}
+
+function stableSha256(value: unknown): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify(sortJson(value))).digest("hex")}`;
+}
+
+function sortJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJson);
+  const record = readRecord(value);
+  if (!record) return value;
+  return Object.fromEntries(Object.keys(record).sort().map((key) => [key, sortJson(record[key])]));
+}
+
+function buildEvidenceBlockers(
+  plan: E2BSmokePlan,
+  readinessReport: E2BReadinessReport | null | undefined,
+  error: string | null | undefined,
+): readonly { readonly field: string; readonly reason: string }[] {
+  return [
+    ...plan.missingCredentials.map((field) => ({ field, reason: "missing credential" })),
+    ...plan.missingSettings.map((field) => ({ field, reason: "missing setting" })),
+    ...(readinessReport?.checks.filter((check) => check.status === "block").map((check) => ({ field: check.id, reason: check.detail })) ?? []),
+    ...(error ? [{ field: "smoke:e2b", reason: redactEvidenceString(error) }] : []),
+  ];
+}
+
+function readSnapshotDecision(stageDiagnostics: unknown): E2BEvidenceBundle["snapshotDecision"] {
+  const diagnostics = readRecord(stageDiagnostics);
+  const stages = Array.isArray(diagnostics?.stages) ? diagnostics.stages : [];
+  const snapshot = stages.map(readRecord).find((stage) => stage?.id === "snapshot");
+  const status = typeof snapshot?.status === "string" ? snapshot.status : "not_observed";
+  const detail = typeof snapshot?.detail === "string" ? [redactEvidenceString(snapshot.detail)] : [];
+  return { status, reasons: detail };
+}
+
+function readBlockerReasons(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(readRecord)
+    .map((record) => {
+      const field = typeof record?.field === "string" ? record.field : null;
+      const reason = typeof record?.reason === "string" ? record.reason : null;
+      return field && reason ? `${field}: ${reason}` : null;
+    })
+    .filter((reason): reason is string => reason !== null);
+}
+
+function redactEvidenceValue(value: unknown): unknown {
+  if (typeof value === "string") return redactEvidenceString(value);
+  if (Array.isArray(value)) return value.map(redactEvidenceValue);
+  const record = readRecord(value);
+  if (!record) return value;
+  return Object.fromEntries(Object.entries(record).map(([key, child]) => [
+    key,
+    /token|secret|password|apiKey|privateKey|proxyUrl/i.test(key) ? redactEvidenceString(String(child)) : redactEvidenceValue(child),
+  ]));
+}
+
+function redactEvidenceString(value: string): string {
+  return value
+    .replace(/~\/\.agent-pool\/data\/agent-pool\.db/g, "[REDACTED_DB_PATH]")
+    .replace(/\/Users\/[^\s"']+\/\.agent-pool\/data\/agent-pool\.db/g, "[REDACTED_DB_PATH]")
+    .replace(/\/var\/lib\/agent-pool\/web-sandbox\.db/g, "[REDACTED_DB_PATH]")
+    .replace(/\b(?:ghp|ghs|github_pat)_[A-Za-z0-9_]+/g, "[REDACTED_GITHUB_TOKEN]")
+    .replace(/\be2b_[A-Za-z0-9_-]{10,}/g, "[REDACTED_E2B_KEY]")
+    .replace(/\bsk-[A-Za-z0-9_-]{10,}/g, "[REDACTED_CODEX_KEY]")
+    .replace(/(https?:\/\/)([^/\s:@]+):([^@\s/]+)@/g, "$1[REDACTED]@")
+    .replace(/\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|KEY|PROXY)[A-Z0-9_]*)=([^\s"']+)/gi, "$1=[REDACTED]");
+}
+
+function findEvidenceRedactionViolations(value: unknown): string[] {
+  const violations: string[] = [];
+  const serialized = JSON.stringify(value);
+  for (const pattern of [
+    /~\/\.agent-pool\/data\/agent-pool\.db/,
+    /\.agent-pool\/data\/agent-pool\.db/,
+    /\/var\/lib\/agent-pool\/web-sandbox\.db/,
+    new RegExp(["AGENT_POOL", "WEB_SANDBOX_DB_PATH"].join("_")),
+    /\b(?:ghp|ghs|github_pat)_[A-Za-z0-9_]{20,}/,
+    /\be2b_[A-Za-z0-9_-]{20,}/,
+    /\bsk-[A-Za-z0-9_-]{20,}/,
+    /https?:\/\/[^/\s:@]+:[^@\s/]+@/,
+  ]) {
+    if (pattern.test(serialized)) violations.push(`forbidden value matched: ${pattern.source}`);
+  }
+  visit(value, []);
+  return violations;
+
+  function visit(current: unknown, path: readonly string[]): void {
+    if (Array.isArray(current)) {
+      current.forEach((item, index) => visit(item, [...path, String(index)]));
+      return;
+    }
+    const record = readRecord(current);
+    if (!record) return;
+    for (const [key, child] of Object.entries(record)) {
+      if (/^(?:token|serviceToken|bridgeToken|sessionToken|apiKey|githubToken|codexApiKey|e2bApiKey|privateKey|proxyUrl)$/i.test(key)) {
+        if (typeof child === "string" && child.trim() && child !== "[REDACTED]" && child !== "[MISSING]" && child !== "<redacted>") {
+          violations.push(`secret field must be redacted: ${[...path, key].join(".")}`);
+        }
+      }
+      visit(child, [...path, key]);
+    }
+  }
 }
 
 function buildReadinessChecks(plan: E2BSmokePlan, agentRunnerMode: "bridge-smoke" | "codex"): readonly E2BReadinessCheck[] {
@@ -601,38 +866,66 @@ function readRedactedVariable(launchSpec: RedactedE2BLaunchSpec, name: string): 
 
 export async function runE2BSmokeCli(args: readonly string[] = process.argv.slice(2), options: E2BSmokeCliOptions = {}): Promise<number> {
   const parsed = parseE2BSmokeArgs(args);
-  const env = options.env ?? await loadLocalEnv({ cwd: options.cwd });
   const write = options.write ?? ((text: string) => process.stdout.write(text));
+
+  if (parsed.validateEvidencePath) {
+    const read = options.readFile ?? readFileText;
+    const validation = validateE2BEvidenceBundle(JSON.parse(await read(parsed.validateEvidencePath)));
+    write(`${JSON.stringify(validation, null, 2)}\n`);
+    return validation.ok ? 0 : 1;
+  }
+
+  const env = options.env ?? await loadLocalEnv({ cwd: options.cwd });
+  const generatedAt = new Date(options.now?.() ?? Date.now()).toISOString();
 
   if (parsed.readiness) {
     const plan = createE2BSmokePlan({ ...parsed, env });
-    const report = createE2BReadinessReport({ ...parsed, env });
+    let report = createE2BReadinessReport({ ...parsed, env });
     if (parsed.verifyCallback) {
       const callbackReachability = await verifyCallbackReachability(plan, options.fetch ?? fetch, parsed.callbackTimeoutMs);
-      const verifiedReport = withCallbackReachability(report, callbackReachability);
-      write(`${JSON.stringify(verifiedReport, null, 2)}\n`);
-      return callbackReachability.ok && verifiedReport.status !== "blocked" ? 0 : 1;
+      report = withCallbackReachability(report, callbackReachability);
+      write(
+        `${JSON.stringify(
+          parsed.evidence
+            ? createE2BEvidenceBundle({ plan, readinessReport: report, status: report.status === "blocked" ? "blocked" : "pass", generatedAt })
+            : report,
+          null,
+          2,
+        )}\n`,
+      );
+      return callbackReachability.ok && report.status !== "blocked" ? 0 : 1;
     }
-    write(`${JSON.stringify(report, null, 2)}\n`);
+    write(
+      `${JSON.stringify(
+        parsed.evidence
+          ? createE2BEvidenceBundle({ plan, readinessReport: report, status: report.status === "blocked" ? "blocked" : "pass", generatedAt })
+          : report,
+        null,
+        2,
+      )}\n`,
+    );
     return 0;
   }
 
   const plan = createE2BSmokePlan({ ...parsed, env });
 
   if (parsed.dryRun) {
-    write(`${JSON.stringify(plan, null, 2)}\n`);
+    write(`${JSON.stringify(parsed.evidence ? createE2BEvidenceBundle({ plan, status: "dry-run", generatedAt }) : plan, null, 2)}\n`);
     return 0;
   }
 
   if (plan.missingCredentials.length > 0 || plan.missingSettings.length > 0) {
+    const error = formatMissingE2BSmokeRequirements(plan);
     write(
       `${JSON.stringify(
-        {
-          ok: false,
-          error: formatMissingE2BSmokeRequirements(plan),
-          missingCredentials: plan.missingCredentials,
-          missingSettings: plan.missingSettings,
-        },
+        parsed.evidence
+          ? createE2BEvidenceBundle({ plan, status: "blocked", generatedAt, error })
+          : {
+              ok: false,
+              error,
+              missingCredentials: plan.missingCredentials,
+              missingSettings: plan.missingSettings,
+            },
         null,
         2,
       )}\n`,
@@ -641,13 +934,10 @@ export async function runE2BSmokeCli(args: readonly string[] = process.argv.slic
   }
 
   if (parsed.maliciousFixtures) {
+    const error = "live malicious E2B smoke is not enabled yet; run default offline tests or use --dry-run --malicious-fixtures for the fixture plan";
     write(
       `${JSON.stringify(
-        {
-          ok: false,
-          error: "live malicious E2B smoke is not enabled yet; run default offline tests or use --dry-run --malicious-fixtures for the fixture plan",
-          maliciousFixtures: plan.maliciousFixtures,
-        },
+        parsed.evidence ? createE2BEvidenceBundle({ plan, status: "blocked", generatedAt, error }) : { ok: false, error, maliciousFixtures: plan.maliciousFixtures },
         null,
         2,
       )}\n`,
@@ -662,18 +952,22 @@ export async function runE2BSmokeCli(args: readonly string[] = process.argv.slic
     if (plan.launchSpec.runner.mode === "codex") {
       const githubApp = await verifyGitHubAppReadiness(plan, serviceToken, fetchImpl);
       if (!isSuccessfulVerification(githubApp)) {
+        const diagnostics = {
+          failedStage: "readiness",
+          detail: "GitHub App installation or repository permissions are not ready for Codex E2B smoke.",
+        };
+        const error = readVerificationError(githubApp);
         write(
           `${JSON.stringify(
-            {
-              ok: false,
-              stage: "readiness",
-              error: readVerificationError(githubApp),
-              diagnostics: {
-                failedStage: "readiness",
-                detail: "GitHub App installation or repository permissions are not ready for Codex E2B smoke.",
-              },
-              githubApp,
-            },
+            parsed.evidence
+              ? createE2BEvidenceBundle({ plan, status: "blocked", generatedAt, statusResult: githubApp, stageDiagnostics: diagnostics, error })
+              : {
+                  ok: false,
+                  stage: "readiness",
+                  error,
+                  diagnostics,
+                  githubApp,
+                },
             null,
             2,
           )}\n`,
@@ -683,18 +977,30 @@ export async function runE2BSmokeCli(args: readonly string[] = process.argv.slic
     }
     const seed = await seedE2BSmokeFixture(plan, serviceToken, fetchImpl);
     const status = await waitForE2BSmokeCompletion(plan, serviceToken, fetchImpl, options);
-    write(`${JSON.stringify({ ok: true, stage: "complete", seed, status, diagnostics: readSmokeStatusDiagnostics(status) }, null, 2)}\n`);
+    const diagnostics = readSmokeStatusDiagnostics(status);
+    write(
+      `${JSON.stringify(
+        parsed.evidence
+          ? createE2BEvidenceBundle({ plan, status: "pass", generatedAt, statusResult: { seed, status }, stageDiagnostics: diagnostics })
+          : { ok: true, stage: "complete", seed, status, diagnostics },
+        null,
+        2,
+      )}\n`,
+    );
     return 0;
   } catch (error) {
     const stageError = error instanceof E2BSmokeStageError ? error : null;
+    const diagnostics = stageError?.diagnostics ?? null;
     write(
       `${JSON.stringify(
-        {
-          ok: false,
-          stage: stageError?.stage ?? "readiness",
-          error: errorMessage(error),
-          diagnostics: stageError?.diagnostics ?? null,
-        },
+        parsed.evidence
+          ? createE2BEvidenceBundle({ plan, status: "failed", generatedAt, stageDiagnostics: diagnostics, error: errorMessage(error) })
+          : {
+              ok: false,
+              stage: stageError?.stage ?? "readiness",
+              error: errorMessage(error),
+              diagnostics,
+            },
         null,
         2,
       )}\n`,
@@ -717,6 +1023,8 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
   let maliciousFixtures = false;
   let verifyCallback = false;
   let callbackTimeoutMs = DEFAULT_CALLBACK_REACHABILITY_TIMEOUT_MS;
+  let evidence = false;
+  let validateEvidencePath: string | undefined;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -761,6 +1069,12 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
       case "--callback-timeout-ms":
         callbackTimeoutMs = readPositiveInteger(readFlagValue(args, (index += 1), arg), arg);
         break;
+      case "--evidence":
+        evidence = true;
+        break;
+      case "--validate-evidence":
+        validateEvidencePath = readFlagValue(args, (index += 1), arg);
+        break;
       default:
         throw new Error(`unknown smoke:e2b argument: ${arg}`);
     }
@@ -780,6 +1094,8 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
     maliciousFixtures,
     verifyCallback,
     callbackTimeoutMs,
+    evidence,
+    ...(validateEvidencePath ? { validateEvidencePath } : {}),
   };
 }
 
@@ -1120,6 +1436,10 @@ function trimTrailingSlash(value: string): string {
 
 function readRecord(value: unknown): Readonly<Record<string, unknown>> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Readonly<Record<string, unknown>>) : null;
+}
+
+async function readFileText(path: string): Promise<string> {
+  return readFile(path, "utf8");
 }
 
 function errorMessage(error: unknown): string {

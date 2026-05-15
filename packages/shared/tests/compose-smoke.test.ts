@@ -11,7 +11,13 @@ import {
   runComposeSmokeCli,
 } from "../../../deploy/compose/smoke-compose";
 import { AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST } from "@agent-pool/runtime";
-import { createE2BReadinessReport, createE2BSmokePlan, parseE2BSmokeArgs, runE2BSmokeCli } from "../../../deploy/compose/e2b-smoke";
+import {
+  createE2BReadinessReport,
+  createE2BSmokePlan,
+  parseE2BSmokeArgs,
+  runE2BSmokeCli,
+  validateE2BEvidenceBundle,
+} from "../../../deploy/compose/e2b-smoke";
 import { loadLocalEnv, parseLocalEnvFile, type EnvSource } from "../../../deploy/local-env";
 
 describe("compose smoke runner", () => {
@@ -518,6 +524,173 @@ describe("compose smoke runner", () => {
       "GITHUB_APP_PRIVATE_KEY",
       "GITHUB_APP_INSTALLATION_ID",
     ]);
+  });
+
+  test("generates and validates redacted E2B dry-run evidence bundles", async () => {
+    const writes: string[] = [];
+    const code = await runE2BSmokeCli(["--dry-run", "--evidence", "--agent-runner-mode", "codex"], {
+      now: () => Date.parse("2026-05-15T00:00:00.000Z"),
+      env: {
+        AUTH_MODE: "test",
+        E2B_API_KEY: "e2b-secret",
+        E2B_TEMPLATE_ID: "template-1",
+        E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN,CODEX_API_KEY",
+        CODEX_API_KEY: "codex-secret",
+        GITHUB_APP_ID: "12345",
+        GITHUB_APP_PRIVATE_KEY: "github-app-private-key",
+        GITHUB_APP_INSTALLATION_ID: "67890",
+        EGRESS_PROXY_URL: "http://proxy-user:proxy-secret@egress-gateway.internal:8080",
+        EGRESS_PROXY_ALLOW_OUT: "10.0.10.25/32",
+        AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+      },
+      write: (text) => writes.push(text),
+    });
+    const evidence = JSON.parse(writes.join(""));
+
+    expect(code).toBe(0);
+    expect(evidence).toMatchObject({
+      kind: "agent-pool-e2b-live-readiness-evidence",
+      schemaVersion: 1,
+      generatedAt: "2026-05-15T00:00:00.000Z",
+      status: "dry-run",
+      runtimeSource: {
+        repositoryUrl: "https://github.com/example/tiny-fixture.git",
+        commandProfile: "agent-pool-bun-pr",
+      },
+      smokeRequests: {
+        status: { method: "GET", url: "http://127.0.0.1:3000/internal/smoke/status" },
+      },
+      snapshotDecision: { status: "not_observed", reasons: [] },
+      redaction: {
+        containsNoServiceToken: true,
+        containsNoGithubToken: true,
+        containsNoE2BApiKey: true,
+        containsNoCodexApiKey: true,
+        containsNoProxyCredentials: true,
+        containsNoBridgeOrSessionToken: true,
+        containsNoLegacyTuiDbPath: true,
+        containsNoApiDbPath: true,
+      },
+    });
+    expect(evidence.launchSpecHash).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(validateE2BEvidenceBundle(evidence)).toMatchObject({ ok: true, status: "pass" });
+    expect(JSON.stringify(evidence)).not.toContain("e2b-secret");
+    expect(JSON.stringify(evidence)).not.toContain("codex-secret");
+    expect(JSON.stringify(evidence)).not.toContain("github-app-private-key");
+    expect(JSON.stringify(evidence)).not.toContain("proxy-secret");
+    expect(JSON.stringify(evidence)).not.toContain("~/.agent-pool/data/agent-pool.db");
+  });
+
+  test("reports blocked and live-smoke evidence with stage diagnostics", async () => {
+    const blockedWrites: string[] = [];
+    await runE2BSmokeCli(["--readiness", "--evidence", "--agent-runner-mode", "codex"], {
+      now: () => Date.parse("2026-05-15T00:00:00.000Z"),
+      env: { AUTH_MODE: "test" },
+      write: (text) => blockedWrites.push(text),
+    });
+    const blocked = JSON.parse(blockedWrites.join(""));
+    expect(blocked.status).toBe("blocked");
+    expect(blocked.readinessSummary.status).toBe("blocked");
+    expect(blocked.readinessSummary.blockedChecks).toEqual(expect.arrayContaining(["e2b-provider-credentials", "codex-api-key", "github-app-broker"]));
+    expect(validateE2BEvidenceBundle(blocked)).toMatchObject({ ok: false, status: "blocked" });
+
+    const liveWrites: string[] = [];
+    const code = await runE2BSmokeCli(["--evidence", "--api-url", "http://api.local", "--service-token", "service-secret", "--timeout-ms", "1000"], {
+      now: () => Date.parse("2026-05-15T01:00:00.000Z"),
+      env: {
+        AUTH_MODE: "test",
+        E2B_API_KEY: "e2b-secret",
+        E2B_TEMPLATE_ID: "template-1",
+        E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN",
+        GITHUB_TOKEN: "github-secret",
+      },
+      write: (text) => liveWrites.push(text),
+      fetch: async (input) => {
+        if (String(input).endsWith("/internal/smoke/seed")) {
+          return Response.json({ ok: true, projectId: "compose-smoke", taskId: "compose-smoke-task-1" });
+        }
+        return Response.json({
+          ok: true,
+          finalResponse: { recorded: true },
+          completion: { completed: true },
+          cleanup: { completed: true },
+          diagnostics: {
+            currentStage: "snapshot",
+            failedStage: null,
+            stages: [{ id: "snapshot", status: "passed", detail: "snapshot created and sandbox destroyed" }],
+            securityEvents: [{ securityKind: "credentials-scrub-succeeded", count: 1 }],
+          },
+        });
+      },
+    });
+    const live = JSON.parse(liveWrites.join(""));
+
+    expect(code).toBe(0);
+    expect(live).toMatchObject({
+      status: "pass",
+      stageDiagnostics: {
+        currentStage: "snapshot",
+        stages: [{ id: "snapshot", status: "passed" }],
+      },
+      snapshotDecision: { status: "passed", reasons: ["snapshot created and sandbox destroyed"] },
+    });
+    expect(validateE2BEvidenceBundle(live)).toMatchObject({ ok: true, status: "pass" });
+    expect(JSON.stringify(live)).not.toContain("github-secret");
+    expect(JSON.stringify(live)).not.toContain("service-secret");
+  });
+
+  test("rejects leaked secrets and validates evidence files offline", async () => {
+    const evidence = JSON.parse(
+      await new Response(
+        JSON.stringify(
+          createE2BSmokePlan({
+            env: {
+              AUTH_MODE: "test",
+              E2B_TEMPLATE_ID: "template-1",
+            },
+          }),
+        ),
+      ).text(),
+    );
+    const bundle = {
+      kind: "agent-pool-e2b-live-readiness-evidence",
+      schemaVersion: 1,
+      generatedAt: "2026-05-15T00:00:00.000Z",
+      status: "pass",
+      readinessSummary: { status: null, missingCredentials: [], missingSettings: [], blockedChecks: [] },
+      launchSpecHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      redactedLaunchSpec: evidence.launchSpec,
+      runtimeSource: evidence.runtimeSource,
+      securityReadiness: evidence.securityReadiness,
+      smokeRequests: evidence.requests,
+      statusResult: { token: "ghp_abcdefghijklmnopqrstuvwxyz123456", path: "~/.agent-pool/data/agent-pool.db" },
+      stageDiagnostics: { currentStage: "snapshot" },
+      cleanup: evidence.cleanup,
+      snapshotDecision: { status: "passed", reasons: [] },
+      blockers: [],
+      redaction: {
+        containsNoServiceToken: true,
+        containsNoGithubToken: true,
+        containsNoE2BApiKey: true,
+        containsNoCodexApiKey: true,
+        containsNoProxyCredentials: true,
+        containsNoBridgeOrSessionToken: true,
+        containsNoLegacyTuiDbPath: true,
+        containsNoApiDbPath: true,
+      },
+    };
+    const invalid = validateE2BEvidenceBundle(bundle);
+    const validBundle = { ...bundle, statusResult: { token: "[REDACTED]", path: "[REDACTED_DB_PATH]" } };
+    const writes: string[] = [];
+    const code = await runE2BSmokeCli(["--validate-evidence", "evidence.json"], {
+      readFile: async () => JSON.stringify(validBundle),
+      write: (text) => writes.push(text),
+    });
+
+    expect(invalid).toMatchObject({ ok: false, status: "invalid" });
+    expect(invalid.redactionViolations.length).toBeGreaterThan(0);
+    expect(code).toBe(0);
+    expect(JSON.parse(writes.join(""))).toMatchObject({ ok: true, status: "pass" });
   });
 
   test("loads .env for E2B smoke planning without leaking secret values", async () => {
@@ -1160,6 +1333,9 @@ describe("compose smoke runner", () => {
         "--verify-callback",
         "--callback-timeout-ms",
         "250",
+        "--evidence",
+        "--validate-evidence",
+        "evidence.json",
       ]),
     ).toEqual({
       dryRun: true,
@@ -1173,6 +1349,8 @@ describe("compose smoke runner", () => {
       maliciousFixtures: false,
       verifyCallback: true,
       callbackTimeoutMs: 250,
+      evidence: true,
+      validateEvidencePath: "evidence.json",
     });
 
     expect(
