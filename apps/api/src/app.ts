@@ -224,6 +224,9 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
   app.post("/internal/orchestrator/sessions/:sessionId/github-token", requireInternalServiceToken, async (request, response) => {
     await respondWithGitHubSessionToken(response, { database, broker: githubTokenBroker, config }, request);
   });
+  app.post("/internal/orchestrator/github-app/verify", requireInternalServiceToken, async (request, response) => {
+    await respondWithGitHubAppVerification(response, { broker: githubTokenBroker }, request);
+  });
   app.post("/internal/egress/authorize", requireInternalServiceToken, (request, response) => {
     respondWithEgressAuthorization(response, { database, config }, request);
   });
@@ -574,6 +577,44 @@ async function respondWithGitHubSessionToken(
       expiresAt: result.token.expiresAt,
       repositoryUrl: result.token.repositoryUrl,
     },
+  });
+}
+
+async function respondWithGitHubAppVerification(
+  response: Response,
+  options: {
+    readonly broker: GitHubTokenBroker | null;
+  },
+  request: Request,
+): Promise<void> {
+  if (!options.broker?.verifyInstallationAccess) {
+    response.status(503).json({ ok: false, error: "github_token_broker_unavailable" });
+    return;
+  }
+
+  const body = parseObjectBody(request.body);
+  const repositoryUrl = readOptionalString(body.repositoryUrl);
+  if (!repositoryUrl) {
+    response.status(400).json({ ok: false, error: "missing_repository_url" });
+    return;
+  }
+
+  const result = await options.broker.verifyInstallationAccess({ repositoryUrl });
+  if (!result.ok) {
+    response.status(result.status).json({
+      ok: false,
+      error: result.error,
+      ...(result.repositoryUrl ? { repositoryUrl: result.repositoryUrl } : {}),
+      ...(result.missingPermissions?.length ? { missingPermissions: result.missingPermissions } : {}),
+    });
+    return;
+  }
+
+  response.status(200).json({
+    ok: true,
+    repositoryUrl: result.repositoryUrl,
+    token: result.token,
+    permissions: result.permissions,
   });
 }
 

@@ -42,6 +42,7 @@ export type E2BSmokePlan = {
     readonly fixtureIds: readonly string[];
   };
   readonly requests: {
+    readonly githubAppVerify: E2BSmokeRequest;
     readonly seed: E2BSmokeRequest;
     readonly status: E2BSmokeRequest;
   };
@@ -282,6 +283,13 @@ export function createE2BSmokePlan(input: Partial<ParsedE2BSmokeArgs> & { readon
     cleanup,
     maliciousFixtures,
     requests: {
+      githubAppVerify: {
+        method: "POST",
+        url: `${apiUrl}/internal/orchestrator/github-app/verify`,
+        body: {
+          repositoryUrl: runtimeSource.repositoryUrl,
+        },
+      },
       seed: {
         method: "POST",
         url: `${apiUrl}/internal/smoke/seed`,
@@ -577,6 +585,24 @@ export async function runE2BSmokeCli(args: readonly string[] = process.argv.slic
   const serviceToken = parsed.serviceToken ?? loadConfig(buildE2BSmokeConfigEnv(env, readAgentRunnerMode(parsed.agentRunnerMode ?? env.AGENT_RUNNER_MODE))).serviceToken.token;
 
   try {
+    if (plan.launchSpec.runner.mode === "codex") {
+      const githubApp = await verifyGitHubAppReadiness(plan, serviceToken, fetchImpl);
+      if (!isSuccessfulVerification(githubApp)) {
+        write(
+          `${JSON.stringify(
+            {
+              ok: false,
+              stage: "github-app-verification",
+              error: readVerificationError(githubApp),
+              githubApp,
+            },
+            null,
+            2,
+          )}\n`,
+        );
+        return 1;
+      }
+    }
     const seed = await seedE2BSmokeFixture(plan, serviceToken, fetchImpl);
     const status = await waitForE2BSmokeCompletion(plan, serviceToken, fetchImpl, options);
     write(`${JSON.stringify({ ok: true, seed, status }, null, 2)}\n`);
@@ -696,6 +722,26 @@ async function seedE2BSmokeFixture(plan: E2BSmokePlan, serviceToken: string, fet
   return body;
 }
 
+async function verifyGitHubAppReadiness(plan: E2BSmokePlan, serviceToken: string, fetchImpl: typeof fetch): Promise<unknown> {
+  const response = await fetchImpl(plan.requests.githubAppVerify.url, {
+    method: "POST",
+    headers: {
+      [plan.serviceTokenHeaderName]: serviceToken,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(plan.requests.githubAppVerify.body),
+  });
+  const body = await response.json().catch(() => null);
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      ...(readRecord(body) ?? { error: `github app verification failed with HTTP ${response.status}` }),
+    };
+  }
+  return body;
+}
+
 async function waitForE2BSmokeCompletion(
   plan: E2BSmokePlan,
   serviceToken: string,
@@ -736,6 +782,16 @@ function isCompleteSmokeStatus(body: unknown): boolean {
 
 function isFailedSmokeStatus(body: unknown): boolean {
   return Boolean(readRecord(readRecord(body)?.failure)?.failed);
+}
+
+function isSuccessfulVerification(body: unknown): boolean {
+  return readRecord(body)?.ok === true;
+}
+
+function readVerificationError(body: unknown): string {
+  const record = readRecord(body);
+  const error = record?.error;
+  return typeof error === "string" && error.trim() ? error.trim() : "github_app_verification_failed";
 }
 
 function formatMissingE2BSmokeRequirements(plan: E2BSmokePlan): string {

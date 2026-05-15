@@ -870,6 +870,64 @@ describe("compose smoke runner", () => {
     expect(JSON.stringify(payload)).not.toContain("service-secret");
   });
 
+  test("verifies GitHub App readiness before seeding Codex E2B smoke tasks", async () => {
+    const writes: string[] = [];
+    const requests: string[] = [];
+    const code = await runE2BSmokeCli(["--api-url", "http://api.local", "--service-token", "service-secret", "--agent-runner-mode", "codex"], {
+      env: {
+        AUTH_MODE: "test",
+        BRIDGE_CALLBACK_BASE_URL: "https://callback.agentpool.app",
+        E2B_API_KEY: "e2b-secret",
+        E2B_TEMPLATE_ID: "template-1",
+        E2B_TEMPLATE_COMPATIBILITY_MANIFEST_JSON: JSON.stringify(AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST),
+        E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN,CODEX_API_KEY",
+        CODEX_API_KEY: "codex-secret",
+        GITHUB_APP_ID: "12345",
+        GITHUB_APP_PRIVATE_KEY: "github-app-private-key",
+        GITHUB_APP_INSTALLATION_ID: "67890",
+        EGRESS_PROXY_URL: "http://proxy-user:proxy-secret@egress-gateway.internal:8080",
+        EGRESS_PROXY_ALLOW_OUT: "10.0.10.25/32",
+        AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+      },
+      write: (text) => writes.push(text),
+      fetch: async (input, init) => {
+        requests.push(String(input));
+        expect(new Headers(init?.headers).get("x-agent-pool-service-token")).toBe("service-secret");
+        if (String(input).endsWith("/internal/orchestrator/github-app/verify")) {
+          return Response.json(
+            {
+              ok: false,
+              error: "github_app_permissions_insufficient",
+              repositoryUrl: "https://github.com/example/tiny-fixture.git",
+              missingPermissions: ["contents:write"],
+            },
+            { status: 403 },
+          );
+        }
+        throw new Error("Codex E2B smoke must not seed before GitHub App verification succeeds");
+      },
+    });
+    const payload = JSON.parse(writes.join(""));
+
+    expect(code).toBe(1);
+    expect(requests).toEqual(["http://api.local/internal/orchestrator/github-app/verify"]);
+    expect(payload).toEqual({
+      ok: false,
+      stage: "github-app-verification",
+      error: "github_app_permissions_insufficient",
+      githubApp: {
+        ok: false,
+        status: 403,
+        error: "github_app_permissions_insufficient",
+        repositoryUrl: "https://github.com/example/tiny-fixture.git",
+        missingPermissions: ["contents:write"],
+      },
+    });
+    expect(JSON.stringify(payload)).not.toContain("github-app-private-key");
+    expect(JSON.stringify(payload)).not.toContain("codex-secret");
+    expect(JSON.stringify(payload)).not.toContain("service-secret");
+  });
+
   test("defaults E2B smoke service-token auth to the compose stack token", async () => {
     const requests: Array<{ readonly url: string; readonly serviceToken: string | null }> = [];
     const code = await runE2BSmokeCli(["--api-url", "http://api.local", "--timeout-ms", "1000"], {

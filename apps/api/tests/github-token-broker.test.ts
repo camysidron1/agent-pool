@@ -68,6 +68,102 @@ describe("GitHub App token broker", () => {
     });
   });
 
+  test("verifies installation access and redacts token values from readiness results", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const privateKeyPem = privateKey.export({ type: "pkcs1", format: "pem" }).toString();
+    const broker = createGitHubAppTokenBroker({
+      config: {
+        appId: "12345",
+        privateKey: privateKeyPem,
+        installationId: "98765",
+        apiBaseUrl: "https://api.github.test",
+        tokenEnvName: "GITHUB_TOKEN",
+        tokenTtlSeconds: 600,
+        configured: true,
+      },
+      clock: { now: () => new Date("2026-05-14T18:00:00.000Z") },
+      fetch: (async () =>
+        new Response(
+          JSON.stringify({
+            token: "installation-token",
+            expires_at: "2026-05-14T18:10:00.000Z",
+            permissions: {
+              contents: "write",
+              pull_requests: "write",
+            },
+          }),
+          { status: 201, headers: { "content-type": "application/json" } },
+        )) as typeof fetch,
+    });
+
+    const result = await broker.verifyInstallationAccess?.({ repositoryUrl: "https://github.com/example/tiny-fixture.git" });
+
+    expect(result).toEqual({
+      ok: true,
+      repositoryUrl: "https://github.com/example/tiny-fixture.git",
+      token: {
+        envName: "GITHUB_TOKEN",
+        expiresAt: "2026-05-14T18:10:00.000Z",
+      },
+      permissions: {
+        contents: "write",
+        pull_requests: "write",
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("installation-token");
+    expect(JSON.stringify(result)).not.toContain("PRIVATE KEY");
+  });
+
+  test("reports repository and permission readiness failures without leaking credentials", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const privateKeyPem = privateKey.export({ type: "pkcs1", format: "pem" }).toString();
+    const broker = createGitHubAppTokenBroker({
+      config: {
+        appId: "12345",
+        privateKey: privateKeyPem,
+        installationId: "98765",
+        apiBaseUrl: "https://api.github.test",
+        tokenEnvName: "GITHUB_TOKEN",
+        tokenTtlSeconds: 600,
+        configured: true,
+      },
+      clock: { now: () => new Date("2026-05-14T18:00:00.000Z") },
+      fetch: (async (_url, init) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { readonly repositories?: readonly string[] };
+        if (body.repositories?.[0] === "missing-repo") {
+          return new Response(JSON.stringify({ message: "Repository not found" }), {
+            status: 404,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            token: "installation-token",
+            permissions: {
+              contents: "read",
+              pull_requests: "write",
+            },
+          }),
+          { status: 201, headers: { "content-type": "application/json" } },
+        );
+      }) as typeof fetch,
+    });
+
+    await expect(broker.verifyInstallationAccess?.({ repositoryUrl: "https://github.com/example/missing-repo.git" })).resolves.toEqual({
+      ok: false,
+      status: 404,
+      error: "Repository not found",
+      repositoryUrl: "https://github.com/example/missing-repo.git",
+    });
+    await expect(broker.verifyInstallationAccess?.({ repositoryUrl: "https://github.com/example/tiny-fixture.git" })).resolves.toEqual({
+      ok: false,
+      status: 403,
+      error: "github_app_permissions_insufficient",
+      repositoryUrl: "https://github.com/example/tiny-fixture.git",
+      missingPermissions: ["contents:write"],
+    });
+  });
+
   test("signs bounded GitHub App JWTs without embedding the private key", () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const privateKeyPem = privateKey.export({ type: "pkcs1", format: "pem" }).toString();

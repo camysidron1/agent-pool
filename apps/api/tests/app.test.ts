@@ -155,6 +155,100 @@ describe("API service skeleton", () => {
     }
   });
 
+  test("internal GitHub App verification requires service-token auth and returns redacted repository permissions", async () => {
+    const verificationCalls: string[] = [];
+    const broker: GitHubTokenBroker = {
+      async mintInstallationToken() {
+        throw new Error("verification should not mint a caller-visible token");
+      },
+      async verifyInstallationAccess(input) {
+        verificationCalls.push(input.repositoryUrl);
+        if (input.repositoryUrl.includes("missing")) {
+          return {
+            ok: false,
+            status: 404,
+            error: "Repository not found",
+            repositoryUrl: "https://github.com/example/missing.git",
+          };
+        }
+        if (input.repositoryUrl.includes("read-only")) {
+          return {
+            ok: false,
+            status: 403,
+            error: "github_app_permissions_insufficient",
+            repositoryUrl: "https://github.com/example/read-only.git",
+            missingPermissions: ["contents:write"],
+          };
+        }
+        return {
+          ok: true,
+          repositoryUrl: "https://github.com/example/tiny-fixture.git",
+          token: {
+            envName: "GITHUB_TOKEN",
+            expiresAt: "2026-05-14T19:00:00.000Z",
+          },
+          permissions: {
+            contents: "write",
+            pull_requests: "write",
+          },
+        };
+      },
+    };
+    const { baseUrl, config, close } = await startTestApi({ githubTokenBroker: broker });
+
+    try {
+      const unauthorized = await fetch(`${baseUrl}/internal/orchestrator/github-app/verify`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ repositoryUrl: "https://github.com/example/tiny-fixture.git" }),
+      });
+      const ok = await fetch(`${baseUrl}/internal/orchestrator/github-app/verify`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+        body: JSON.stringify({ repositoryUrl: "https://github.com/example/tiny-fixture.git" }),
+      });
+      const readOnly = await fetch(`${baseUrl}/internal/orchestrator/github-app/verify`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+        body: JSON.stringify({ repositoryUrl: "https://github.com/example/read-only.git" }),
+      });
+      const okBody = await ok.json();
+      const readOnlyBody = await readOnly.json();
+
+      expect(unauthorized.status).toBe(401);
+      expect(ok.status).toBe(200);
+      expect(okBody).toEqual({
+        ok: true,
+        repositoryUrl: "https://github.com/example/tiny-fixture.git",
+        token: {
+          envName: "GITHUB_TOKEN",
+          expiresAt: "2026-05-14T19:00:00.000Z",
+        },
+        permissions: {
+          contents: "write",
+          pull_requests: "write",
+        },
+      });
+      expect(readOnly.status).toBe(403);
+      expect(readOnlyBody).toEqual({
+        ok: false,
+        error: "github_app_permissions_insufficient",
+        repositoryUrl: "https://github.com/example/read-only.git",
+        missingPermissions: ["contents:write"],
+      });
+      expect(JSON.stringify(okBody)).not.toMatch(/installation-token|github_pat_|ghp_|service-token/i);
+      expect(verificationCalls).toEqual(["https://github.com/example/tiny-fixture.git", "https://github.com/example/read-only.git"]);
+    } finally {
+      await close();
+    }
+  });
+
   test("internal egress authz enforces global and session runtime-source domains", async () => {
     const { baseUrl, config, database, close } = await startTestApi({
       env: {
