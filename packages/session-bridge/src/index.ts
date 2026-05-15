@@ -169,6 +169,15 @@ export {
   type CodexPromptInput,
 } from "./codex-policy";
 export {
+  CodexCommandPolicyViolationError,
+  createCodexCommandSupervisor,
+  inspectCodexEventLine,
+  parseCommandText,
+  type CodexCommandSupervisor,
+  type CodexCommandSupervisorDecision,
+  type CodexCommandSupervisorOptions,
+} from "./command-supervisor";
+export {
   runCodexBridgeSession,
   scrubCodexSandboxSecrets,
   type CodexBridgeSessionOptions,

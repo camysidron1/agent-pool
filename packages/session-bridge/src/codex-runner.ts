@@ -10,6 +10,11 @@ import {
   createCodexPrompt,
   extractPullRequestUrl,
 } from "./codex-policy";
+import {
+  CodexCommandPolicyViolationError,
+  createCodexCommandSupervisor,
+  type CodexCommandSupervisorDecision,
+} from "./command-supervisor";
 
 export type CodexRunnerEnvironment = Readonly<Record<string, string | undefined>>;
 
@@ -94,6 +99,10 @@ export async function runCodexBridgeSession(options: CodexBridgeSessionOptions):
     allowedEgressDomains: config.allowedEgressDomains,
   });
   await writeCodexPolicyFiles(config);
+  const commandSupervisor = createCodexCommandSupervisor({
+    commandProfile: config.commandProfile,
+    expectedBranchName: config.branchName,
+  });
 
   const firstPass = await bridge.runOnce({
     output: [
@@ -139,6 +148,11 @@ export async function runCodexBridgeSession(options: CodexBridgeSessionOptions):
       onStdout: async (chunk) => {
         stdout += chunk;
         pullRequestUrl ??= extractPullRequestUrl(chunk);
+        await enforceCommandSupervisorDecisions({
+          decisions: commandSupervisor.inspectChunk(chunk),
+          bridge,
+          env,
+        });
         if (isPackageInstallOutput(chunk)) {
           await bridge.runOnce({ output: [securityOutput("package-install", { allowed: true, policy: config.commandProfile })] });
         }
@@ -147,11 +161,21 @@ export async function runCodexBridgeSession(options: CodexBridgeSessionOptions):
       onStderr: async (chunk) => {
         stderr += chunk;
         pullRequestUrl ??= extractPullRequestUrl(chunk);
+        await enforceCommandSupervisorDecisions({
+          decisions: commandSupervisor.inspectChunk(chunk),
+          bridge,
+          env,
+        });
         await bridge.runOnce({ output: [{ stream: "stderr", text: chunk }] });
       },
     });
 
     exitCode = result.exitCode;
+    await enforceCommandSupervisorDecisions({
+      decisions: commandSupervisor.flush(),
+      bridge,
+      env,
+    });
     stdout = mergeProcessText(stdout, result.stdout);
     stderr = mergeProcessText(stderr, result.stderr);
     const finalText = await readFinalResponse(config.finalResponsePath, stdout, stderr);
@@ -450,6 +474,32 @@ async function readPullRequestUrlFromGh(input: {
   return extractPullRequestUrl(result.stdout) ?? extractPullRequestUrl(result.stderr);
 }
 
+async function enforceCommandSupervisorDecisions(input: {
+  readonly decisions: readonly CodexCommandSupervisorDecision[];
+  readonly bridge: Pick<ReturnType<typeof createBridgeRunner>, "runOnce">;
+  readonly env: CodexRunnerEnvironment;
+}): Promise<void> {
+  for (const decision of input.decisions) {
+    const metadata = commandDecisionMetadata(decision, input.env);
+    await input.bridge.runOnce({ output: [securityOutput("command-policy", metadata)] });
+    if (decision.kind === "denied") {
+      throw new CodexCommandPolicyViolationError(decision);
+    }
+  }
+}
+
+function commandDecisionMetadata(
+  decision: CodexCommandSupervisorDecision,
+  env: CodexRunnerEnvironment,
+): Readonly<Record<string, unknown>> {
+  return {
+    command: redactKnownSecrets(decision.commandText, env),
+    policy: decision.policy,
+    allowed: decision.kind === "allowed",
+    ...(decision.kind === "denied" ? { reason: decision.reason } : {}),
+  };
+}
+
 async function runCodexPostflight(input: {
   readonly executeProcess: CodexProcessExecutor;
   readonly env: CodexRunnerEnvironment;
@@ -553,6 +603,7 @@ function cleanupMetadata(
 
 async function executeNodeProcess(input: CodexProcessExecutionInput): Promise<CodexProcessExecutionResult> {
   return new Promise((resolve, reject) => {
+    let settled = false;
     const child = spawn(input.command, [...input.args], {
       cwd: input.cwd,
       env: input.env,
@@ -562,26 +613,48 @@ async function executeNodeProcess(input: CodexProcessExecutionInput): Promise<Co
     const stderr: string[] = [];
     const pending: Promise<unknown>[] = [];
 
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGTERM");
+      reject(error);
+    };
+
+    const trackCallback = (callbackResult: void | Promise<void>) => {
+      if (!callbackResult) return;
+      pending.push(Promise.resolve(callbackResult).catch(fail));
+    };
+
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString();
       stdout.push(text);
-      const result = input.onStdout?.(text);
-      if (result) pending.push(Promise.resolve(result));
+      try {
+        trackCallback(input.onStdout?.(text));
+      } catch (error) {
+        fail(error);
+      }
     });
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString();
       stderr.push(text);
-      const result = input.onStderr?.(text);
-      if (result) pending.push(Promise.resolve(result));
+      try {
+        trackCallback(input.onStderr?.(text));
+      } catch (error) {
+        fail(error);
+      }
     });
-    child.on("error", reject);
+    child.on("error", fail);
     child.on("close", (code) => {
       Promise.allSettled(pending).then(() =>
-        resolve({
-          exitCode: code ?? 1,
-          stdout: stdout.join(""),
-          stderr: stderr.join(""),
-        }),
+        {
+          if (settled) return;
+          settled = true;
+          resolve({
+            exitCode: code ?? 1,
+            stdout: stdout.join(""),
+            stderr: stderr.join(""),
+          });
+        },
       );
     });
   });

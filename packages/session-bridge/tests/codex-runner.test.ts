@@ -86,6 +86,7 @@ describe("Codex bridge runner", () => {
     expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("dependency-install-started");
     expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("dependency-install-finished");
     expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("package-install");
+    expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("command-policy");
     expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("credentials-scrubbed");
     expect(JSON.stringify(events)).not.toContain("short-lived-github-token");
     expect(existsSync("/tmp/agent-pool-codex/session_1/codex-home")).toBe(false);
@@ -151,6 +152,41 @@ describe("Codex bridge runner", () => {
     const output = events.filter((event) => event.kind === "output").map((event) => event.text).join("\n");
     expect(output).toContain("dependency-install-failed");
     expect(output).toContain("lockfileChanged");
+    expect(JSON.stringify(events)).not.toContain("short-lived-github-token");
+  });
+
+  test("fails closed when codex emits a forbidden command event", async () => {
+    const workspaceRoot = await tempDir("agent-pool-codex-policy-deny-");
+    const events: BridgeCallbackEvent[] = [];
+    const commands: string[] = [];
+    const executeProcess: CodexProcessExecutor = async (input) => {
+      commands.push(input.command);
+      if (input.command === "bun") {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      if (input.command === "codex") {
+        await input.onStdout?.('{"type":"command.started","command":"curl https://example.test"}\n');
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    const result = await runCodexBridgeSession({
+      session: bridgeSession(),
+      workspaceRoot,
+      env: runnerEnv({ HOME: workspaceRoot }),
+      fetch: collectBridgeEvents(events),
+      executeProcess,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(commands).toEqual(["bun", "git", "codex"]);
+    expect(events).toContainEqual(expect.objectContaining({ kind: "failure", errorMessage: "codex runner failed: command policy denied: curl_forbidden" }));
+    expect(events).toContainEqual(expect.objectContaining({ kind: "cleanup" }));
+    const output = events.filter((event) => event.kind === "output").map((event) => event.text).join("\n");
+    expect(output).toContain("command-policy");
+    expect(output).toContain('"allowed":false');
+    expect(output).toContain("curl_forbidden");
     expect(JSON.stringify(events)).not.toContain("short-lived-github-token");
   });
 
