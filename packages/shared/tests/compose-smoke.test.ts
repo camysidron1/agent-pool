@@ -12,6 +12,7 @@ import {
 } from "../../../deploy/compose/smoke-compose";
 import { AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST } from "@agent-pool/runtime";
 import {
+  createE2BLiveSmokeDoctorReport,
   createE2BReadinessReport,
   createE2BSmokePlan,
   parseE2BSmokeArgs,
@@ -918,6 +919,133 @@ describe("compose smoke runner", () => {
     expect(JSON.stringify(report)).not.toContain("proxy-secret");
   });
 
+  test("reports a redacted live smoke doctor profile without side effects", async () => {
+    const writes: string[] = [];
+    let fetches = 0;
+    const code = await runE2BSmokeCli(
+      [
+        "--doctor",
+        "--agent-runner-mode",
+        "codex",
+        "--api-url",
+        "http://api-user:api-secret@127.0.0.1:3080",
+        "--repository-url",
+        "https://github.com/example/tiny-fixture.git",
+      ],
+      {
+        env: {
+          AUTH_MODE: "test",
+          BRIDGE_CALLBACK_BASE_URL: "https://callback.agentpool.app",
+          E2B_API_KEY: "e2b-secret",
+          E2B_TEMPLATE_ID: "template-1",
+          E2B_TEMPLATE_COMPATIBILITY_MANIFEST_JSON: JSON.stringify(AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST),
+          E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN,CODEX_API_KEY",
+          CODEX_API_KEY: "codex-secret",
+          GITHUB_APP_ID: "12345",
+          GITHUB_APP_PRIVATE_KEY: "github-app-private-key",
+          GITHUB_APP_INSTALLATION_ID: "67890",
+          EGRESS_PROXY_URL: "http://proxy-user:proxy-secret@egress-gateway.internal:8080",
+          EGRESS_PROXY_ALLOW_OUT: "10.0.10.25/32",
+          AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+        },
+        write: (text) => writes.push(text),
+        fetch: async () => {
+          fetches += 1;
+          throw new Error("doctor must not call the network by default");
+        },
+      },
+    );
+    const report = JSON.parse(writes.join(""));
+
+    expect(code).toBe(0);
+    expect(fetches).toBe(0);
+    expect(report).toMatchObject({
+      ok: true,
+      kind: "e2b-live-smoke-doctor",
+      status: "ready",
+      sideEffects: [],
+      runProfile: {
+        callbackBaseUrl: "https://callback.agentpool.app",
+        callbackHealthUrl: "https://callback.agentpool.app/health",
+        githubAppVerifyUrl: expect.stringContaining("/internal/orchestrator/github-app/verify"),
+        seedUrl: expect.stringContaining("/internal/smoke/seed"),
+        statusUrl: expect.stringContaining("/internal/smoke/status"),
+      },
+      fixture: {
+        repositoryUrl: "https://github.com/example/tiny-fixture.git",
+        baseRef: "main",
+        taskBranchPrefix: "agent-pool/e2b-smoke",
+        commandProfile: "agent-pool-bun-pr",
+      },
+    });
+    expect(report.checks).toContainEqual(expect.objectContaining({ id: "doctor-api-url", status: "pass" }));
+    expect(report.checks).toContainEqual(expect.objectContaining({ id: "doctor-fixture-egress-domains", status: "pass" }));
+    expect(JSON.stringify(report)).not.toContain("api-secret");
+    expect(JSON.stringify(report)).not.toContain("e2b-secret");
+    expect(JSON.stringify(report)).not.toContain("codex-secret");
+    expect(JSON.stringify(report)).not.toContain("github-app-private-key");
+    expect(JSON.stringify(report)).not.toContain("proxy-secret");
+  });
+
+  test("blocks the live smoke doctor on missing prerequisites without touching providers", async () => {
+    const writes: string[] = [];
+    let fetches = 0;
+    const code = await runE2BSmokeCli(["--doctor", "--agent-runner-mode", "codex"], {
+      env: {
+        AUTH_MODE: "test",
+      },
+      write: (text) => writes.push(text),
+      fetch: async () => {
+        fetches += 1;
+        return Response.json({ ok: true });
+      },
+    });
+    const report = JSON.parse(writes.join(""));
+
+    expect(code).toBe(1);
+    expect(fetches).toBe(0);
+    expect(report.status).toBe("blocked");
+    expect(report.nextAction).toBe("Doctor found blockers; resolve them before launching a live E2B sandbox.");
+    expect(report.checks).toContainEqual(expect.objectContaining({ id: "e2b-provider-credentials", status: "block" }));
+    expect(report.checks).toContainEqual(expect.objectContaining({ id: "callback-url", status: "block" }));
+    expect(report.readiness.missingCredentials).toEqual([
+      "E2B_API_KEY",
+      "CODEX_API_KEY",
+      "GITHUB_APP_ID",
+      "GITHUB_APP_PRIVATE_KEY",
+      "GITHUB_APP_INSTALLATION_ID",
+    ]);
+    expect(JSON.stringify(report)).not.toContain("dry-run-github-token");
+    expect(JSON.stringify(report)).not.toContain("dry-run-codex-api-key");
+  });
+
+  test("warns in the doctor for direct egress and non-namespaced fixture branches", () => {
+    const report = createE2BLiveSmokeDoctorReport({
+      agentRunnerMode: "codex",
+      taskBranchPrefix: "smoke/task",
+      env: {
+        AUTH_MODE: "test",
+        BRIDGE_CALLBACK_BASE_URL: "https://callback.agentpool.app",
+        E2B_API_KEY: "e2b-secret",
+        E2B_TEMPLATE_ID: "template-1",
+        E2B_TEMPLATE_COMPATIBILITY_MANIFEST_JSON: JSON.stringify(AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST),
+        E2B_LOCAL_ALLOW_DIRECT_EGRESS: "true",
+        CODEX_API_KEY: "codex-secret",
+        GITHUB_APP_ID: "12345",
+        GITHUB_APP_PRIVATE_KEY: "github-app-private-key",
+        GITHUB_APP_INSTALLATION_ID: "67890",
+      },
+    });
+
+    expect(report.status).toBe("warning");
+    expect(report.ok).toBe(true);
+    expect(report.checks).toContainEqual(expect.objectContaining({ id: "egress-policy", status: "warn" }));
+    expect(report.checks).toContainEqual(expect.objectContaining({ id: "doctor-fixture-branch-prefix", status: "warn" }));
+    expect(JSON.stringify(report)).not.toContain("e2b-secret");
+    expect(JSON.stringify(report)).not.toContain("codex-secret");
+    expect(JSON.stringify(report)).not.toContain("github-app-private-key");
+  });
+
   test("warns when offline readiness uses the local direct-egress override", () => {
     const report = createE2BReadinessReport({
       agentRunnerMode: "codex",
@@ -1318,6 +1446,7 @@ describe("compose smoke runner", () => {
     expect(
       parseE2BSmokeArgs([
         "--plan",
+        "--doctor",
         "--api-url",
         "http://api.local",
         "--service-token",
@@ -1340,6 +1469,7 @@ describe("compose smoke runner", () => {
     ).toEqual({
       dryRun: true,
       readiness: false,
+      doctor: true,
       apiUrl: "http://api.local",
       serviceToken: "token",
       timeoutMs: 5000,

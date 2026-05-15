@@ -189,9 +189,40 @@ export type E2BReadinessReport = {
   readonly checks: readonly E2BReadinessCheck[];
 };
 
+export type E2BLiveSmokeDoctorReport = {
+  readonly ok: boolean;
+  readonly kind: "e2b-live-smoke-doctor";
+  readonly status: E2BReadinessStatus;
+  readonly agentRunnerMode: "bridge-smoke" | "codex";
+  readonly sideEffects: readonly [];
+  readonly nextAction: string;
+  readonly runProfile: {
+    readonly apiUrl: string;
+    readonly callbackBaseUrl: string;
+    readonly callbackHealthUrl: string;
+    readonly githubAppVerifyUrl: string;
+    readonly seedUrl: string;
+    readonly statusUrl: string;
+    readonly dryRunCommand: readonly string[];
+    readonly doctorCommand: readonly string[];
+    readonly liveSmokeCommand: readonly string[];
+    readonly evidenceCommand: readonly string[];
+  };
+  readonly fixture: {
+    readonly repositoryUrl: string;
+    readonly baseRef: string;
+    readonly taskBranchPrefix: string;
+    readonly allowedEgressDomains: readonly string[];
+    readonly commandProfile: string | null;
+  };
+  readonly readiness: E2BReadinessReport;
+  readonly checks: readonly E2BReadinessCheck[];
+};
+
 type ParsedE2BSmokeArgs = {
   readonly dryRun: boolean;
   readonly readiness: boolean;
+  readonly doctor: boolean;
   readonly apiUrl: string;
   readonly serviceToken?: string;
   readonly timeoutMs: number;
@@ -415,6 +446,50 @@ export function createE2BReadinessReport(input: Partial<ParsedE2BSmokeArgs> & { 
     missingSettings: plan.missingSettings,
     runtimeSource: plan.runtimeSource,
     securityReadiness: plan.securityReadiness,
+    checks,
+  };
+}
+
+export function createE2BLiveSmokeDoctorReport(input: Partial<ParsedE2BSmokeArgs> & { readonly env?: EnvSource } = {}): E2BLiveSmokeDoctorReport {
+  const agentRunnerMode = readAgentRunnerMode(input.agentRunnerMode ?? input.env?.AGENT_RUNNER_MODE);
+  const plan = createE2BSmokePlan({ ...input, agentRunnerMode });
+  const readiness = createE2BReadinessReport({ ...input, agentRunnerMode });
+  const doctorChecks = buildDoctorChecks(plan, agentRunnerMode);
+  const checks = [...readiness.checks, ...doctorChecks];
+  const status = summarizeReadinessStatus(checks);
+
+  return {
+    ok: status !== "blocked",
+    kind: "e2b-live-smoke-doctor",
+    status,
+    agentRunnerMode,
+    sideEffects: [],
+    nextAction: nextDoctorAction(status),
+    runProfile: {
+      apiUrl: redactUrlCredentials(plan.apiUrl),
+      callbackBaseUrl: redactUrlCredentials(plan.launchSpec.bridge.callbackBaseUrl),
+      callbackHealthUrl: redactUrlCredentials(plan.requests.callbackHealth.url),
+      githubAppVerifyUrl: redactUrlCredentials(plan.requests.githubAppVerify.url),
+      seedUrl: redactUrlCredentials(plan.requests.seed.url),
+      statusUrl: redactUrlCredentials(plan.requests.status.url),
+      dryRunCommand: buildSmokeCommand(plan, agentRunnerMode, ["--dry-run"]),
+      doctorCommand: buildSmokeCommand(plan, agentRunnerMode, ["--doctor"]),
+      liveSmokeCommand: buildSmokeCommand(plan, agentRunnerMode, []),
+      evidenceCommand: buildSmokeCommand(plan, agentRunnerMode, ["--evidence"]),
+    },
+    fixture: {
+      repositoryUrl: plan.runtimeSource.repositoryUrl,
+      baseRef: plan.runtimeSource.baseRef,
+      taskBranchPrefix: plan.runtimeSource.taskBranchPrefix,
+      allowedEgressDomains: plan.runtimeSource.allowedEgressDomains ?? [],
+      commandProfile: plan.runtimeSource.commandProfile ?? null,
+    },
+    readiness: {
+      ...readiness,
+      status,
+      nextAction: nextReadinessAction(status),
+      checks,
+    },
     checks,
   };
 }
@@ -805,6 +880,97 @@ function buildReadinessChecks(plan: E2BSmokePlan, agentRunnerMode: "bridge-smoke
   return checks;
 }
 
+function buildDoctorChecks(plan: E2BSmokePlan, agentRunnerMode: "bridge-smoke" | "codex"): readonly E2BReadinessCheck[] {
+  const apiUrlStatus = readHttpUrlStatus(plan.apiUrl);
+  const callbackBaseUrl = plan.launchSpec.bridge.callbackBaseUrl;
+  const callbackPathStatus = readBaseUrlPathStatus(callbackBaseUrl);
+  const requiredEgressDomains = agentRunnerMode === "codex"
+    ? ["github.com", "api.github.com", "registry.npmjs.org", "api.openai.com"]
+    : [];
+  const declaredEgressDomains = new Set((plan.runtimeSource.allowedEgressDomains ?? []).map((domain) => domain.toLowerCase()));
+  const missingEgressDomains = requiredEgressDomains.filter((domain) => !declaredEgressDomains.has(domain));
+
+  return [
+    {
+      id: "doctor-api-url",
+      label: "Local stack API URL",
+      status: apiUrlStatus.ok ? "pass" : "block",
+      detail: apiUrlStatus.ok
+        ? "API URL is a valid HTTP(S) base URL for local smoke endpoints."
+        : apiUrlStatus.detail,
+      nextAction: apiUrlStatus.ok ? null : "Set --api-url or API_PUBLIC_URL to the local Caddy/API edge.",
+    },
+    {
+      id: "doctor-smoke-endpoints",
+      label: "Smoke API endpoints",
+      status: apiUrlStatus.ok ? "pass" : "block",
+      detail: apiUrlStatus.ok
+        ? "Seed, status, and GitHub App verification endpoints are planned without exposing the service token."
+        : "Smoke endpoints cannot be planned from the API URL.",
+      nextAction: apiUrlStatus.ok ? null : "Fix the API URL before running live smoke.",
+    },
+    {
+      id: "doctor-callback-base-path",
+      label: "Callback edge base path",
+      status: callbackPathStatus.ok ? "pass" : "warn",
+      detail: callbackPathStatus.ok
+        ? "Callback base URL does not include an API-only or web-only path prefix."
+        : callbackPathStatus.detail,
+      nextAction: callbackPathStatus.ok ? null : "Set BRIDGE_CALLBACK_BASE_URL to the public API/Caddy origin root.",
+    },
+    {
+      id: "doctor-fixture-repository",
+      label: "Fixture repository",
+      status: isValidGithubRepositoryUrl(plan.runtimeSource.repositoryUrl) ? "pass" : "block",
+      detail: isValidGithubRepositoryUrl(plan.runtimeSource.repositoryUrl)
+        ? "Fixture repository is an HTTPS GitHub repository URL."
+        : "Fixture repository must be an HTTPS GitHub repository URL.",
+      nextAction: isValidGithubRepositoryUrl(plan.runtimeSource.repositoryUrl)
+        ? null
+        : "Set --repository-url to a disposable HTTPS GitHub fixture repository.",
+    },
+    {
+      id: "doctor-fixture-base-ref",
+      label: "Fixture base ref",
+      status: isSafeGitRef(plan.runtimeSource.baseRef) ? "pass" : "block",
+      detail: isSafeGitRef(plan.runtimeSource.baseRef)
+        ? "Fixture base ref uses a safe git ref shape."
+        : "Fixture base ref contains unsupported or path-traversal characters.",
+      nextAction: isSafeGitRef(plan.runtimeSource.baseRef) ? null : "Use a simple branch or tag name for --base-ref.",
+    },
+    {
+      id: "doctor-fixture-branch-prefix",
+      label: "Fixture task branch prefix",
+      status: isSafeGitRef(plan.runtimeSource.taskBranchPrefix) && plan.runtimeSource.taskBranchPrefix.startsWith("agent-pool/")
+        ? "pass"
+        : isSafeGitRef(plan.runtimeSource.taskBranchPrefix)
+          ? "warn"
+          : "block",
+      detail: isSafeGitRef(plan.runtimeSource.taskBranchPrefix)
+        ? plan.runtimeSource.taskBranchPrefix.startsWith("agent-pool/")
+          ? "Fixture branches stay under the agent-pool namespace."
+          : "Fixture branch prefix is safe but outside the agent-pool namespace."
+        : "Fixture branch prefix contains unsupported or path-traversal characters.",
+      nextAction: isSafeGitRef(plan.runtimeSource.taskBranchPrefix)
+        ? plan.runtimeSource.taskBranchPrefix.startsWith("agent-pool/")
+          ? null
+          : "Use an agent-pool/* branch prefix for disposable smoke branches."
+        : "Set --task-branch-prefix to a safe agent-pool/* branch prefix.",
+    },
+    {
+      id: "doctor-fixture-egress-domains",
+      label: "Fixture egress domains",
+      status: missingEgressDomains.length === 0 ? "pass" : "block",
+      detail: missingEgressDomains.length === 0
+        ? "Fixture declares the required GitHub, package registry, and Codex API domains."
+        : `Fixture is missing required egress domain(s): ${missingEgressDomains.join(", ")}.`,
+      nextAction: missingEgressDomains.length === 0
+        ? null
+        : "Set AGENT_POOL_ALLOWED_EGRESS_DOMAINS or --allowed-egress-domains with the required domains.",
+    },
+  ];
+}
+
 function nextReadinessAction(status: E2BReadinessStatus): string {
   switch (status) {
     case "ready":
@@ -814,6 +980,40 @@ function nextReadinessAction(status: E2BReadinessStatus): string {
     case "blocked":
       return "Resolve blocked readiness checks, then rerun the readiness report.";
   }
+}
+
+function nextDoctorAction(status: E2BReadinessStatus): string {
+  switch (status) {
+    case "ready":
+      return "Doctor passed; run opt-in live E2B smoke when you are ready.";
+    case "warning":
+      return "Doctor found warnings; dry-run smoke is safe, but resolve warnings before treating live evidence as production-ready.";
+    case "blocked":
+      return "Doctor found blockers; resolve them before launching a live E2B sandbox.";
+  }
+}
+
+function buildSmokeCommand(
+  plan: E2BSmokePlan,
+  agentRunnerMode: "bridge-smoke" | "codex",
+  extraFlags: readonly string[],
+): readonly string[] {
+  return [
+    "bun",
+    "run",
+    "smoke:e2b",
+    ...extraFlags,
+    "--agent-runner-mode",
+    agentRunnerMode,
+    "--api-url",
+    redactUrlCredentials(plan.apiUrl),
+    "--repository-url",
+    plan.runtimeSource.repositoryUrl,
+    "--base-ref",
+    plan.runtimeSource.baseRef,
+    "--task-branch-prefix",
+    plan.runtimeSource.taskBranchPrefix,
+  ];
 }
 
 function buildSecurityReadiness(input: {
@@ -877,6 +1077,12 @@ export async function runE2BSmokeCli(args: readonly string[] = process.argv.slic
 
   const env = options.env ?? await loadLocalEnv({ cwd: options.cwd });
   const generatedAt = new Date(options.now?.() ?? Date.now()).toISOString();
+
+  if (parsed.doctor) {
+    const report = createE2BLiveSmokeDoctorReport({ ...parsed, env });
+    write(`${JSON.stringify(report, null, 2)}\n`);
+    return report.status === "blocked" ? 1 : 0;
+  }
 
   if (parsed.readiness) {
     const plan = createE2BSmokePlan({ ...parsed, env });
@@ -1012,6 +1218,7 @@ export async function runE2BSmokeCli(args: readonly string[] = process.argv.slic
 export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
   let dryRun = false;
   let readiness = false;
+  let doctor = false;
   let apiUrl = DEFAULT_API_URL;
   let serviceToken: string | undefined;
   let timeoutMs = DEFAULT_TIMEOUT_MS;
@@ -1035,6 +1242,9 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
         break;
       case "--readiness":
         readiness = true;
+        break;
+      case "--doctor":
+        doctor = true;
         break;
       case "--api-url":
         apiUrl = readFlagValue(args, (index += 1), arg);
@@ -1083,6 +1293,7 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
   return {
     dryRun,
     readiness,
+    doctor,
     apiUrl,
     serviceToken,
     timeoutMs,
@@ -1110,6 +1321,52 @@ function isLocalCallbackUrl(value: string): boolean {
 
 function isValidGithubRepositoryUrl(value: string): boolean {
   return /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(value);
+}
+
+function isSafeGitRef(value: string): boolean {
+  return /^[A-Za-z0-9._/-]+$/.test(value) && !value.includes("..") && !value.startsWith("/") && !value.endsWith("/");
+}
+
+function readHttpUrlStatus(value: string): { readonly ok: true } | { readonly ok: false; readonly detail: string } {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return { ok: false, detail: "URL must use http or https." };
+    }
+    if (!url.hostname) {
+      return { ok: false, detail: "URL must include a host." };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, detail: "URL is invalid." };
+  }
+}
+
+function readBaseUrlPathStatus(value: string): { readonly ok: true } | { readonly ok: false; readonly detail: string } {
+  try {
+    const url = new URL(value);
+    const path = url.pathname.replace(/\/+$/, "");
+    if (!path) return { ok: true };
+    if (path === "/api" || path === "/api/public" || path === "/internal" || path === "/callbacks") {
+      return { ok: false, detail: "Callback base URL includes an API-specific path; E2B callback paths will be appended by the bridge." };
+    }
+    return { ok: false, detail: "Callback base URL includes a path prefix; use the public API/Caddy origin root unless deliberately routing through a prefix." };
+  } catch {
+    return { ok: false, detail: "Callback base URL is invalid." };
+  }
+}
+
+function redactUrlCredentials(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.username || url.password) {
+      url.username = "[REDACTED]";
+      url.password = "";
+    }
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return redactEvidenceString(value);
+  }
 }
 
 function readTemplateCompatibilityManifest(env: EnvSource): unknown {
