@@ -168,6 +168,8 @@ export type RuntimeSandboxFinalization = {
   readonly providerSandboxId: string;
   readonly sourceSnapshotId: string | null;
   readonly snapshotRequired: boolean;
+  readonly snapshotEligibilityStatus?: "unknown" | "clean" | "ineligible" | "risk";
+  readonly snapshotRiskReasons?: readonly string[];
 };
 
 export type ClaimRuntimeSandboxFinalizationResponse =

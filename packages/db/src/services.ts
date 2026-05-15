@@ -731,7 +731,20 @@ export type RuntimeSandboxFinalizationRecord = {
   readonly providerSandboxId: string;
   readonly sourceSnapshotId: string | null;
   readonly snapshotRequired: boolean;
+  readonly snapshotEligibilityStatus: SnapshotEligibilityStatus;
+  readonly snapshotRiskReasons: readonly SnapshotRiskReason[];
 };
+
+export type SnapshotEligibilityStatus = "unknown" | "clean" | "ineligible" | "risk";
+export type SnapshotRiskReason =
+  | "clean"
+  | "session-not-succeeded"
+  | "egress-denied"
+  | "lockfile-mutated"
+  | "install-failed"
+  | "scrub-incomplete"
+  | "command-denied"
+  | "grace-timeout";
 
 export type ClaimNextRuntimeSandboxFinalizationInput = {
   readonly projectId?: string | null;
@@ -3828,6 +3841,8 @@ type RuntimeSandboxFinalizationRow = {
   readonly provider_sandbox_id: string;
   readonly source_snapshot_id: string | null;
   readonly snapshot_status: "not_required" | "pending" | "claimed" | "succeeded" | "failed" | "skipped";
+  readonly ended_at: string | null;
+  readonly has_cleanup_event: 0 | 1;
 };
 
 function claimNextRuntimeSandboxFinalization(
@@ -3842,7 +3857,13 @@ function claimNextRuntimeSandboxFinalization(
       .query<RuntimeSandboxFinalizationRow, [string | null, string | null, string]>(
         `
           SELECT rs.id, rs.project_id, rs.task_id, rs.session_id, s.status AS session_status,
-                 rs.provider, rs.provider_sandbox_id, s.source_snapshot_id, rs.snapshot_status
+                 rs.provider, rs.provider_sandbox_id, s.source_snapshot_id, rs.snapshot_status, s.ended_at,
+                 EXISTS (
+                   SELECT 1 FROM events cleanup
+                   WHERE cleanup.project_id = rs.project_id
+                     AND cleanup.session_id = rs.session_id
+                     AND cleanup.type = 'session.cleanup'
+                 ) AS has_cleanup_event
           FROM runtime_sandboxes rs
           JOIN sessions s ON s.project_id = rs.project_id AND s.id = rs.session_id
           JOIN projects p ON p.id = rs.project_id
@@ -3869,7 +3890,10 @@ function claimNextRuntimeSandboxFinalization(
 
     if (!candidate) return { ok: false, reason: "no_runtime_sandbox_finalization" } as const;
 
-    const snapshotRequired = candidate.snapshot_status === "pending";
+    const snapshotEligibility = classifyRuntimeSandboxSnapshotEligibility(database, candidate, cleanupGraceBefore);
+    const snapshotRequired = candidate.snapshot_status === "pending" && snapshotEligibility.status === "clean";
+    const nextSnapshotStatus =
+      candidate.snapshot_status === "pending" ? (snapshotRequired ? "claimed" : "skipped") : candidate.snapshot_status;
     database
       .query(
         `
@@ -3877,14 +3901,24 @@ function claimNextRuntimeSandboxFinalization(
           SET status = 'cleanup_claimed',
               cleanup_attempts = cleanup_attempts + 1,
               cleanup_claimed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-              snapshot_status = CASE WHEN snapshot_status = 'pending' THEN 'claimed' ELSE snapshot_status END,
-              snapshot_attempts = CASE WHEN snapshot_status = 'pending' THEN snapshot_attempts + 1 ELSE snapshot_attempts END,
-              snapshot_claimed_at = CASE WHEN snapshot_status = 'pending' THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE snapshot_claimed_at END,
+              snapshot_status = ?,
+              snapshot_attempts = CASE WHEN ? THEN snapshot_attempts + 1 ELSE snapshot_attempts END,
+              snapshot_claimed_at = CASE WHEN ? THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE snapshot_claimed_at END,
+              snapshot_eligibility_status = ?,
+              snapshot_risk_reasons_json = ?,
               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
           WHERE project_id = ? AND id = ?
         `,
       )
-      .run(candidate.project_id, candidate.id);
+      .run(
+        nextSnapshotStatus,
+        snapshotRequired ? 1 : 0,
+        snapshotRequired ? 1 : 0,
+        snapshotEligibility.status,
+        JSON.stringify(snapshotEligibility.reasons),
+        candidate.project_id,
+        candidate.id,
+      );
 
     const event = appendEvent(database, {
       projectId: candidate.project_id,
@@ -3896,8 +3930,11 @@ function claimNextRuntimeSandboxFinalization(
         provider: candidate.provider,
         providerSandboxId: candidate.provider_sandbox_id,
         snapshotRequired,
+        snapshotEligibilityStatus: snapshotEligibility.status,
+        snapshotRiskReasons: snapshotEligibility.reasons,
       },
     });
+    appendSnapshotDecisionEvent(database, candidate, snapshotRequired, snapshotEligibility);
     const outbox = enqueueOutbox(database, {
       projectId: candidate.project_id,
       eventId: event.id,
@@ -3917,11 +3954,129 @@ function claimNextRuntimeSandboxFinalization(
         providerSandboxId: candidate.provider_sandbox_id,
         sourceSnapshotId: candidate.source_snapshot_id,
         snapshotRequired,
+        snapshotEligibilityStatus: snapshotEligibility.status,
+        snapshotRiskReasons: snapshotEligibility.reasons,
       },
       event,
       outbox,
     } as const;
   });
+}
+
+type SnapshotEligibilityDecision = {
+  readonly status: SnapshotEligibilityStatus;
+  readonly reasons: readonly SnapshotRiskReason[];
+};
+
+function classifyRuntimeSandboxSnapshotEligibility(
+  database: WebSandboxSqliteDatabase,
+  candidate: RuntimeSandboxFinalizationRow,
+  cleanupGraceBefore: string,
+): SnapshotEligibilityDecision {
+  if (candidate.session_status !== "succeeded") {
+    return { status: "ineligible", reasons: ["session-not-succeeded"] };
+  }
+
+  const reasons = new Set<SnapshotRiskReason>();
+  if (candidate.has_cleanup_event !== 1 && candidate.ended_at && candidate.ended_at <= cleanupGraceBefore) {
+    reasons.add("grace-timeout");
+  }
+
+  const eventRows = database
+    .query<{ type: string; payload_json: string }, [string, string]>(
+      `
+        SELECT type, payload_json
+        FROM events
+        WHERE project_id = ? AND session_id = ?
+      `,
+    )
+    .all(candidate.project_id, candidate.session_id);
+
+  for (const row of eventRows) {
+    const payload = `${row.payload_json}\n${readEventPayloadText(row.payload_json)}`.toLowerCase();
+    if (
+      payload.includes("egress.denied") ||
+      payload.includes("package.proxy.denied") ||
+      (payload.includes('"securitykind":"egress') && payload.includes('"allowed":false')) ||
+      (payload.includes('"securitykind":"package') && payload.includes('"allowed":false'))
+    ) {
+      reasons.add("egress-denied");
+    }
+    if (payload.includes("dependency-install-failed")) reasons.add("install-failed");
+    if (payload.includes('"lockfilechanged":true')) reasons.add("lockfile-mutated");
+    if (payload.includes("credentials-scrubbed") && payload.includes('"allowed":false')) reasons.add("scrub-incomplete");
+    if (payload.includes("scrub") && payload.includes("failed")) reasons.add("scrub-incomplete");
+    if (payload.includes("command-policy") && payload.includes('"allowed":false')) reasons.add("command-denied");
+  }
+
+  if (reasons.size === 0) return { status: "clean", reasons: ["clean"] };
+  return { status: "risk", reasons: [...reasons].sort() };
+}
+
+function readEventPayloadText(payloadJson: string): string {
+  try {
+    const parsed: unknown = JSON.parse(payloadJson);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "";
+    const text = (parsed as Readonly<Record<string, unknown>>).text;
+    return typeof text === "string" ? text : "";
+  } catch {
+    return "";
+  }
+}
+
+function appendSnapshotDecisionEvent(
+  database: WebSandboxSqliteDatabase,
+  candidate: RuntimeSandboxFinalizationRow,
+  snapshotRequired: boolean,
+  eligibility: SnapshotEligibilityDecision,
+): void {
+  const event = appendEvent(database, {
+    projectId: candidate.project_id,
+    taskId: candidate.task_id,
+    sessionId: candidate.session_id,
+    type: "session.output",
+    payload: {
+      sessionId: candidate.session_id,
+      taskId: candidate.task_id,
+      stream: "system",
+      text: `${JSON.stringify({
+        type: "security",
+        securityKind: "snapshot-decision",
+        allowed: snapshotRequired,
+        snapshotEligibilityStatus: eligibility.status,
+        snapshotRiskReasons: eligibility.reasons,
+      })}\n`,
+      observedAt: readDatabaseTimestamp(database),
+    },
+  });
+  enqueueOutbox(database, {
+    projectId: candidate.project_id,
+    eventId: event.id,
+    routingKey: projectRoutingKey(candidate.project_id, "events"),
+    payload: { eventId: event.id, sessionId: candidate.session_id, type: event.type },
+  });
+}
+
+function parseSnapshotRiskReasonsJson(value: string): readonly SnapshotRiskReason[] {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter(isSnapshotRiskReason) : [];
+  } catch {
+    return [];
+  }
+}
+
+function isSnapshotRiskReason(value: unknown): value is SnapshotRiskReason {
+  return (
+    value === "clean" ||
+    value === "session-not-succeeded" ||
+    value === "egress-denied" ||
+    value === "lockfile-mutated" ||
+    value === "install-failed" ||
+    value === "scrub-incomplete" ||
+    value === "command-denied" ||
+    value === "grace-timeout"
+  );
 }
 
 type RuntimeSandboxLifecycleRow = {
@@ -3933,13 +4088,16 @@ type RuntimeSandboxLifecycleRow = {
   readonly provider_sandbox_id: string;
   readonly status: string;
   readonly snapshot_status: string;
+  readonly snapshot_eligibility_status: SnapshotEligibilityStatus;
+  readonly snapshot_risk_reasons_json: string;
 };
 
 function readRuntimeSandboxLifecycleRow(database: WebSandboxSqliteDatabase, projectId: string, runtimeSandboxId: string): RuntimeSandboxLifecycleRow | null {
   return database
     .query<RuntimeSandboxLifecycleRow, [string, string]>(
       `
-        SELECT id, project_id, task_id, session_id, provider, provider_sandbox_id, status, snapshot_status
+        SELECT id, project_id, task_id, session_id, provider, provider_sandbox_id, status, snapshot_status,
+               snapshot_eligibility_status, snapshot_risk_reasons_json
         FROM runtime_sandboxes
         WHERE project_id = ? AND id = ?
       `,
@@ -3990,7 +4148,11 @@ function reportRuntimeSandboxSnapshotCreated(
         sandbox.session_id,
         sandbox.provider_sandbox_id,
         input.expiresAt ?? null,
-        JSON.stringify(input.metadata ?? {}),
+        JSON.stringify({
+          ...(input.metadata ?? {}),
+          snapshotEligibilityStatus: sandbox.snapshot_eligibility_status,
+          snapshotRiskReasons: parseSnapshotRiskReasonsJson(sandbox.snapshot_risk_reasons_json),
+        }),
       );
     database
       .query(

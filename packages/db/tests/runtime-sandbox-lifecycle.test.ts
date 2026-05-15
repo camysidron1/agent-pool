@@ -63,6 +63,8 @@ describe("runtime sandbox lifecycle services", () => {
           provider: "e2b",
           providerSandboxId: "sandbox_1",
           snapshotRequired: true,
+          snapshotEligibilityStatus: "clean",
+          snapshotRiskReasons: ["clean"],
         },
         event: { type: "runtime_sandbox.finalization_claimed" },
       });
@@ -108,8 +110,15 @@ describe("runtime sandbox lifecycle services", () => {
       expect(readRuntimeSandbox(database, "project_a", "session_1")).toMatchObject({
         status: "cleanup_succeeded",
         snapshot_status: "succeeded",
+        snapshot_eligibility_status: "clean",
+        snapshot_risk_reasons_json: "[\"clean\"]",
         cleanup_attempts: 1,
         snapshot_attempts: 1,
+      });
+      expect(readSnapshotMetadata(database, snapshot.snapshot.id)).toMatchObject({
+        reason: "success",
+        snapshotEligibilityStatus: "clean",
+        snapshotRiskReasons: ["clean"],
       });
       expect(countRows(database, "session_snapshots")).toBe(1);
     } finally {
@@ -150,6 +159,8 @@ describe("runtime sandbox lifecycle services", () => {
         finalization: {
           sessionStatus: "failed",
           snapshotRequired: false,
+          snapshotEligibilityStatus: "ineligible",
+          snapshotRiskReasons: ["session-not-succeeded"],
         },
       });
       if (!claim.ok) throw new Error("expected runtime sandbox finalization claim");
@@ -170,8 +181,93 @@ describe("runtime sandbox lifecycle services", () => {
       expect(readRuntimeSandbox(database, "project_a", "session_1")).toMatchObject({
         status: "cleanup_succeeded",
         snapshot_status: "skipped",
+        snapshot_eligibility_status: "ineligible",
       });
       expect(countRows(database, "session_snapshots")).toBe(0);
+    } finally {
+      database.close();
+    }
+  });
+
+  test("risk-classified successful sessions skip reusable snapshots but still clean up providers", () => {
+    const database = createMigratedMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+
+      for (const scenario of [
+        {
+          taskId: "task_egress",
+          sessionId: "session_egress",
+          sandboxId: "sandbox_egress",
+          output: '{"type":"security","securityKind":"egress","allowed":false,"reason":"not_declared"}\n',
+          expectedReason: "egress-denied",
+          cleanup: true,
+        },
+        {
+          taskId: "task_lockfile",
+          sessionId: "session_lockfile",
+          sandboxId: "sandbox_lockfile",
+          output: '{"type":"security","securityKind":"postflight","lockfileChanged":true}\n',
+          expectedReason: "lockfile-mutated",
+          cleanup: true,
+        },
+        {
+          taskId: "task_scrub",
+          sessionId: "session_scrub",
+          sandboxId: "sandbox_scrub",
+          output: '{"type":"security","securityKind":"credentials-scrubbed","allowed":false}\n',
+          expectedReason: "scrub-incomplete",
+          cleanup: true,
+        },
+        {
+          taskId: "task_grace",
+          sessionId: "session_grace",
+          sandboxId: "sandbox_grace",
+          output: '{"type":"security","securityKind":"postflight","lockfileChanged":false}\n',
+          expectedReason: "grace-timeout",
+          cleanup: false,
+        },
+      ] as const) {
+        createSucceededRuntimeSandbox(services, scenario);
+        const claim = services.claimNextRuntimeSandboxFinalization({
+          projectId: "project_a",
+          cleanupGraceBefore: "2100-05-12T12:00:31.000Z",
+        });
+        expect(claim).toMatchObject({
+          ok: true,
+          finalization: {
+            taskId: scenario.taskId,
+            sessionId: scenario.sessionId,
+            snapshotRequired: false,
+            snapshotEligibilityStatus: "risk",
+            snapshotRiskReasons: expect.arrayContaining([scenario.expectedReason]),
+          },
+        });
+        if (!claim.ok) throw new Error("expected risk finalization claim");
+        expect(
+          services.reportRuntimeSandboxSnapshotCreated({
+            projectId: "project_a",
+            runtimeSandboxId: claim.finalization.id,
+            providerSnapshotId: `snapshot_${scenario.sandboxId}`,
+          }),
+        ).toMatchObject({ ok: false, error: { code: "invalid_state" } });
+        expect(
+          services.reportRuntimeSandboxCleanupSucceeded({
+            projectId: "project_a",
+            runtimeSandboxId: claim.finalization.id,
+          }),
+        ).toMatchObject({ ok: true, runtimeSandbox: { status: "cleanup_succeeded" } });
+        expect(readRuntimeSandbox(database, "project_a", scenario.sessionId)).toMatchObject({
+          status: "cleanup_succeeded",
+          snapshot_status: "skipped",
+          snapshot_eligibility_status: "risk",
+        });
+      }
+
+      expect(countRows(database, "session_snapshots")).toBe(0);
+      expect(readSnapshotDecisionEvents(database)).toBe(4);
     } finally {
       database.close();
     }
@@ -359,6 +455,53 @@ function createReadySnapshot(
   return snapshot.snapshot.id;
 }
 
+function createSucceededRuntimeSandbox(
+  services: ReturnType<typeof createCanonicalStateServices>,
+  input: {
+    readonly taskId: string;
+    readonly sessionId: string;
+    readonly sandboxId: string;
+    readonly output: string;
+    readonly cleanup: boolean;
+  },
+): void {
+  services.createTask({ id: input.taskId, projectId: "project_a", title: input.taskId });
+  expect(services.claimNextTask({ projectId: "project_a", sessionId: input.sessionId, runtimeProvider: "e2b" })).toMatchObject({ ok: true });
+  expect(services.reportStartupSucceeded({ projectId: "project_a", sessionId: input.sessionId, runtimeSessionId: input.sandboxId })).toMatchObject({
+    ok: true,
+  });
+  expect(
+    services.recordSessionOutput({
+      projectId: "project_a",
+      taskId: input.taskId,
+      sessionId: input.sessionId,
+      stream: "system",
+      sequence: 1,
+      byteOffset: 0,
+      text: input.output,
+      observedAt: "2026-05-12T12:00:00.000Z",
+    }),
+  ).toMatchObject({ ok: true });
+  expect(
+    services.completeSession({
+      projectId: "project_a",
+      taskId: input.taskId,
+      sessionId: input.sessionId,
+      observedAt: "2026-05-12T12:00:00.000Z",
+    }),
+  ).toMatchObject({ ok: true });
+  if (input.cleanup) {
+    expect(
+      services.cleanupSession({
+        projectId: "project_a",
+        taskId: input.taskId,
+        sessionId: input.sessionId,
+        reason: "bridge cleanup completed",
+      }),
+    ).toMatchObject({ ok: true });
+  }
+}
+
 function createMigratedMemoryDatabase(): Database {
   const database = new Database(":memory:", { strict: true });
   migrateWebSandboxDatabase(database);
@@ -373,18 +516,35 @@ function readRuntimeSandbox(database: Database, projectId: string, sessionId: st
         provider_sandbox_id: string;
         status: string;
         snapshot_status: string;
+        snapshot_eligibility_status: string;
+        snapshot_risk_reasons_json: string;
         cleanup_attempts: number;
         snapshot_attempts: number;
       },
       [string, string]
     >(
       `
-        SELECT provider, provider_sandbox_id, status, snapshot_status, cleanup_attempts, snapshot_attempts
+        SELECT provider, provider_sandbox_id, status, snapshot_status, snapshot_eligibility_status,
+               snapshot_risk_reasons_json, cleanup_attempts, snapshot_attempts
         FROM runtime_sandboxes
         WHERE project_id = ? AND session_id = ?
       `,
     )
     .get(projectId, sessionId);
+}
+
+function readSnapshotMetadata(database: Database, snapshotId: string): Readonly<Record<string, unknown>> {
+  const row = database.query<{ metadata_json: string }, [string]>("SELECT metadata_json FROM session_snapshots WHERE id = ?").get(snapshotId);
+  return row ? JSON.parse(row.metadata_json) : {};
+}
+
+function readSnapshotDecisionEvents(database: Database): number {
+  const row = database
+    .query<{ count: number }, []>(
+      "SELECT COUNT(*) AS count FROM events WHERE type = 'session.output' AND payload_json LIKE '%snapshot-decision%'",
+    )
+    .get();
+  return row?.count ?? 0;
 }
 
 function readSnapshotStatus(database: Database, snapshotId: string) {

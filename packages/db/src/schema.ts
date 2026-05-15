@@ -22,6 +22,9 @@ export type RuntimeSandboxStatus = (typeof runtimeSandboxStatusValues)[number];
 export const runtimeSandboxSnapshotStatusValues = ["not_required", "pending", "claimed", "succeeded", "failed", "skipped"] as const;
 export type RuntimeSandboxSnapshotStatus = (typeof runtimeSandboxSnapshotStatusValues)[number];
 
+export const snapshotEligibilityStatusValues = ["unknown", "clean", "ineligible", "risk"] as const;
+export type SnapshotEligibilityStatus = (typeof snapshotEligibilityStatusValues)[number];
+
 export const sessionSnapshotStatusValues = ["creating", "ready", "failed", "expired", "delete_claimed", "deleted", "delete_failed"] as const;
 export type SessionSnapshotStatus = (typeof sessionSnapshotStatusValues)[number];
 
@@ -186,6 +189,8 @@ export const runtimeSandboxes = sqliteTable(
     cleanupCompletedAt: text("cleanup_completed_at"),
     snapshotClaimedAt: text("snapshot_claimed_at"),
     snapshotCompletedAt: text("snapshot_completed_at"),
+    snapshotEligibilityStatus: text("snapshot_eligibility_status", { enum: snapshotEligibilityStatusValues }).notNull().default("unknown"),
+    snapshotRiskReasonsJson: text("snapshot_risk_reasons_json").notNull().default("[]"),
     terminalAt: text("terminal_at"),
     lastErrorMessage: text("last_error_message"),
     metadataJson: text("metadata_json").notNull().default("{}"),

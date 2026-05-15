@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 
-import { PACKAGE_REGISTRY_AUDIT_SCHEMA_MIGRATION_ID, createCanonicalStateServices, migrateWebSandboxDatabase } from "../src";
+import { SNAPSHOT_ELIGIBILITY_SCHEMA_MIGRATION_ID, createCanonicalStateServices, migrateWebSandboxDatabase } from "../src";
 
 describe("canonical backend state acceptance", () => {
   test("empty DB migrates to latest schema and exposes core tables", () => {
@@ -16,7 +16,7 @@ describe("canonical backend state acceptance", () => {
         .all()
         .map((row) => row.name);
 
-      expect(result.applied.at(-1)?.id).toBe(PACKAGE_REGISTRY_AUDIT_SCHEMA_MIGRATION_ID);
+      expect(result.applied.at(-1)?.id).toBe(SNAPSHOT_ELIGIBILITY_SCHEMA_MIGRATION_ID);
       expect(tables).toEqual([
         "artifacts",
         "chat_messages",

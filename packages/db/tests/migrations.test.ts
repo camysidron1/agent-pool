@@ -17,6 +17,7 @@ import {
   RUNTIME_SANDBOX_LIFECYCLE_SCHEMA_MIGRATION_ID,
   SESSION_HEARTBEAT_SCHEMA_MIGRATION_ID,
   SESSION_SCHEMA_MIGRATION_ID,
+  SNAPSHOT_ELIGIBILITY_SCHEMA_MIGRATION_ID,
   STORAGE_LOG_SCHEMA_MIGRATION_ID,
   TASK_PRIORITY_SCHEMA_MIGRATION_ID,
   TASK_RUNTIME_SOURCE_SCHEMA_MIGRATION_ID,
@@ -93,6 +94,10 @@ describe("web/sandbox database migration harness", () => {
           id: PACKAGE_REGISTRY_AUDIT_SCHEMA_MIGRATION_ID,
           description: "Add package registry authorization audit schema",
         },
+        {
+          id: SNAPSHOT_ELIGIBILITY_SCHEMA_MIGRATION_ID,
+          description: "Add snapshot eligibility risk state fields",
+        },
       ]);
 
       const database = new Database(dbPath, { readonly: true, strict: true });
@@ -130,6 +135,7 @@ describe("web/sandbox database migration harness", () => {
         TASK_PRIORITY_SCHEMA_MIGRATION_ID,
         RUNTIME_SANDBOX_LIFECYCLE_SCHEMA_MIGRATION_ID,
         PACKAGE_REGISTRY_AUDIT_SCHEMA_MIGRATION_ID,
+        SNAPSHOT_ELIGIBILITY_SCHEMA_MIGRATION_ID,
       ]);
       expect(second.applied).toEqual([]);
     } finally {

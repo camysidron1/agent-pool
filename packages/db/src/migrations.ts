@@ -50,6 +50,7 @@ export const TASK_RUNTIME_SOURCE_SCHEMA_MIGRATION_ID = "0010_task_runtime_source
 export const TASK_PRIORITY_SCHEMA_MIGRATION_ID = "0011_task_priority_schema" as const;
 export const RUNTIME_SANDBOX_LIFECYCLE_SCHEMA_MIGRATION_ID = "0012_runtime_sandbox_lifecycle_schema" as const;
 export const PACKAGE_REGISTRY_AUDIT_SCHEMA_MIGRATION_ID = "0013_package_registry_audit_schema" as const;
+export const SNAPSHOT_ELIGIBILITY_SCHEMA_MIGRATION_ID = "0014_snapshot_eligibility_schema" as const;
 
 export const WEB_SANDBOX_MIGRATIONS: readonly SqlMigration[] = [
   {
@@ -428,6 +429,14 @@ export const WEB_SANDBOX_MIGRATIONS: readonly SqlMigration[] = [
       "CREATE INDEX IF NOT EXISTS package_registry_audits_session_idx ON package_registry_audits (project_id, session_id, created_at)",
       "CREATE INDEX IF NOT EXISTS package_registry_audits_package_idx ON package_registry_audits (project_id, registry_host, package_name)",
       "CREATE INDEX IF NOT EXISTS package_registry_audits_decision_idx ON package_registry_audits (project_id, decision, created_at)",
+    ],
+  },
+  {
+    id: SNAPSHOT_ELIGIBILITY_SCHEMA_MIGRATION_ID,
+    description: "Add snapshot eligibility risk state fields",
+    sql: [
+      "ALTER TABLE runtime_sandboxes ADD COLUMN snapshot_eligibility_status TEXT NOT NULL DEFAULT 'unknown' CHECK (snapshot_eligibility_status IN ('unknown', 'clean', 'ineligible', 'risk'))",
+      "ALTER TABLE runtime_sandboxes ADD COLUMN snapshot_risk_reasons_json TEXT NOT NULL DEFAULT '[]'",
     ],
   },
 ] as const;

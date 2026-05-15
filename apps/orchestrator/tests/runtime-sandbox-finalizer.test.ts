@@ -73,6 +73,36 @@ describe("runtime sandbox finalizer", () => {
     expect(calls).toEqual(["claimFinalization", "stop:sandbox_failed", "reportCleanupSucceeded:runtime_sandbox_failed"]);
   });
 
+  test("skips snapshots for risk-classified successful sessions", async () => {
+    const calls: string[] = [];
+    const backend = createBackend(calls, {
+      finalization: {
+        id: "runtime_sandbox_risk",
+        projectId: "project_a",
+        taskId: "task_risk",
+        sessionId: "session_risk",
+        sessionStatus: "succeeded",
+        provider: "e2b",
+        providerSandboxId: "sandbox_risk",
+        sourceSnapshotId: null,
+        snapshotRequired: false,
+        snapshotEligibilityStatus: "risk",
+        snapshotRiskReasons: ["egress-denied"],
+      },
+    });
+    const provider = createProvider(calls);
+
+    const result = await runRuntimeSandboxFinalizerOnce({ backend, runtimeProvider: provider });
+
+    expect(result).toMatchObject({
+      ok: true,
+      finalizationClaimed: true,
+      snapshotCreated: false,
+      cleanupSucceeded: true,
+    });
+    expect(calls).toEqual(["claimFinalization", "stop:sandbox_risk", "reportCleanupSucceeded:runtime_sandbox_risk"]);
+  });
+
   test("records snapshot failures and does not leave the provider sandbox running forever", async () => {
     const calls: string[] = [];
     const backend = createBackend(calls, {
@@ -219,6 +249,8 @@ function createBackend(
       readonly providerSandboxId: string;
       readonly sourceSnapshotId: string | null;
       readonly snapshotRequired: boolean;
+      readonly snapshotEligibilityStatus?: "unknown" | "clean" | "ineligible" | "risk";
+      readonly snapshotRiskReasons?: readonly string[];
     };
     readonly expiredSnapshot?: {
       readonly id: string;
