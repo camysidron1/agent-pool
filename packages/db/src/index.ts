@@ -184,6 +184,8 @@ export {
   type ListPublicEventsInput,
   type ReadTaskDetailInput,
   type ReadTaskDetailResult,
+  type RecordPrewarmedSnapshotInput,
+  type RecordPrewarmedSnapshotResult,
   type RequestCommandInput,
   type RecordFinalAssistantResponseInput,
   type RecordPackageRegistryAuditInput,

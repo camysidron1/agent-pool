@@ -353,6 +353,91 @@ describe("runtime sandbox lifecycle services", () => {
     }
   });
 
+  test("matches clean compatible prewarmed snapshots and rejects stale lockfiles", () => {
+    const database = createMigratedMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      services.createTask({ id: "task_source", projectId: "project_a", title: "Prewarm source" });
+      expect(services.claimNextTask({ projectId: "project_a", sessionId: "session_source", runtimeProvider: "e2b" })).toMatchObject({ ok: true });
+      expect(services.reportStartupSucceeded({ projectId: "project_a", sessionId: "session_source", runtimeSessionId: "sandbox_source" })).toMatchObject({
+        ok: true,
+      });
+
+      const prewarmed = services.recordPrewarmedSnapshot({
+        projectId: "project_a",
+        sessionId: "session_source",
+        provider: "e2b",
+        providerSnapshotId: "provider_prewarmed_1",
+        repositoryUrl: "https://github.com/example/tiny-fixture.git",
+        baseRef: "main",
+        lockfileDigest: "sha256:lock-a",
+        packageAuditDigest: "sha256:pkg-a",
+        expiresAt: "2030-05-12T12:00:00.000Z",
+      });
+      expect(prewarmed).toMatchObject({
+        ok: true,
+        snapshot: { providerSnapshotId: "provider_prewarmed_1", status: "ready" },
+        event: { type: "session.snapshot.prewarmed_recorded" },
+      });
+      if (!prewarmed.ok) throw new Error("expected prewarmed snapshot");
+      expect(readSnapshotMetadata(database, prewarmed.snapshot.id)).toMatchObject({
+        snapshotPurpose: "prewarmed_base",
+        lockfileDigest: "sha256:lock-a",
+        packageAuditDigest: "sha256:pkg-a",
+        credentialInjected: false,
+      });
+
+      services.createTask({
+        id: "task_reuse",
+        projectId: "project_a",
+        title: "Reuse prewarm",
+        runtimeSource: prewarmRuntimeSource("sha256:lock-a"),
+        priority: 10,
+      });
+      services.createTask({
+        id: "task_stale",
+        projectId: "project_a",
+        title: "Stale prewarm",
+        runtimeSource: prewarmRuntimeSource("sha256:lock-b"),
+        priority: 1,
+      });
+
+      const reuse = services.claimNextTask({ projectId: "project_a", sessionId: "session_reuse", runtimeProvider: "e2b" });
+      expect(reuse).toMatchObject({
+        ok: true,
+        task: {
+          runtimeSource: {
+            lockfileDigest: "sha256:lock-a",
+            packageAuditDigest: "sha256:pkg-a",
+            preferPrewarmedSnapshot: true,
+          },
+        },
+        session: {
+          sourceSnapshot: {
+            id: prewarmed.snapshot.id,
+            provider: "e2b",
+            providerSnapshotId: "provider_prewarmed_1",
+          },
+        },
+      });
+      expect(
+        database.query<{ usage_count: number; last_used_at: string | null }, [string]>(
+          "SELECT usage_count, last_used_at FROM session_snapshots WHERE id = ?",
+        ).get(prewarmed.snapshot.id),
+      ).toMatchObject({ usage_count: 1 });
+      const stale = services.claimNextTask({ projectId: "project_a", sessionId: "session_stale", runtimeProvider: "e2b" });
+      expect(stale).toMatchObject({
+        ok: true,
+        task: { id: "task_stale" },
+        session: { sourceSnapshot: null },
+      });
+    } finally {
+      database.close();
+    }
+  });
+
   test("claims expired snapshots for deletion and handles retryable provider delete failures", () => {
     const database = createMigratedMemoryDatabase();
 
@@ -453,6 +538,19 @@ function createReadySnapshot(
   });
   expect(database.query<{ id: string }, []>("SELECT id FROM session_snapshots").get()).toEqual({ id: snapshot.snapshot.id });
   return snapshot.snapshot.id;
+}
+
+function prewarmRuntimeSource(lockfileDigest: string) {
+  return {
+    repositoryUrl: "https://github.com/example/tiny-fixture.git",
+    baseRef: "main",
+    taskBranchPrefix: "agent-pool/task",
+    allowedEgressDomains: ["github.com", "api.github.com", "registry.npmjs.org", "api.openai.com"],
+    commandProfile: "agent-pool-bun-pr",
+    lockfileDigest,
+    packageAuditDigest: "sha256:pkg-a",
+    preferPrewarmedSnapshot: true,
+  };
 }
 
 function createSucceededRuntimeSandbox(

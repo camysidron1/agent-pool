@@ -28,6 +28,9 @@ export type TaskRuntimeSourceMetadata = {
   readonly allowedEgressDomains?: readonly string[];
   readonly allowedPackageScopes?: readonly string[];
   readonly commandProfile?: string | null;
+  readonly lockfileDigest?: string | null;
+  readonly packageAuditDigest?: string | null;
+  readonly preferPrewarmedSnapshot?: boolean | null;
 };
 
 export type PackageRegistryAuditDecision = "allowed" | "denied" | "failed";
@@ -794,6 +797,30 @@ export type SessionSnapshotRecord = {
   readonly expiresAt: string | null;
 };
 
+export type RecordPrewarmedSnapshotInput = {
+  readonly projectId: string;
+  readonly sessionId: string;
+  readonly provider: string;
+  readonly providerSnapshotId: string;
+  readonly repositoryUrl: string;
+  readonly baseRef: string;
+  readonly lockfileDigest: string;
+  readonly packageAuditDigest: string;
+  readonly expiresAt?: string | null;
+  readonly providerSandboxId?: string | null;
+  readonly buildStatus?: "ready" | "failed" | null;
+  readonly errorMessage?: string | null;
+};
+
+export type RecordPrewarmedSnapshotResult =
+  | {
+      readonly ok: true;
+      readonly snapshot: SessionSnapshotRecord;
+      readonly event: EventRecord;
+      readonly outbox: OutboxRecord;
+    }
+  | { readonly ok: false; readonly error: { readonly code: "not_found" | "invalid_state"; readonly message: string } };
+
 export type ReportRuntimeSandboxCleanupInput = {
   readonly projectId: string;
   readonly runtimeSandboxId: string;
@@ -1142,6 +1169,10 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
       });
     },
 
+    recordPrewarmedSnapshot(input: RecordPrewarmedSnapshotInput): RecordPrewarmedSnapshotResult {
+      return recordPrewarmedSnapshot(database, input);
+    },
+
     claimNextTask(input: ClaimNextTaskInput = {}): ClaimNextTaskResult {
       return transaction(database, () => {
         const task = selectNextEligibleTask(database, input.projectId);
@@ -1149,13 +1180,18 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
 
         const sessionId = input.sessionId ?? createId("session");
         const attemptNumber = nextSessionAttemptNumber(database, task.project_id, task.id);
+        const runtimeSource = readRuntimeSourceJson(task.runtime_source_json);
         const sourceSnapshot = input.sourceSnapshotId
           ? claimReadySourceSnapshot(database, {
               projectId: task.project_id,
               snapshotId: input.sourceSnapshotId,
               runtimeProvider: input.runtimeProvider,
             })
-          : null;
+          : claimCompatiblePrewarmedSnapshot(database, {
+              projectId: task.project_id,
+              runtimeProvider: input.runtimeProvider,
+              runtimeSource,
+            });
         const runtimeProvider = input.runtimeProvider ?? sourceSnapshot?.provider ?? null;
         const bridge = bridgeCallbackConfig({
           projectId: task.project_id,
@@ -1207,7 +1243,7 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
             displayId: task.display_id,
             title: task.title,
             priority: task.priority,
-            runtimeSource: readRuntimeSourceJson(task.runtime_source_json),
+            runtimeSource,
             status: "running",
           },
           session: {
@@ -3831,6 +3867,139 @@ function claimReadySourceSnapshot(
   };
 }
 
+function claimCompatiblePrewarmedSnapshot(
+  database: WebSandboxSqliteDatabase,
+  input: {
+    readonly projectId: string;
+    readonly runtimeProvider?: string | null;
+    readonly runtimeSource: TaskRuntimeSourceMetadata | null;
+  },
+): ClaimedSourceSnapshotRecord | null {
+  const runtimeSource = input.runtimeSource;
+  const provider = input.runtimeProvider?.trim() || null;
+  if (!runtimeSource?.preferPrewarmedSnapshot || !provider || !runtimeSource.lockfileDigest || !runtimeSource.packageAuditDigest) {
+    return null;
+  }
+  const rows = database
+    .query<
+      { id: string; metadata_json: string },
+      [string, string]
+    >(
+      `
+        SELECT id, metadata_json
+        FROM session_snapshots
+        WHERE project_id = ?
+          AND provider = ?
+          AND status = 'ready'
+          AND provider_snapshot_id IS NOT NULL
+          AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        ORDER BY created_at DESC, rowid DESC
+      `,
+    )
+    .all(input.projectId, provider);
+
+  const match = rows.find((row) => {
+    const metadata = parseJsonObject(row.metadata_json);
+    return (
+      metadata.snapshotPurpose === "prewarmed_base" &&
+      metadata.repositoryUrl === runtimeSource.repositoryUrl &&
+      metadata.baseRef === runtimeSource.baseRef &&
+      metadata.lockfileDigest === runtimeSource.lockfileDigest &&
+      metadata.packageAuditDigest === runtimeSource.packageAuditDigest &&
+      metadata.buildStatus === "ready"
+    );
+  });
+  if (!match) return null;
+  return claimReadySourceSnapshot(database, {
+    projectId: input.projectId,
+    snapshotId: match.id,
+    runtimeProvider: provider,
+  });
+}
+
+function recordPrewarmedSnapshot(
+  database: WebSandboxSqliteDatabase,
+  input: RecordPrewarmedSnapshotInput,
+): RecordPrewarmedSnapshotResult {
+  const provider = input.provider.trim();
+  const providerSnapshotId = input.providerSnapshotId.trim();
+  const repositoryUrl = input.repositoryUrl.trim();
+  const baseRef = input.baseRef.trim();
+  const lockfileDigest = sanitizeDigest(input.lockfileDigest, "lockfileDigest");
+  const packageAuditDigest = sanitizeDigest(input.packageAuditDigest, "packageAuditDigest");
+  const buildStatus = input.buildStatus ?? "ready";
+  if (!provider || !providerSnapshotId) {
+    return { ok: false, error: { code: "invalid_state", message: "prewarmed snapshot requires provider and provider snapshot id" } };
+  }
+  if (buildStatus !== "ready" && buildStatus !== "failed") {
+    return { ok: false, error: { code: "invalid_state", message: "prewarmed snapshot buildStatus is invalid" } };
+  }
+  if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(repositoryUrl)) {
+    return { ok: false, error: { code: "invalid_state", message: "prewarmed snapshot repositoryUrl is invalid" } };
+  }
+  if (!/^[A-Za-z0-9._/-]+$/.test(baseRef) || baseRef.includes("..")) {
+    return { ok: false, error: { code: "invalid_state", message: "prewarmed snapshot baseRef is invalid" } };
+  }
+
+  return transaction(database, () => {
+    const session = database
+      .query<{ task_id: string }, [string, string]>("SELECT task_id FROM sessions WHERE project_id = ? AND id = ?")
+      .get(input.projectId, input.sessionId);
+    if (!session) return { ok: false, error: { code: "not_found", message: `session not found: ${input.sessionId}` } } as const;
+
+    const snapshotId = createId("snapshot");
+    const metadata = {
+      snapshotPurpose: "prewarmed_base",
+      repositoryUrl,
+      baseRef,
+      lockfileDigest,
+      packageAuditDigest,
+      provider,
+      buildStatus,
+      credentialInjected: false,
+    };
+    database
+      .query(
+        `
+          INSERT INTO session_snapshots (
+            id, project_id, session_id, kind, provider, status, provider_snapshot_id,
+            source_session_id, provider_sandbox_id, expires_at, error_message, metadata_json
+          ) VALUES (?, ?, ?, 'system', ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+      )
+      .run(
+        snapshotId,
+        input.projectId,
+        input.sessionId,
+        provider,
+        buildStatus === "ready" ? "ready" : "failed",
+        providerSnapshotId,
+        input.sessionId,
+        input.providerSandboxId ?? null,
+        input.expiresAt ?? null,
+        input.errorMessage ?? null,
+        JSON.stringify(metadata),
+      );
+
+    const snapshot = readSessionSnapshot(database, input.projectId, snapshotId);
+    if (!snapshot) throw new Error(`created prewarmed snapshot disappeared: ${snapshotId}`);
+    const event = appendEvent(database, {
+      projectId: input.projectId,
+      taskId: session.task_id,
+      sessionId: input.sessionId,
+      type: "session.snapshot.prewarmed_recorded",
+      payload: { snapshotId, repositoryUrl, baseRef, lockfileDigest, packageAuditDigest, provider, buildStatus },
+    });
+    const outbox = enqueueOutbox(database, {
+      projectId: input.projectId,
+      eventId: event.id,
+      routingKey: projectRoutingKey(input.projectId, "events"),
+      payload: { eventId: event.id, sessionId: input.sessionId, type: event.type },
+    });
+    return { ok: true, snapshot, event, outbox } as const;
+  });
+}
+
 type RuntimeSandboxFinalizationRow = {
   readonly id: string;
   readonly project_id: string;
@@ -4531,6 +4700,8 @@ function sanitizeTaskRuntimeSource(input: TaskRuntimeSourceMetadata | null | und
   const commandProfile = input.commandProfile?.trim() || null;
   const allowedEgressDomains = sanitizeEgressDomains(input.allowedEgressDomains);
   const allowedPackageScopes = sanitizePackageScopes(input.allowedPackageScopes);
+  const lockfileDigest = input.lockfileDigest ? sanitizeDigest(input.lockfileDigest, "lockfileDigest") : null;
+  const packageAuditDigest = input.packageAuditDigest ? sanitizeDigest(input.packageAuditDigest, "packageAuditDigest") : null;
 
   if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(repositoryUrl)) {
     throw new Error("task runtime source repositoryUrl must be an https GitHub repository URL");
@@ -4552,6 +4723,9 @@ function sanitizeTaskRuntimeSource(input: TaskRuntimeSourceMetadata | null | und
     ...(allowedEgressDomains.length > 0 ? { allowedEgressDomains } : {}),
     ...(allowedPackageScopes.length > 0 ? { allowedPackageScopes } : {}),
     ...(commandProfile ? { commandProfile } : {}),
+    ...(lockfileDigest ? { lockfileDigest } : {}),
+    ...(packageAuditDigest ? { packageAuditDigest } : {}),
+    ...(input.preferPrewarmedSnapshot === true ? { preferPrewarmedSnapshot: true } : {}),
   };
   const serialized = JSON.stringify(source);
   if (/token|secret|password|github_pat_|ghp_/i.test(serialized)) {
@@ -4559,6 +4733,14 @@ function sanitizeTaskRuntimeSource(input: TaskRuntimeSourceMetadata | null | und
   }
 
   return source;
+}
+
+function sanitizeDigest(value: string, name: string): string {
+  const digest = value.trim().toLowerCase();
+  if (!digest || digest.length > 160 || !/^[a-z0-9._:-]+$/.test(digest) || /token|secret|password|github_pat_|ghp_/i.test(digest)) {
+    throw new Error(`task runtime source ${name} is invalid`);
+  }
+  return digest;
 }
 
 function sanitizePackageScopes(input: readonly string[] | undefined): readonly string[] {

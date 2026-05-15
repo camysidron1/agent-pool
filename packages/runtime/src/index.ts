@@ -242,6 +242,9 @@ export type RuntimeTaskSourceMetadata = {
   readonly taskBranchPrefix: string;
   readonly allowedEgressDomains?: readonly string[];
   readonly commandProfile?: string | null;
+  readonly lockfileDigest?: string | null;
+  readonly packageAuditDigest?: string | null;
+  readonly preferPrewarmedSnapshot?: boolean | null;
 };
 
 export type GitHubBootstrapCommand = {
@@ -259,6 +262,19 @@ export type GitHubBootstrapPlan = {
     readonly variables: Readonly<Record<string, string>>;
     readonly secretEnvNames: readonly string[];
   };
+};
+
+export type PrewarmedSnapshotBuildPlan = {
+  readonly provider: RuntimeProviderKind;
+  readonly repositoryUrl: string;
+  readonly baseRef: string;
+  readonly workingDirectory: string;
+  readonly commands: readonly GitHubBootstrapCommand[];
+  readonly environment: {
+    readonly variables: Readonly<Record<string, string>>;
+    readonly secretEnvNames: readonly string[];
+  };
+  readonly metadata: Readonly<Record<string, string | boolean>>;
 };
 
 export type SandboxBridgeStartupPlan = SandboxBridgeStartupCommand & {
@@ -842,6 +858,79 @@ export function buildGitHubBootstrapPlan(input: {
   };
 }
 
+export function buildPrewarmedSnapshotBuildPlan(input: {
+  readonly provider: RuntimeProviderKind;
+  readonly runtimeSource?: RuntimeTaskSourceMetadata | null;
+  readonly workingDirectory: string;
+  readonly lockfileDigest: string;
+  readonly packageAuditDigest: string;
+}): PrewarmedSnapshotBuildPlan {
+  const runtimeSource = sanitizeRuntimeTaskSource(input.runtimeSource);
+  if (!runtimeSource) {
+    throw new Error("prewarmed snapshot build requires runtime source metadata");
+  }
+  const workingDirectory = normalizeSandboxWorkingDirectory(input.workingDirectory);
+  const lockfileDigest = sanitizeDigest(input.lockfileDigest, "lockfileDigest");
+  const packageAuditDigest = sanitizeDigest(input.packageAuditDigest, "packageAuditDigest");
+  const serialized = JSON.stringify({ runtimeSource, workingDirectory, lockfileDigest, packageAuditDigest });
+  if (/token|secret|password|github_pat_|ghp_/i.test(serialized)) {
+    throw new Error("prewarmed snapshot build plan must not contain secret values");
+  }
+
+  return {
+    provider: input.provider,
+    repositoryUrl: runtimeSource.repositoryUrl,
+    baseRef: runtimeSource.baseRef,
+    workingDirectory,
+    commands: [
+      {
+        label: "prepare repository",
+        command: [
+          "sh",
+          "-lc",
+          [
+            `if [ -e ${quoteShellArg(workingDirectory)} ] && [ ! -d ${quoteShellArg(`${workingDirectory}/.git`)} ]; then`,
+            `  echo ${quoteShellArg("working directory exists but is not a git repository")}; exit 1;`,
+            "fi;",
+            `if [ ! -d ${quoteShellArg(`${workingDirectory}/.git`)} ]; then`,
+            `  git clone --no-checkout ${quoteShellArg(runtimeSource.repositoryUrl)} ${quoteShellArg(workingDirectory)};`,
+            "fi",
+          ].join(" "),
+        ],
+      },
+      {
+        label: "fetch base ref",
+        command: ["git", "-C", workingDirectory, "fetch", "--depth", "1", "origin", runtimeSource.baseRef],
+      },
+      {
+        label: "checkout base ref",
+        command: ["git", "-C", workingDirectory, "checkout", "--detach", "FETCH_HEAD"],
+      },
+      {
+        label: "frozen dependency install",
+        command: ["bun", "install", "--frozen-lockfile"],
+      },
+    ],
+    environment: {
+      variables: {
+        GIT_TERMINAL_PROMPT: "0",
+        AGENT_POOL_PREWARM_PHASE: "dependency-install",
+      },
+      secretEnvNames: [],
+    },
+    metadata: {
+      snapshotPurpose: "prewarmed_base",
+      repositoryUrl: runtimeSource.repositoryUrl,
+      baseRef: runtimeSource.baseRef,
+      lockfileDigest,
+      packageAuditDigest,
+      provider: input.provider,
+      buildStatus: "planned",
+      credentialInjected: false,
+    },
+  };
+}
+
 export function buildSandboxBridgeStartupPlan(spec: E2BLaunchSpec): SandboxBridgeStartupPlan {
   const startup = buildSandboxBridgeStartupCommand({
     session: spec.bridge,
@@ -1284,6 +1373,8 @@ function readRuntimeTaskSource(task: Readonly<Record<string, unknown>> | undefin
   const taskBranchPrefix = readStringField(source, "taskBranchPrefix");
   const commandProfile = readStringField(source, "commandProfile");
   const allowedEgressDomains = readStringArrayField(source, "allowedEgressDomains");
+  const lockfileDigest = readStringField(source, "lockfileDigest");
+  const packageAuditDigest = readStringField(source, "packageAuditDigest");
 
   if (!repositoryUrl || !baseRef || !taskBranchPrefix) {
     throw new Error("github bootstrap runtime source metadata is incomplete");
@@ -1295,7 +1386,18 @@ function readRuntimeTaskSource(task: Readonly<Record<string, unknown>> | undefin
     taskBranchPrefix,
     ...(allowedEgressDomains.length > 0 ? { allowedEgressDomains } : {}),
     ...(commandProfile ? { commandProfile } : {}),
+    ...(lockfileDigest ? { lockfileDigest: sanitizeDigest(lockfileDigest, "lockfileDigest") } : {}),
+    ...(packageAuditDigest ? { packageAuditDigest: sanitizeDigest(packageAuditDigest, "packageAuditDigest") } : {}),
+    ...(source.preferPrewarmedSnapshot === true ? { preferPrewarmedSnapshot: true } : {}),
   };
+}
+
+function sanitizeDigest(value: string, name: string): string {
+  const digest = value.trim().toLowerCase();
+  if (!digest || digest.length > 160 || !/^[a-z0-9._:-]+$/.test(digest) || /token|secret|password|github_pat_|ghp_/i.test(digest)) {
+    throw new Error(`github bootstrap ${name} is invalid`);
+  }
+  return digest;
 }
 
 function readStringField(source: Readonly<Record<string, unknown>> | undefined, name: string): string | null {
@@ -1441,7 +1543,9 @@ function sanitizeRuntimeTaskSource(input: RuntimeTaskSourceMetadata | null | und
   const taskBranchPrefix = input.taskBranchPrefix.trim();
   const allowedEgressDomains = [...(input.allowedEgressDomains ?? [])].map((domain) => domain.trim().toLowerCase()).filter(Boolean);
   const commandProfile = input.commandProfile?.trim() || null;
-  const serialized = JSON.stringify({ repositoryUrl, baseRef, taskBranchPrefix, allowedEgressDomains, commandProfile });
+  const lockfileDigest = input.lockfileDigest ? sanitizeDigest(input.lockfileDigest, "lockfileDigest") : null;
+  const packageAuditDigest = input.packageAuditDigest ? sanitizeDigest(input.packageAuditDigest, "packageAuditDigest") : null;
+  const serialized = JSON.stringify({ repositoryUrl, baseRef, taskBranchPrefix, allowedEgressDomains, commandProfile, lockfileDigest, packageAuditDigest });
 
   if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(repositoryUrl)) {
     throw new Error("github bootstrap repositoryUrl must be an https GitHub repository URL");
@@ -1470,6 +1574,9 @@ function sanitizeRuntimeTaskSource(input: RuntimeTaskSourceMetadata | null | und
     taskBranchPrefix,
     ...(allowedEgressDomains.length > 0 ? { allowedEgressDomains } : {}),
     ...(commandProfile ? { commandProfile } : {}),
+    ...(lockfileDigest ? { lockfileDigest } : {}),
+    ...(packageAuditDigest ? { packageAuditDigest } : {}),
+    ...(input.preferPrewarmedSnapshot === true ? { preferPrewarmedSnapshot: true } : {}),
   };
 }
 

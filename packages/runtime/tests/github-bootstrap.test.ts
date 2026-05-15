@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { buildGitHubBootstrapPlan } from "../src";
+import { buildGitHubBootstrapPlan, buildPrewarmedSnapshotBuildPlan } from "../src";
 
 describe("GitHub bootstrap plan", () => {
   test("builds clone fetch and task branch commands without token argv leakage", () => {
@@ -134,5 +134,70 @@ describe("GitHub bootstrap plan", () => {
         githubTokenConfigured: false,
       }),
     ).toThrow("GITHUB_TOKEN is required for github bootstrap");
+  });
+
+  test("builds credential-free prewarmed snapshot plans with frozen installs", () => {
+    const plan = buildPrewarmedSnapshotBuildPlan({
+      provider: "e2b",
+      runtimeSource: {
+        repositoryUrl: "https://github.com/example/tiny-fixture.git",
+        baseRef: "main",
+        taskBranchPrefix: "agent-pool/task",
+        allowedEgressDomains: ["github.com", "api.github.com", "registry.npmjs.org", "api.openai.com"],
+        commandProfile: "agent-pool-bun-pr",
+        lockfileDigest: "SHA256:LOCK-A",
+        packageAuditDigest: "sha256:pkg-a",
+        preferPrewarmedSnapshot: true,
+      },
+      workingDirectory: "/workspace/agent-pool",
+      lockfileDigest: "SHA256:LOCK-A",
+      packageAuditDigest: "sha256:pkg-a",
+    });
+
+    expect(plan).toMatchObject({
+      provider: "e2b",
+      repositoryUrl: "https://github.com/example/tiny-fixture.git",
+      baseRef: "main",
+      workingDirectory: "/workspace/agent-pool",
+      environment: {
+        variables: {
+          GIT_TERMINAL_PROMPT: "0",
+          AGENT_POOL_PREWARM_PHASE: "dependency-install",
+        },
+        secretEnvNames: [],
+      },
+      metadata: {
+        snapshotPurpose: "prewarmed_base",
+        repositoryUrl: "https://github.com/example/tiny-fixture.git",
+        baseRef: "main",
+        lockfileDigest: "sha256:lock-a",
+        packageAuditDigest: "sha256:pkg-a",
+        provider: "e2b",
+        buildStatus: "planned",
+        credentialInjected: false,
+      },
+    });
+    expect(plan.commands.map((command) => command.label)).toEqual([
+      "prepare repository",
+      "fetch base ref",
+      "checkout base ref",
+      "frozen dependency install",
+    ]);
+    expect(plan.commands.at(-1)?.command).toEqual(["bun", "install", "--frozen-lockfile"]);
+    expect(JSON.stringify(plan)).not.toMatch(/GITHUB_TOKEN|CODEX_API_KEY|ghp_|github_pat_|session-secret|proxy-token/i);
+
+    expect(() =>
+      buildPrewarmedSnapshotBuildPlan({
+        provider: "e2b",
+        runtimeSource: {
+          repositoryUrl: "https://github.com/example/tiny-fixture.git",
+          baseRef: "main",
+          taskBranchPrefix: "agent-pool/task",
+        },
+        workingDirectory: "/workspace/agent-pool",
+        lockfileDigest: "ghp_secret",
+        packageAuditDigest: "sha256:pkg-a",
+      }),
+    ).toThrow("lockfileDigest is invalid");
   });
 });
