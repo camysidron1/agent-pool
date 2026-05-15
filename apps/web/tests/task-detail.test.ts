@@ -11,6 +11,8 @@ import {
   getFinalResultDetail,
   getSessionInitializationMilestones,
   getRawLogEntries,
+  getSecurityLifecycleBadges,
+  getSecurityTimeline,
   groupArtifacts,
   shouldFollowRawLogScroll,
   summarizeLogFallback,
@@ -155,6 +157,148 @@ describe("web task detail helpers", () => {
       { id: "setup", label: "Run setup script", status: "skipped", detail: "No setup script configured." },
       { id: "agent", label: "Started Codex", status: "done", detail: "codex" },
     ]);
+  });
+
+  test("builds a redacted security timeline from sandbox lifecycle events", () => {
+    const completedSession = {
+      ...session("session-a", 1, "succeeded", { runtimeSessionId: "sandbox_1" }),
+      startedAt: "2026-05-13T00:00:00.000Z",
+    };
+    const detail = {
+      ...detailTask(),
+      runtimeSource: {
+        repositoryUrl: "https://github.com/example/tiny-fixture.git",
+        baseRef: "main",
+        taskBranchPrefix: "agent-pool/task",
+        allowedEgressDomains: ["github.com"],
+        commandProfile: "agent-pool-bun-pr",
+      },
+      latestSession: completedSession,
+      sessions: [completedSession],
+      events: [
+        outputEvent(
+          "event-install-started",
+          1,
+          `${JSON.stringify({
+            type: "security",
+            securityKind: "dependency-install-started",
+            allowed: true,
+            policy: "agent-pool-bun-pr",
+            proxyToken: "short-lived-github-token",
+          })}\n`,
+        ),
+        outputEvent(
+          "event-package",
+          2,
+          `${JSON.stringify({
+            type: "security.package",
+            securityKind: "package-registry",
+            ecosystem: "npm",
+            registryHost: "registry.npmjs.org",
+            packageName: "left-pad",
+            requestedVersion: "1.3.0",
+            resolvedVersion: "1.3.0",
+            decision: "allowed",
+            allowed: true,
+            reason: "session_allowed",
+          })}\n`,
+        ),
+        outputEvent(
+          "event-command",
+          3,
+          `${JSON.stringify({
+            type: "security",
+            securityKind: "command-policy",
+            allowed: false,
+            command: "cat short-lived-github-token",
+            reason: "credential_access_forbidden",
+          })}\n`,
+        ),
+        outputEvent(
+          "event-egress",
+          4,
+          `${JSON.stringify({
+            type: "security.egress",
+            securityKind: "egress",
+            allowed: false,
+            host: "undeclared.example",
+            reason: "not_declared",
+          })}\n`,
+        ),
+        outputEvent(
+          "event-scrub",
+          5,
+          `${JSON.stringify({
+            type: "security",
+            securityKind: "credentials-scrub-failed",
+            allowed: false,
+            reason: "scrub-incomplete",
+            remainingCount: 1,
+            token: "short-lived-github-token",
+          })}\n`,
+        ),
+        outputEvent(
+          "event-snapshot",
+          6,
+          `${JSON.stringify({
+            type: "security",
+            securityKind: "snapshot-decision",
+            allowed: false,
+            snapshotEligibilityStatus: "risk",
+            snapshotRiskReasons: ["egress-denied", "scrub-incomplete"],
+          })}\n`,
+        ),
+        {
+          id: "event-provider-cleanup",
+          projectId: "project-a",
+          taskId: "task-a",
+          sessionId: "session-a",
+          commandId: null,
+          type: "runtime_sandbox.cleanup_succeeded",
+          payload: {},
+          createdAt: "2026-05-13T00:00:07.000Z",
+        },
+      ],
+    };
+
+    const timeline = getSecurityTimeline(detail);
+
+    expect(timeline.map((item) => item.label)).toEqual([
+      "Sandbox created",
+      "Repository cloned",
+      "Command policy loaded",
+      "Install started",
+      "Package allowed",
+      "Command denied",
+      "Egress denied",
+      "Credential scrub failed",
+      "Snapshot decision",
+      "Sandbox destroyed",
+    ]);
+    expect(timeline.map((item) => item.tone)).toEqual([
+      "allowed",
+      "allowed",
+      "allowed",
+      "allowed",
+      "allowed",
+      "denied",
+      "denied",
+      "blocked",
+      "warning",
+      "allowed",
+    ]);
+    expect(timeline.find((item) => item.label === "Command denied")?.detail).toContain("[redacted]");
+    expect(JSON.stringify(timeline)).not.toContain("short-lived-github-token");
+    expect(getSecurityLifecycleBadges(detail).map((badge) => [badge.id, badge.tone])).toEqual([
+      ["egress", "danger"],
+      ["policy", "danger"],
+      ["scrub", "danger"],
+      ["snapshot", "warning"],
+    ]);
+  });
+
+  test("handles missing security events without synthetic noise", () => {
+    expect(getSecurityTimeline(detailTask())).toEqual([]);
   });
 });
 

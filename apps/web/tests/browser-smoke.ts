@@ -61,6 +61,7 @@ async function assertServedBundle(): Promise<void> {
       ["task panel", "Task detail"],
       ["full-page detail", "Full-page task detail"],
       ["raw output log", "Raw output log"],
+      ["security timeline", "Security Timeline"],
       ["artifact modal", "Document artifact preview"],
       ["operator notes", "Operator Notes"],
       ["note mutation", "/notes"],

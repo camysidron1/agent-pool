@@ -702,6 +702,109 @@ label {
   color: #a33a2b;
 }
 
+.security-timeline-section {
+  gap: 0.8rem;
+}
+
+.security-timeline {
+  display: grid;
+  gap: 0.55rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.security-timeline-item {
+  align-items: start;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: 0.85rem minmax(0, 1fr);
+  min-width: 0;
+  padding: 0.65rem;
+}
+
+.security-timeline-marker {
+  background: #64748b;
+  border-radius: 999px;
+  height: 0.62rem;
+  margin-top: 0.28rem;
+  width: 0.62rem;
+}
+
+.security-timeline-allowed {
+  border-color: #b7dfc5;
+}
+
+.security-timeline-allowed .security-timeline-marker {
+  background: #16a34a;
+}
+
+.security-timeline-denied {
+  border-color: #efb5ad;
+}
+
+.security-timeline-denied .security-timeline-marker {
+  background: #dc2626;
+}
+
+.security-timeline-warning {
+  border-color: #e3c36a;
+}
+
+.security-timeline-warning .security-timeline-marker {
+  background: #c08400;
+}
+
+.security-timeline-blocked {
+  border-color: #c4b5fd;
+}
+
+.security-timeline-blocked .security-timeline-marker {
+  background: #7c3aed;
+}
+
+.security-timeline-content {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.security-timeline-heading {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.security-timeline-heading strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.security-timeline-heading span {
+  border: 1px solid #c6cfdb;
+  border-radius: 999px;
+  color: #46556a;
+  flex: 0 0 auto;
+  font-size: 0.68rem;
+  font-weight: 800;
+  padding: 0.16rem 0.45rem;
+  text-transform: uppercase;
+}
+
+.security-timeline-content p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.security-timeline-content time {
+  color: #607084;
+  font-size: 0.76rem;
+}
+
 .detail-grid {
   display: grid;
   gap: 0.6rem;
@@ -1232,6 +1335,11 @@ label {
   .raw-log-meta,
   .attempt-grid {
     grid-template-columns: 1fr;
+  }
+
+  .security-timeline-heading {
+    align-items: start;
+    display: grid;
   }
 
   .steering-actions {

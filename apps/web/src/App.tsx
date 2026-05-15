@@ -69,10 +69,12 @@ import {
   getFinalResultDetail,
   getRawLogEntries,
   getSecurityLifecycleBadges,
+  getSecurityTimeline,
   getSessionInitializationMilestones,
   groupArtifacts,
   shouldFollowRawLogScroll,
   summarizeLogFallback,
+  type SecurityTimelineTone,
   type RawLogEntry,
 } from "./task-detail";
 
@@ -1155,6 +1157,8 @@ function TaskPanel({
 
           <SessionInitializationSection detail={detail} session={activeSession} />
 
+          <SecurityTimelineSection detail={detail} />
+
           <ArtifactSection detail={detail} onPreview={setPreviewArtifact} />
 
           <OperatorNotesSection
@@ -1388,6 +1392,48 @@ function SessionInitializationSection({
       </ul>
     </section>
   );
+}
+
+function SecurityTimelineSection({ detail }: { readonly detail: PublicTaskDetail }) {
+  const timeline = getSecurityTimeline(detail);
+
+  return (
+    <section className="panel-section security-timeline-section" aria-label="Security timeline">
+      <h3>Security Timeline</h3>
+      {timeline.length === 0 ? (
+        <p>No security events recorded.</p>
+      ) : (
+        <ol className="security-timeline">
+          {timeline.map((item) => (
+            <li key={item.id} className={`security-timeline-item security-timeline-${item.tone}`}>
+              <span className="security-timeline-marker" aria-hidden="true" />
+              <div className="security-timeline-content">
+                <div className="security-timeline-heading">
+                  <strong>{item.label}</strong>
+                  <span>{labelSecurityTimelineTone(item.tone)}</span>
+                </div>
+                {item.detail ? <p>{item.detail}</p> : null}
+                <time>{formatTimestamp(item.observedAt)}</time>
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+}
+
+function labelSecurityTimelineTone(tone: SecurityTimelineTone): string {
+  switch (tone) {
+    case "allowed":
+      return "allowed";
+    case "denied":
+      return "denied";
+    case "warning":
+      return "warning";
+    case "blocked":
+      return "blocked";
+  }
 }
 
 function AttemptTimelineSection({ detail }: { readonly detail: PublicTaskDetail }) {

@@ -45,6 +45,17 @@ export type SecurityLifecycleBadge = {
   readonly tone: "neutral" | "good" | "warning" | "danger";
 };
 
+export type SecurityTimelineTone = "allowed" | "denied" | "warning" | "blocked";
+
+export type SecurityTimelineItem = {
+  readonly id: string;
+  readonly label: string;
+  readonly detail: string | null;
+  readonly tone: SecurityTimelineTone;
+  readonly observedAt: string | null;
+  readonly securityKind: string;
+};
+
 export type FinalResultDetail = {
   readonly recorded: boolean;
   readonly sessionId: string | null;
@@ -118,8 +129,14 @@ export function getSecurityLifecycleBadges(task: PublicTaskDetail): readonly Sec
     .filter((entry): entry is JsonRecord => entry !== null);
   const hasProxy = securityEvents.some((event) => event.securityKind === "egress" && event.allowed === true);
   const hasDenied = securityEvents.some((event) => event.securityKind === "egress" && event.allowed === false);
-  const hasScrub = securityEvents.some((event) => event.securityKind === "credentials-scrubbed");
-  const hasPolicy = securityEvents.some((event) => event.securityKind === "postflight" || event.securityKind === "package-install");
+  const hasScrubFailure = securityEvents.some((event) => String(event.securityKind) === "credentials-scrub-failed" || (String(event.securityKind) === "credentials-scrubbed" && event.allowed === false));
+  const hasScrub = securityEvents.some((event) => String(event.securityKind) === "credentials-scrub-succeeded" || String(event.securityKind) === "credentials-scrubbed");
+  const hasDeniedPolicy = securityEvents.some((event) => String(event.securityKind) === "command-policy" && event.allowed === false);
+  const hasPolicy = securityEvents.some((event) =>
+    ["postflight", "package-install", "package-registry", "command-policy"].includes(String(event.securityKind)),
+  );
+  const snapshotDecision = [...securityEvents].reverse().find((event) => event.securityKind === "snapshot-decision");
+  const snapshotStatus = typeof snapshotDecision?.snapshotEligibilityStatus === "string" ? snapshotDecision.snapshotEligibilityStatus : null;
 
   return [
     {
@@ -129,15 +146,117 @@ export function getSecurityLifecycleBadges(task: PublicTaskDetail): readonly Sec
     },
     {
       id: "policy",
-      label: hasPolicy ? "Policy logged" : "Policy pending",
-      tone: hasPolicy ? "good" : "neutral",
+      label: hasDeniedPolicy ? "Command denied" : hasPolicy ? "Policy logged" : "Policy pending",
+      tone: hasDeniedPolicy ? "danger" : hasPolicy ? "good" : "neutral",
     },
     {
       id: "scrub",
-      label: hasScrub ? "Credentials scrubbed" : "Scrub pending",
-      tone: hasScrub ? "good" : "warning",
+      label: hasScrubFailure ? "Scrub failed" : hasScrub ? "Credentials scrubbed" : "Scrub pending",
+      tone: hasScrubFailure ? "danger" : hasScrub ? "good" : "warning",
+    },
+    {
+      id: "snapshot",
+      label: snapshotStatus === "clean" ? "Snapshot clean" : snapshotStatus === "risk" ? "Snapshot risk" : snapshotStatus === "ineligible" ? "Snapshot skipped" : "Snapshot pending",
+      tone: snapshotStatus === "clean" ? "good" : snapshotStatus === "risk" ? "warning" : snapshotStatus === "ineligible" ? "warning" : "neutral",
     },
   ];
+}
+
+export function getSecurityTimeline(task: PublicTaskDetail): readonly SecurityTimelineItem[] {
+  const latestSession = task.latestSession ?? [...task.sessions].sort(compareSessions).at(-1) ?? null;
+  const entries: SecurityTimelineInternalItem[] = [];
+  let order = 0;
+
+  if (latestSession && isSessionStarted(latestSession)) {
+    const startedAt = latestSession.startedAt ?? latestSession.createdAt;
+    entries.push({
+      id: `${latestSession.id}:sandbox-created`,
+      label: "Sandbox created",
+      detail: latestSession.runtimeSessionId ? `Provider sandbox ${sanitizeSecurityValue(latestSession.runtimeSessionId)}` : `Session ${sanitizeSecurityValue(latestSession.id)}`,
+      tone: "allowed",
+      observedAt: startedAt,
+      securityKind: "sandbox-created",
+      order: order++,
+    });
+
+    if (task.runtimeSource) {
+      entries.push({
+        id: `${latestSession.id}:repo-cloned`,
+        label: "Repository cloned",
+        detail: `${sanitizeSecurityValue(task.runtimeSource.repositoryUrl)} @ ${sanitizeSecurityValue(task.runtimeSource.baseRef)}`,
+        tone: "allowed",
+        observedAt: startedAt,
+        securityKind: "repository-cloned",
+        order: order++,
+      });
+    }
+
+    if (task.runtimeSource?.commandProfile) {
+      entries.push({
+        id: `${latestSession.id}:policy-loaded`,
+        label: "Command policy loaded",
+        detail: sanitizeSecurityValue(task.runtimeSource.commandProfile),
+        tone: "allowed",
+        observedAt: startedAt,
+        securityKind: "command-policy-loaded",
+        order: order++,
+      });
+    }
+  }
+
+  getRawLogEntries(task).forEach((entry, index) => {
+    const payload = parseSecurityLog(entry.text);
+    if (!payload) return;
+    entries.push({
+      id: `${entry.id}:security`,
+      label: labelSecurityTimelineEvent(payload),
+      detail: formatSecurityTimelineDetail(payload),
+      tone: toneSecurityTimelineEvent(payload),
+      observedAt: entry.observedAt ?? entry.createdAt,
+      securityKind: String(payload.securityKind ?? "security"),
+      order: 1000 + index,
+    });
+  });
+
+  for (const event of task.events) {
+    if (event.type === "session.cleanup" || event.type === "session.cleanup.idempotent") {
+      entries.push({
+        id: `${event.id}:bridge-cleanup`,
+        label: "Bridge cleanup callback",
+        detail: "Sandbox process reported cleanup complete",
+        tone: "allowed",
+        observedAt: event.createdAt,
+        securityKind: "bridge-cleanup",
+        order: 8000 + order++,
+      });
+    }
+    if (event.type === "runtime_sandbox.cleanup_succeeded") {
+      entries.push({
+        id: `${event.id}:sandbox-destroyed`,
+        label: "Sandbox destroyed",
+        detail: "Provider cleanup completed",
+        tone: "allowed",
+        observedAt: event.createdAt,
+        securityKind: "sandbox-destroyed",
+        order: 9000 + order++,
+      });
+    }
+    if (event.type === "runtime_sandbox.cleanup_failed") {
+      entries.push({
+        id: `${event.id}:sandbox-destroy-failed`,
+        label: "Sandbox destroy failed",
+        detail: formatEventFailureDetail(event.payload),
+        tone: "blocked",
+        observedAt: event.createdAt,
+        securityKind: "sandbox-destroy-failed",
+        order: 9000 + order++,
+      });
+    }
+  }
+
+  return entries
+    .sort((left, right) => compareTimelineItems(left, right))
+    .map(({ order: _order, ...item }) => item);
 }
 
 export function formatRawLogEntries(entries: readonly RawLogEntry[]): string {
@@ -242,10 +361,154 @@ function parseSecurityLog(text: string): JsonRecord | null {
     const parsed = JSON.parse(firstLine) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
     const record = parsed as JsonRecord;
-    return record.type === "security" || record.type === "security.egress" ? record : null;
+    return record.type === "security" || record.type === "security.egress" || record.type === "security.package" ? record : null;
   } catch {
     return null;
   }
+}
+
+type SecurityTimelineInternalItem = SecurityTimelineItem & {
+  readonly order: number;
+};
+
+function compareSessions(left: PublicSessionSummary, right: PublicSessionSummary): number {
+  return left.attemptNumber - right.attemptNumber || Date.parse(left.createdAt) - Date.parse(right.createdAt);
+}
+
+function isSessionStarted(session: PublicSessionSummary): boolean {
+  return Boolean(session.runtimeSessionId) || ["starting", "running", "succeeded", "failed", "canceled", "lost"].includes(session.status);
+}
+
+function compareTimelineItems(left: SecurityTimelineInternalItem, right: SecurityTimelineInternalItem): number {
+  const leftTime = left.observedAt ? Date.parse(left.observedAt) : Number.MAX_SAFE_INTEGER;
+  const rightTime = right.observedAt ? Date.parse(right.observedAt) : Number.MAX_SAFE_INTEGER;
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) return leftTime - rightTime;
+  return left.order - right.order;
+}
+
+function labelSecurityTimelineEvent(event: JsonRecord): string {
+  const kind = String(event.securityKind ?? "");
+  switch (kind) {
+    case "dependency-install-started":
+      return "Install started";
+    case "dependency-install-finished":
+      return "Install complete";
+    case "dependency-install-failed":
+      return "Install blocked";
+    case "package-install":
+      return "Package install audit";
+    case "package-registry":
+      return event.allowed === false ? "Package denied" : "Package allowed";
+    case "command-policy":
+      return event.allowed === false ? "Command denied" : "Command allowed";
+    case "egress":
+    case "egress-denied":
+      return event.allowed === false ? "Egress denied" : "Egress allowed";
+    case "credentials-scrub-started":
+      return "Credential scrub started";
+    case "credentials-scrub-succeeded":
+    case "credentials-scrubbed":
+      return event.allowed === false ? "Credential scrub failed" : "Credentials scrubbed";
+    case "credentials-scrub-failed":
+      return "Credential scrub failed";
+    case "snapshot-decision":
+      return "Snapshot decision";
+    case "postflight":
+      return "Postflight checks";
+    default:
+      return kind ? labelFromKebab(kind) : "Security event";
+  }
+}
+
+function toneSecurityTimelineEvent(event: JsonRecord): SecurityTimelineTone {
+  const kind = String(event.securityKind ?? "");
+  if (kind === "dependency-install-failed" || kind === "credentials-scrub-failed") return "blocked";
+  if (kind === "snapshot-decision") {
+    const status = String(event.snapshotEligibilityStatus ?? "");
+    if (status === "risk" || status === "ineligible") return "warning";
+    if (event.allowed === false) return "warning";
+    return "allowed";
+  }
+  if (event.allowed === false) {
+    if (kind === "credentials-scrubbed") return "blocked";
+    return "denied";
+  }
+  if (event.decision === "denied") return "denied";
+  if (event.decision === "failed") return "blocked";
+  if (event.lockfileChanged === true) return "warning";
+  return "allowed";
+}
+
+function formatSecurityTimelineDetail(event: JsonRecord): string | null {
+  const parts: string[] = [];
+  const kind = String(event.securityKind ?? "");
+
+  appendSecurityPart(parts, "policy", event.policy);
+  appendSecurityPart(parts, "host", event.host);
+  appendSecurityPart(parts, "method", event.method);
+  appendSecurityPart(parts, "command", event.command);
+  appendSecurityPart(parts, "registry", event.registryHost);
+  appendPackagePart(parts, event);
+  appendSecurityPart(parts, "reason", event.reason);
+  appendSecurityPart(parts, "status", event.snapshotEligibilityStatus);
+  appendSecurityPart(parts, "risk", event.snapshotRiskReasons);
+  appendSecurityPart(parts, "remaining", event.remainingCount);
+
+  if (event.lockfileChanged === true) parts.push("lockfile changed");
+  if (event.lockfileChanged === false && kind.startsWith("dependency-install")) parts.push("lockfile unchanged");
+
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+function appendPackagePart(parts: string[], event: JsonRecord): void {
+  const packageName = safeSecurityPart("package", event.packageName);
+  if (!packageName) return;
+
+  const requested = safeSecurityPart("requested", event.requestedVersion);
+  const resolved = safeSecurityPart("resolved", event.resolvedVersion);
+  if (requested || resolved) {
+    parts.push(`package ${packageName}${requested ? ` requested ${requested}` : ""}${resolved ? ` resolved ${resolved}` : ""}`);
+    return;
+  }
+
+  parts.push(`package ${packageName}`);
+}
+
+function appendSecurityPart(parts: string[], label: string, value: unknown): void {
+  const safe = safeSecurityPart(label, value);
+  if (!safe) return;
+  parts.push(`${label} ${safe}`);
+}
+
+function safeSecurityPart(label: string, value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (Array.isArray(value)) {
+    const values = value.map((entry) => sanitizeSecurityValue(entry, label)).filter(Boolean);
+    return values.length > 0 ? values.join(", ") : null;
+  }
+  const safe = sanitizeSecurityValue(value, label);
+  return safe || null;
+}
+
+function sanitizeSecurityValue(value: unknown, key = ""): string {
+  if (/token|secret|password|key|proxy/i.test(key)) return "[redacted]";
+  const raw = typeof value === "string" ? value : String(value);
+  return raw
+    .replace(/\/\/([^:/\s]+):([^@\s]+)@/g, "//$1:[redacted]@")
+    .replace(/\b(?:github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]+|e2b_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+)\b/g, "[redacted]")
+    .replace(/\b(?:short-lived-github-token|codex-secret|bridge-token|session-secret)\b/gi, "[redacted]");
+}
+
+function formatEventFailureDetail(payload: JsonRecord): string | null {
+  return safeSecurityPart("reason", payload.errorMessage ?? payload.reason ?? payload.error) ?? "Provider cleanup did not complete";
+}
+
+function labelFromKebab(value: string): string {
+  return value
+    .split(/[-_.]/)
+    .filter(Boolean)
+    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+    .join(" ");
 }
 
 function hasCodexStartEvent(task: PublicTaskDetail, session: PublicSessionSummary): boolean {
