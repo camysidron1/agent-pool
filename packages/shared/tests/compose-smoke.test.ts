@@ -10,7 +10,7 @@ import {
   readPrometheusVerification,
   runComposeSmokeCli,
 } from "../../../deploy/compose/smoke-compose";
-import { createE2BSmokePlan, parseE2BSmokeArgs, runE2BSmokeCli } from "../../../deploy/compose/e2b-smoke";
+import { createE2BReadinessReport, createE2BSmokePlan, parseE2BSmokeArgs, runE2BSmokeCli } from "../../../deploy/compose/e2b-smoke";
 import { loadLocalEnv, parseLocalEnvFile, type EnvSource } from "../../../deploy/local-env";
 
 describe("compose smoke runner", () => {
@@ -666,6 +666,109 @@ describe("compose smoke runner", () => {
     expect(JSON.stringify(plan)).not.toContain("proxy-secret");
   });
 
+  test("reports offline live E2B readiness without provider network or secret leakage", async () => {
+    const writes: string[] = [];
+    let fetches = 0;
+    const code = await runE2BSmokeCli(["--readiness", "--agent-runner-mode", "codex"], {
+      env: {
+        AUTH_MODE: "test",
+      },
+      write: (text) => writes.push(text),
+      fetch: async () => {
+        fetches += 1;
+        return Response.json({ ok: true });
+      },
+    });
+    const report = JSON.parse(writes.join(""));
+
+    expect(code).toBe(0);
+    expect(fetches).toBe(0);
+    expect(report).toMatchObject({
+      ok: true,
+      kind: "e2b-readiness",
+      status: "blocked",
+      agentRunnerMode: "codex",
+      sideEffects: [],
+      missingCredentials: ["E2B_API_KEY", "CODEX_API_KEY", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_INSTALLATION_ID"],
+      missingSettings: [
+        "E2B_TEMPLATE_ID or E2B_SANDBOX_IMAGE_ID",
+        "EGRESS_PROXY_URL and EGRESS_PROXY_ALLOW_OUT or E2B_LOCAL_ALLOW_DIRECT_EGRESS=true",
+      ],
+    });
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({
+        id: "callback-url",
+        status: "block",
+        nextAction: "Expose the local Caddy/API edge through a tunnel or use the deployed HTTPS API URL.",
+      }),
+    );
+    expect(report.nextAction).toBe("Resolve blocked readiness checks, then rerun the readiness report.");
+    expect(JSON.stringify(report)).not.toContain("dry-run-github-token");
+    expect(JSON.stringify(report)).not.toContain("dry-run-codex-api-key");
+  });
+
+  test("reports ready offline E2B readiness for complete proxy-only Codex config", () => {
+    const report = createE2BReadinessReport({
+      agentRunnerMode: "codex",
+      env: {
+        AUTH_MODE: "test",
+        BRIDGE_CALLBACK_BASE_URL: "https://callback.agentpool.app",
+        E2B_API_KEY: "e2b-secret",
+        E2B_TEMPLATE_ID: "template-1",
+        E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN,CODEX_API_KEY",
+        CODEX_API_KEY: "codex-secret",
+        GITHUB_APP_ID: "12345",
+        GITHUB_APP_PRIVATE_KEY: "github-app-private-key",
+        GITHUB_APP_INSTALLATION_ID: "67890",
+        EGRESS_PROXY_URL: "http://proxy-user:proxy-secret@egress-gateway.internal:8080",
+        EGRESS_PROXY_ALLOW_OUT: "10.0.10.25/32",
+        AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+      },
+    });
+
+    expect(report.status).toBe("ready");
+    expect(report.nextAction).toBe("Run opt-in live E2B smoke when you are ready.");
+    expect(report.checks.every((check) => check.status === "pass")).toBe(true);
+    expect(report.securityReadiness.network).toMatchObject({
+      egressMode: "proxy",
+      proxyOnly: true,
+      allowInternetAccess: false,
+      allowPublicTraffic: false,
+      allowOut: ["10.0.10.25/32"],
+    });
+    expect(JSON.stringify(report)).not.toContain("e2b-secret");
+    expect(JSON.stringify(report)).not.toContain("codex-secret");
+    expect(JSON.stringify(report)).not.toContain("github-app-private-key");
+    expect(JSON.stringify(report)).not.toContain("proxy-secret");
+  });
+
+  test("warns when offline readiness uses the local direct-egress override", () => {
+    const report = createE2BReadinessReport({
+      agentRunnerMode: "codex",
+      env: {
+        AUTH_MODE: "test",
+        BRIDGE_CALLBACK_BASE_URL: "https://callback.agentpool.app",
+        E2B_API_KEY: "e2b-secret",
+        E2B_TEMPLATE_ID: "template-1",
+        E2B_LOCAL_ALLOW_DIRECT_EGRESS: "true",
+        CODEX_API_KEY: "codex-secret",
+        GITHUB_APP_ID: "12345",
+        GITHUB_APP_PRIVATE_KEY: "github-app-private-key",
+        GITHUB_APP_INSTALLATION_ID: "67890",
+      },
+    });
+
+    expect(report.status).toBe("warning");
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({
+        id: "egress-policy",
+        status: "warn",
+        detail: "Direct egress is enabled for local/test use.",
+      }),
+    );
+    expect(report.nextAction).toBe("Resolve readiness warnings before production use; dry-run smoke is still safe.");
+  });
+
   test("reports missing E2B smoke credentials before touching the API", async () => {
     const writes: string[] = [];
     let fetches = 0;
@@ -819,6 +922,7 @@ describe("compose smoke runner", () => {
       ]),
     ).toEqual({
       dryRun: true,
+      readiness: false,
       apiUrl: "http://api.local",
       serviceToken: "token",
       timeoutMs: 5000,

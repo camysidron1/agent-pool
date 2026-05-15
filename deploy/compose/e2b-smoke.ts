@@ -91,8 +91,33 @@ export type E2BSmokeCliOptions = {
   readonly now?: () => number;
 };
 
+export type E2BReadinessStatus = "ready" | "blocked" | "warning";
+
+export type E2BReadinessCheck = {
+  readonly id: string;
+  readonly label: string;
+  readonly status: "pass" | "block" | "warn";
+  readonly detail: string;
+  readonly nextAction: string | null;
+};
+
+export type E2BReadinessReport = {
+  readonly ok: true;
+  readonly kind: "e2b-readiness";
+  readonly status: E2BReadinessStatus;
+  readonly agentRunnerMode: "bridge-smoke" | "codex";
+  readonly sideEffects: readonly [];
+  readonly nextAction: string;
+  readonly missingCredentials: readonly string[];
+  readonly missingSettings: readonly string[];
+  readonly runtimeSource: RuntimeTaskSourceMetadata;
+  readonly securityReadiness: E2BSmokeSecurityReadiness;
+  readonly checks: readonly E2BReadinessCheck[];
+};
+
 type ParsedE2BSmokeArgs = {
   readonly dryRun: boolean;
+  readonly readiness: boolean;
   readonly apiUrl: string;
   readonly serviceToken?: string;
   readonly timeoutMs: number;
@@ -269,6 +294,172 @@ export function createE2BSmokePlan(input: Partial<ParsedE2BSmokeArgs> & { readon
   };
 }
 
+export function createE2BReadinessReport(input: Partial<ParsedE2BSmokeArgs> & { readonly env?: EnvSource } = {}): E2BReadinessReport {
+  const agentRunnerMode = readAgentRunnerMode(input.agentRunnerMode ?? input.env?.AGENT_RUNNER_MODE);
+  const plan = createE2BSmokePlan({ ...input, agentRunnerMode });
+  const checks = buildReadinessChecks(plan, agentRunnerMode);
+  const hasBlocks = checks.some((check) => check.status === "block");
+  const hasWarnings = checks.some((check) => check.status === "warn");
+  const status: E2BReadinessStatus = hasBlocks ? "blocked" : hasWarnings ? "warning" : "ready";
+
+  return {
+    ok: true,
+    kind: "e2b-readiness",
+    status,
+    agentRunnerMode,
+    sideEffects: [],
+    nextAction: nextReadinessAction(status),
+    missingCredentials: plan.missingCredentials,
+    missingSettings: plan.missingSettings,
+    runtimeSource: plan.runtimeSource,
+    securityReadiness: plan.securityReadiness,
+    checks,
+  };
+}
+
+function buildReadinessChecks(plan: E2BSmokePlan, agentRunnerMode: "bridge-smoke" | "codex"): readonly E2BReadinessCheck[] {
+  const missingCredentialSet = new Set(plan.missingCredentials);
+  const missingSettingSet = new Set(plan.missingSettings);
+  const callbackUrl = plan.launchSpec.bridge.callbackBaseUrl;
+  const localCallback = isLocalCallbackUrl(callbackUrl);
+  const proxyOnly = plan.securityReadiness.network.proxyOnly;
+  const testDirect = plan.securityReadiness.network.egressMode === "test-direct";
+
+  const checks: E2BReadinessCheck[] = [
+    {
+      id: "e2b-provider-credentials",
+      label: "E2B provider credentials",
+      status: missingCredentialSet.has("E2B_API_KEY") ? "block" : "pass",
+      detail: missingCredentialSet.has("E2B_API_KEY") ? "E2B_API_KEY is missing." : "E2B_API_KEY is configured and redacted.",
+      nextAction: missingCredentialSet.has("E2B_API_KEY") ? "Set E2B_API_KEY in .env or the execution environment." : null,
+    },
+    {
+      id: "e2b-template",
+      label: "E2B template or image",
+      status: missingSettingSet.has("E2B_TEMPLATE_ID or E2B_SANDBOX_IMAGE_ID") ? "block" : "pass",
+      detail: missingSettingSet.has("E2B_TEMPLATE_ID or E2B_SANDBOX_IMAGE_ID")
+        ? "No E2B template or sandbox image is configured."
+        : "An E2B template or sandbox image is configured.",
+      nextAction: missingSettingSet.has("E2B_TEMPLATE_ID or E2B_SANDBOX_IMAGE_ID")
+        ? "Set E2B_TEMPLATE_ID or E2B_SANDBOX_IMAGE_ID after building the Agent Pool template."
+        : null,
+    },
+    {
+      id: "callback-url",
+      label: "Bridge callback URL",
+      status: localCallback ? "block" : /^https:\/\//i.test(callbackUrl) ? "pass" : "warn",
+      detail: localCallback
+        ? `${callbackUrl} is local-only and not reachable from a live E2B sandbox.`
+        : /^https:\/\//i.test(callbackUrl)
+          ? "Callback base URL is HTTPS and non-local."
+          : "Callback base URL is non-local but not HTTPS.",
+      nextAction: localCallback
+        ? "Expose the local Caddy/API edge through a tunnel or use the deployed HTTPS API URL."
+        : /^https:\/\//i.test(callbackUrl)
+          ? null
+          : "Use HTTPS for live E2B callback traffic.",
+    },
+    {
+      id: "runtime-source",
+      label: "Runtime source",
+      status: isValidGithubRepositoryUrl(plan.runtimeSource.repositoryUrl) ? "pass" : "block",
+      detail: isValidGithubRepositoryUrl(plan.runtimeSource.repositoryUrl)
+        ? "Runtime source uses an HTTPS GitHub repository URL."
+        : "Runtime source must be an HTTPS GitHub repository URL.",
+      nextAction: isValidGithubRepositoryUrl(plan.runtimeSource.repositoryUrl) ? null : "Set --repository-url to an HTTPS GitHub repository.",
+    },
+  ];
+
+  if (agentRunnerMode === "codex") {
+    checks.push(
+      {
+        id: "codex-api-key",
+        label: "Codex API key",
+        status: missingCredentialSet.has("CODEX_API_KEY") ? "block" : "pass",
+        detail: missingCredentialSet.has("CODEX_API_KEY") ? "CODEX_API_KEY is missing." : "CODEX_API_KEY is configured and redacted.",
+        nextAction: missingCredentialSet.has("CODEX_API_KEY") ? "Set CODEX_API_KEY for Codex non-interactive execution." : null,
+      },
+      {
+        id: "github-app-broker",
+        label: "GitHub App broker",
+        status:
+          missingCredentialSet.has("GITHUB_APP_ID") ||
+          missingCredentialSet.has("GITHUB_APP_PRIVATE_KEY") ||
+          missingCredentialSet.has("GITHUB_APP_INSTALLATION_ID")
+            ? "block"
+            : "pass",
+        detail:
+          missingCredentialSet.has("GITHUB_APP_ID") ||
+          missingCredentialSet.has("GITHUB_APP_PRIVATE_KEY") ||
+          missingCredentialSet.has("GITHUB_APP_INSTALLATION_ID")
+            ? "GitHub App broker credentials are incomplete."
+            : "GitHub App broker credentials are configured and redacted.",
+        nextAction:
+          missingCredentialSet.has("GITHUB_APP_ID") ||
+          missingCredentialSet.has("GITHUB_APP_PRIVATE_KEY") ||
+          missingCredentialSet.has("GITHUB_APP_INSTALLATION_ID")
+            ? "Set GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, and GITHUB_APP_INSTALLATION_ID."
+            : null,
+      },
+      {
+        id: "egress-policy",
+        label: "Egress policy",
+        status: proxyOnly ? "pass" : testDirect ? "warn" : "block",
+        detail: proxyOnly
+          ? "Codex E2B launch is proxy-only with public traffic disabled."
+          : testDirect
+            ? "Direct egress is enabled for local/test use."
+            : "Codex E2B launch is missing strict proxy egress.",
+        nextAction: proxyOnly
+          ? null
+          : testDirect
+            ? "Use proxy-only egress before production live smoke."
+            : "Set EGRESS_PROXY_URL and EGRESS_PROXY_ALLOW_OUT or explicitly use E2B_LOCAL_ALLOW_DIRECT_EGRESS=true only for local tests.",
+      },
+      {
+        id: "allowed-egress-domains",
+        label: "Allowed egress domains",
+        status: plan.runtimeSource.allowedEgressDomains?.length ? "pass" : "block",
+        detail: plan.runtimeSource.allowedEgressDomains?.length
+          ? `Runtime source declares ${plan.runtimeSource.allowedEgressDomains.length} allowed egress domains.`
+          : "Runtime source does not declare allowed egress domains.",
+        nextAction: plan.runtimeSource.allowedEgressDomains?.length ? null : "Set AGENT_POOL_ALLOWED_EGRESS_DOMAINS or --allowed-egress-domains.",
+      },
+      {
+        id: "command-profile",
+        label: "Command profile",
+        status: plan.runtimeSource.commandProfile === "agent-pool-bun-pr" ? "pass" : "block",
+        detail:
+          plan.runtimeSource.commandProfile === "agent-pool-bun-pr"
+            ? "Runtime source uses the initial PR-capable command profile."
+            : "Runtime source is missing the supported command profile.",
+        nextAction: plan.runtimeSource.commandProfile === "agent-pool-bun-pr" ? null : "Use command profile agent-pool-bun-pr.",
+      },
+    );
+  }
+
+  checks.push({
+    id: "default-test-safety",
+    label: "Default test safety",
+    status: "pass",
+    detail: "Default tests remain fake-provider safe; live E2B checks are opt-in.",
+    nextAction: null,
+  });
+
+  return checks;
+}
+
+function nextReadinessAction(status: E2BReadinessStatus): string {
+  switch (status) {
+    case "ready":
+      return "Run opt-in live E2B smoke when you are ready.";
+    case "warning":
+      return "Resolve readiness warnings before production use; dry-run smoke is still safe.";
+    case "blocked":
+      return "Resolve blocked readiness checks, then rerun the readiness report.";
+  }
+}
+
 function buildSecurityReadiness(input: {
   readonly launchSpec: RedactedE2BLaunchSpec;
   readonly cleanup: E2BSmokePlan["cleanup"];
@@ -320,8 +511,15 @@ function readRedactedVariable(launchSpec: RedactedE2BLaunchSpec, name: string): 
 export async function runE2BSmokeCli(args: readonly string[] = process.argv.slice(2), options: E2BSmokeCliOptions = {}): Promise<number> {
   const parsed = parseE2BSmokeArgs(args);
   const env = options.env ?? await loadLocalEnv({ cwd: options.cwd });
-  const plan = createE2BSmokePlan({ ...parsed, env });
   const write = options.write ?? ((text: string) => process.stdout.write(text));
+
+  if (parsed.readiness) {
+    const report = createE2BReadinessReport({ ...parsed, env });
+    write(`${JSON.stringify(report, null, 2)}\n`);
+    return 0;
+  }
+
+  const plan = createE2BSmokePlan({ ...parsed, env });
 
   if (parsed.dryRun) {
     write(`${JSON.stringify(plan, null, 2)}\n`);
@@ -375,6 +573,7 @@ export async function runE2BSmokeCli(args: readonly string[] = process.argv.slic
 
 export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
   let dryRun = false;
+  let readiness = false;
   let apiUrl = DEFAULT_API_URL;
   let serviceToken: string | undefined;
   let timeoutMs = DEFAULT_TIMEOUT_MS;
@@ -391,6 +590,9 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
       case "--dry-run":
       case "--plan":
         dryRun = true;
+        break;
+      case "--readiness":
+        readiness = true;
         break;
       case "--api-url":
         apiUrl = readFlagValue(args, (index += 1), arg);
@@ -426,6 +628,7 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
 
   return {
     dryRun,
+    readiness,
     apiUrl,
     serviceToken,
     timeoutMs,
@@ -436,6 +639,19 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
     ...(allowedEgressDomains ? { allowedEgressDomains } : {}),
     maliciousFixtures,
   };
+}
+
+function isLocalCallbackUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return ["localhost", "127.0.0.1", "::1", "0.0.0.0"].includes(url.hostname);
+  } catch {
+    return true;
+  }
+}
+
+function isValidGithubRepositoryUrl(value: string): boolean {
+  return /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(value);
 }
 
 async function seedE2BSmokeFixture(plan: E2BSmokePlan, serviceToken: string, fetchImpl: typeof fetch): Promise<unknown> {
