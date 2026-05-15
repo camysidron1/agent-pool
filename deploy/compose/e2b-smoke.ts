@@ -28,6 +28,7 @@ export type E2BSmokePlan = {
   readonly launchSpec: RedactedE2BLaunchSpec;
   readonly bootstrap: ReturnType<typeof buildGitHubBootstrapPlan>;
   readonly bridgeStartup: ReturnType<typeof buildSandboxBridgeStartupPlan>["redactedEnv"];
+  readonly securityReadiness: E2BSmokeSecurityReadiness;
   readonly cleanup: {
     readonly provider: "e2b";
     readonly sandboxId: "<runtime-session-id>";
@@ -42,6 +43,42 @@ export type E2BSmokePlan = {
   readonly requests: {
     readonly seed: E2BSmokeRequest;
     readonly status: E2BSmokeRequest;
+  };
+};
+
+export type E2BSmokeSecurityReadiness = {
+  readonly execution: {
+    readonly defaultTests: "fake-provider-safe";
+    readonly liveE2B: "opt-in";
+    readonly packageProxySmoke: "opt-in";
+  };
+  readonly network: {
+    readonly egressMode: "proxy" | "test-direct";
+    readonly proxyOnly: boolean;
+    readonly allowInternetAccess: boolean;
+    readonly allowPublicTraffic: boolean;
+    readonly allowOut: readonly string[];
+    readonly packageProxyMode: string | null;
+    readonly packageProxyUrl: string | null;
+  };
+  readonly commandPolicy: {
+    readonly profile: string | null;
+    readonly enforcedBy: readonly string[];
+  };
+  readonly credentials: {
+    readonly github: "brokered-github-app-installation-token";
+    readonly codex: "env-api-key";
+    readonly redactedSecretNames: readonly string[];
+    readonly rawSecretsPresent: false;
+  };
+  readonly snapshotPolicy: {
+    readonly successSnapshots: "clean-terminal-sessions-only";
+    readonly blockedBy: readonly string[];
+    readonly cleanupAction: "destroy sandbox through RuntimeProvider.stopSession";
+  };
+  readonly liveSmokePrerequisites: {
+    readonly missingCredentials: readonly string[];
+    readonly missingSettings: readonly string[];
   };
 };
 
@@ -178,6 +215,23 @@ export function createE2BSmokePlan(input: Partial<ParsedE2BSmokeArgs> & { readon
     githubTokenConfigured: true,
   });
   const bridgeStartup = buildSandboxBridgeStartupPlan(launchSpec);
+  const redactedLaunchSpec = redactE2BLaunchSpec(launchSpec);
+  const cleanup = {
+    provider: "e2b" as const,
+    sandboxId: "<runtime-session-id>" as const,
+    timeoutMs: e2b.cleanupTimeoutMs,
+    action: "destroy sandbox through RuntimeProvider.stopSession" as const,
+  };
+  const maliciousFixtures = {
+    enabled: input.maliciousFixtures === true,
+    liveExecution:
+      input.maliciousFixtures === true
+        ? input.dryRun === true
+          ? "dry_run_only" as const
+          : "skipped_until_live_runner_is_ready" as const
+        : "not_requested" as const,
+    fixtureIds: input.maliciousFixtures === true ? MALICIOUS_FIXTURE_IDS : [],
+  };
 
   return {
     runtimeProvider: "e2b",
@@ -188,25 +242,17 @@ export function createE2BSmokePlan(input: Partial<ParsedE2BSmokeArgs> & { readon
     missingCredentials,
     missingSettings,
     runtimeSource,
-    launchSpec: redactE2BLaunchSpec(launchSpec),
+    launchSpec: redactedLaunchSpec,
     bootstrap,
     bridgeStartup: bridgeStartup.redactedEnv,
-    cleanup: {
-      provider: "e2b",
-      sandboxId: "<runtime-session-id>",
-      timeoutMs: e2b.cleanupTimeoutMs,
-      action: "destroy sandbox through RuntimeProvider.stopSession",
-    },
-    maliciousFixtures: {
-      enabled: input.maliciousFixtures === true,
-      liveExecution:
-        input.maliciousFixtures === true
-          ? input.dryRun === true
-            ? "dry_run_only"
-            : "skipped_until_live_runner_is_ready"
-          : "not_requested",
-      fixtureIds: input.maliciousFixtures === true ? MALICIOUS_FIXTURE_IDS : [],
-    },
+    securityReadiness: buildSecurityReadiness({
+      launchSpec: redactedLaunchSpec,
+      cleanup,
+      missingCredentials,
+      missingSettings,
+    }),
+    cleanup,
+    maliciousFixtures,
     requests: {
       seed: {
         method: "POST",
@@ -221,6 +267,54 @@ export function createE2BSmokePlan(input: Partial<ParsedE2BSmokeArgs> & { readon
       },
     },
   };
+}
+
+function buildSecurityReadiness(input: {
+  readonly launchSpec: RedactedE2BLaunchSpec;
+  readonly cleanup: E2BSmokePlan["cleanup"];
+  readonly missingCredentials: readonly string[];
+  readonly missingSettings: readonly string[];
+}): E2BSmokeSecurityReadiness {
+  return {
+    execution: {
+      defaultTests: "fake-provider-safe",
+      liveE2B: "opt-in",
+      packageProxySmoke: "opt-in",
+    },
+    network: {
+      egressMode: input.launchSpec.network.egressMode,
+      proxyOnly: input.launchSpec.network.egressMode === "proxy" && input.launchSpec.network.allowInternetAccess === false,
+      allowInternetAccess: input.launchSpec.network.allowInternetAccess,
+      allowPublicTraffic: input.launchSpec.network.allowPublicTraffic,
+      allowOut: input.launchSpec.network.allowOut,
+      packageProxyMode: readRedactedVariable(input.launchSpec, "AGENT_POOL_PACKAGE_PROXY_MODE"),
+      packageProxyUrl: readRedactedVariable(input.launchSpec, "AGENT_POOL_PACKAGE_PROXY_URL"),
+    },
+    commandPolicy: {
+      profile: input.launchSpec.runner.mode === "codex" ? input.launchSpec.runner.codex.commandProfile : null,
+      enforcedBy: ["codex rules", "bridge command supervisor", "backend runtime-source validation"],
+    },
+    credentials: {
+      github: "brokered-github-app-installation-token",
+      codex: "env-api-key",
+      redactedSecretNames: Object.keys(input.launchSpec.environment.secrets).sort(),
+      rawSecretsPresent: false,
+    },
+    snapshotPolicy: {
+      successSnapshots: "clean-terminal-sessions-only",
+      blockedBy: ["egress-denied", "install-failed", "lockfile-mutated", "scrub-incomplete", "command-denied", "grace-timeout"],
+      cleanupAction: input.cleanup.action,
+    },
+    liveSmokePrerequisites: {
+      missingCredentials: input.missingCredentials,
+      missingSettings: input.missingSettings,
+    },
+  };
+}
+
+function readRedactedVariable(launchSpec: RedactedE2BLaunchSpec, name: string): string | null {
+  const value = launchSpec.environment.variables[name];
+  return typeof value === "string" && value.trim() ? value : null;
 }
 
 export async function runE2BSmokeCli(args: readonly string[] = process.argv.slice(2), options: E2BSmokeCliOptions = {}): Promise<number> {

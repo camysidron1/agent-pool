@@ -596,6 +596,76 @@ describe("compose smoke runner", () => {
     expect(JSON.stringify(plan)).not.toContain("github-app-private-key");
   });
 
+  test("dry-run Codex E2B smoke exposes proxy snapshot and command-policy readiness evidence", async () => {
+    const writes: string[] = [];
+    const code = await runE2BSmokeCli(["--dry-run", "--agent-runner-mode", "codex"], {
+      env: {
+        AUTH_MODE: "test",
+        E2B_API_KEY: "e2b-secret",
+        E2B_TEMPLATE_ID: "template-1",
+        E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN,CODEX_API_KEY",
+        CODEX_API_KEY: "codex-secret",
+        GITHUB_APP_ID: "12345",
+        GITHUB_APP_PRIVATE_KEY: "github-app-private-key",
+        GITHUB_APP_INSTALLATION_ID: "67890",
+        EGRESS_PROXY_URL: "http://proxy-user:proxy-secret@egress-gateway.internal:8080",
+        EGRESS_PROXY_ALLOW_OUT: "10.0.10.25/32",
+        AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+      },
+      write: (text) => writes.push(text),
+    });
+    const plan = JSON.parse(writes.join(""));
+
+    expect(code).toBe(0);
+    expect(plan.missingCredentials).toEqual([]);
+    expect(plan.missingSettings).toEqual([]);
+    expect(plan.launchSpec.network).toMatchObject({
+      egressMode: "proxy",
+      allowInternetAccess: false,
+      allowPublicTraffic: false,
+      allowOut: ["10.0.10.25/32"],
+    });
+    expect(plan.securityReadiness).toMatchObject({
+      execution: {
+        defaultTests: "fake-provider-safe",
+        liveE2B: "opt-in",
+        packageProxySmoke: "opt-in",
+      },
+      network: {
+        egressMode: "proxy",
+        proxyOnly: true,
+        allowInternetAccess: false,
+        allowPublicTraffic: false,
+        allowOut: ["10.0.10.25/32"],
+        packageProxyMode: "controlled-cache",
+        packageProxyUrl: "[REDACTED]",
+      },
+      commandPolicy: {
+        profile: "agent-pool-bun-pr",
+        enforcedBy: ["codex rules", "bridge command supervisor", "backend runtime-source validation"],
+      },
+      credentials: {
+        github: "brokered-github-app-installation-token",
+        codex: "env-api-key",
+        redactedSecretNames: ["CODEX_API_KEY", "GITHUB_TOKEN"],
+        rawSecretsPresent: false,
+      },
+      snapshotPolicy: {
+        successSnapshots: "clean-terminal-sessions-only",
+        blockedBy: expect.arrayContaining(["egress-denied", "install-failed", "lockfile-mutated", "scrub-incomplete", "command-denied", "grace-timeout"]),
+        cleanupAction: "destroy sandbox through RuntimeProvider.stopSession",
+      },
+      liveSmokePrerequisites: {
+        missingCredentials: [],
+        missingSettings: [],
+      },
+    });
+    expect(JSON.stringify(plan)).not.toContain("e2b-secret");
+    expect(JSON.stringify(plan)).not.toContain("codex-secret");
+    expect(JSON.stringify(plan)).not.toContain("github-app-private-key");
+    expect(JSON.stringify(plan)).not.toContain("proxy-secret");
+  });
+
   test("reports missing E2B smoke credentials before touching the API", async () => {
     const writes: string[] = [];
     let fetches = 0;
