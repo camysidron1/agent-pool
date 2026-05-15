@@ -81,6 +81,90 @@ describe("egress gateway", () => {
     expect(response).toContain("407");
     expect(calls).toBe(0);
   });
+
+  test("proxies and caches allowed npm package metadata without logging proxy secrets", async () => {
+    const reports: unknown[] = [];
+    const logs: unknown[] = [];
+    let upstreamCalls = 0;
+    const gateway = createEgressGateway({
+      config: config(),
+      fetch: packageProxyFetch({
+        allowed: true,
+        validToken: "proxy-token",
+        reports,
+        onUpstream: () => {
+          upstreamCalls += 1;
+          return json({ name: "@agent-pool/sdk", version: "1.0.0" });
+        },
+      }),
+      logger: (event) => logs.push(event),
+    });
+    const port = testPort();
+    await gateway.listen(port, "127.0.0.1");
+    servers.push(gateway);
+
+    const first = await packageProxyRequest(port, "@agent-pool/sdk", "proxy-token");
+    const second = await packageProxyRequest(port, "@agent-pool/sdk", "proxy-token");
+
+    expect(first).toContain("200 OK");
+    expect(first).toContain("@agent-pool/sdk");
+    expect(second).toContain("200 OK");
+    expect(upstreamCalls).toBe(1);
+    expect(JSON.stringify(logs)).toContain("package.proxy.cache_miss");
+    expect(JSON.stringify(logs)).toContain("package.proxy.cache_hit");
+    expect(JSON.stringify(logs)).not.toContain("proxy-token");
+    expect(JSON.stringify(reports)).not.toContain("proxy-token");
+  });
+
+  test("denies undeclared package proxy requests before upstream fetch", async () => {
+    let upstreamCalls = 0;
+    const gateway = createEgressGateway({
+      config: config(),
+      fetch: packageProxyFetch({
+        allowed: false,
+        validToken: "proxy-token",
+        reports: [],
+        onUpstream: () => {
+          upstreamCalls += 1;
+          return json({ ok: true });
+        },
+      }),
+      logger: () => undefined,
+    });
+    const port = testPort();
+    await gateway.listen(port, "127.0.0.1");
+    servers.push(gateway);
+
+    const response = await packageProxyRequest(port, "left-pad", "proxy-token");
+
+    expect(response).toContain("403");
+    expect(response).toContain("package_scope_not_declared");
+    expect(upstreamCalls).toBe(0);
+  });
+
+  test("reports failed package upstream resolutions", async () => {
+    const reports: unknown[] = [];
+    const gateway = createEgressGateway({
+      config: config(),
+      fetch: packageProxyFetch({
+        allowed: true,
+        validToken: "proxy-token",
+        reports,
+        onUpstream: () => new Response("missing", { status: 404, headers: { "content-type": "text/plain" } }),
+      }),
+      logger: () => undefined,
+    });
+    const port = testPort();
+    await gateway.listen(port, "127.0.0.1");
+    servers.push(gateway);
+
+    const response = await packageProxyRequest(port, "@agent-pool/missing", "proxy-token");
+
+    expect(response).toContain("404");
+    expect(JSON.stringify(reports)).toContain("\"decision\":\"failed\"");
+    expect(JSON.stringify(reports)).toContain("upstream_404");
+    expect(JSON.stringify(reports)).not.toContain("proxy-token");
+  });
 });
 
 function config() {
@@ -112,6 +196,35 @@ function authzFetch(input: {
   }) as typeof fetch;
 }
 
+function packageProxyFetch(input: {
+  readonly allowed: boolean;
+  readonly validToken: string;
+  readonly reports: unknown[];
+  readonly onUpstream: (url: string) => Response;
+}): typeof fetch {
+  return (async (url, init) => {
+    const textUrl = String(url);
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (textUrl.endsWith("/internal/packages/authorize")) {
+      return json({
+        ok: true,
+        allowed: input.allowed && body.proxyToken === input.validToken,
+        reason: input.allowed ? "allowed" : "package_scope_not_declared",
+        audit: { id: "pkg_audit_1" },
+      });
+    }
+    if (textUrl.endsWith("/internal/packages/report")) {
+      const { proxyToken: _redacted, ...reported } = body;
+      input.reports.push(reported);
+      return json({ ok: true });
+    }
+    if (textUrl.startsWith("https://registry.npmjs.org/")) {
+      return input.onUpstream(textUrl);
+    }
+    return new Response("unexpected fetch", { status: 500 });
+  }) as typeof fetch;
+}
+
 async function connectThroughProxy(input: {
   readonly proxyPort: number;
   readonly targetPort: number;
@@ -139,6 +252,22 @@ async function rawProxyRequest(port: number, request: string): Promise<string> {
     socket.on("error", reject);
     socket.on("close", () => resolve(Buffer.concat(chunks).toString("utf8")));
   });
+}
+
+async function packageProxyRequest(port: number, packageName: string, token: string): Promise<string> {
+  const credentials = Buffer.from(`${encodeProxyIdentity("project_a", "session_1")}:${token}`, "utf8").toString("base64");
+  const encodedPackage = encodeURIComponent(packageName);
+  return rawProxyRequest(
+    port,
+    [
+      `GET /package/npm/registry.npmjs.org/${encodedPackage} HTTP/1.1`,
+      "host: 127.0.0.1",
+      `authorization: Basic ${credentials}`,
+      "connection: close",
+      "",
+      "",
+    ].join("\r\n"),
+  );
 }
 
 async function listenTcpServer(onConnection: (socket: import("node:net").Socket) => void): Promise<{ readonly port: number; readonly close: () => Promise<void> }> {

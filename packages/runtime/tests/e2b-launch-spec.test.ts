@@ -181,11 +181,16 @@ describe("E2B launch spec", () => {
       AGENT_POOL_BASE_REF: "main",
       AGENT_POOL_TASK_BRANCH: "agent-pool/task/task_1",
       AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+      AGENT_POOL_PACKAGE_PROXY_MODE: "controlled-cache",
       NO_PROXY: "127.0.0.1,localhost",
     });
     expect(spec.environment.variables.HTTP_PROXY).toMatch(/^http:\/\/[^:]+:session-secret@egress-gateway\.internal:8080\/$/);
     expect(spec.environment.variables.HTTPS_PROXY).toBe(spec.environment.variables.HTTP_PROXY);
     expect(spec.environment.variables.ALL_PROXY).toBe(spec.environment.variables.HTTP_PROXY);
+    expect(spec.environment.variables.BUN_CONFIG_REGISTRY).toMatch(
+      /^http:\/\/[^:]+:session-secret@egress-gateway\.internal:8080\/package\/npm\/registry\.npmjs\.org\/$/,
+    );
+    expect(spec.environment.variables.NPM_CONFIG_REGISTRY).toBe(spec.environment.variables.BUN_CONFIG_REGISTRY);
     expect(spec.runner).toEqual({
       mode: "codex",
       codex: {
@@ -206,6 +211,7 @@ describe("E2B launch spec", () => {
     expect(JSON.stringify(redactE2BLaunchSpec(spec))).not.toContain("short-lived-github-token");
     expect(JSON.stringify(redactE2BLaunchSpec(spec))).not.toContain("codex-secret");
     expect(JSON.stringify(redactE2BLaunchSpec(spec))).not.toContain("session-secret");
+    expect(redactE2BLaunchSpec(spec).environment.variables.BUN_CONFIG_REGISTRY).toBe("[REDACTED]");
   });
 
   test("supports explicit local direct egress for Codex E2B smoke runs", () => {

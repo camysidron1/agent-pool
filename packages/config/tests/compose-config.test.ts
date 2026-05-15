@@ -22,6 +22,7 @@ describe("compose control-plane config", () => {
     expect(compose).toContain("AGENT_RUNNER_MODE: ${AGENT_RUNNER_MODE:-bridge-smoke}");
     expect(compose).toContain("CODEX_API_KEY: ${CODEX_API_KEY:-}");
     expect(compose).toContain("EGRESS_PROXY_URL: ${EGRESS_PROXY_URL:-}");
+    expect(compose).toContain("EGRESS_PACKAGE_PROXY_URL: ${EGRESS_PACKAGE_PROXY_URL:-}");
     expect(compose).toContain("E2B_LOCAL_ALLOW_DIRECT_EGRESS: ${E2B_LOCAL_ALLOW_DIRECT_EGRESS:-false}");
     expect(compose).toContain("AGENT_POOL_ALLOWED_EGRESS_DOMAINS: ${AGENT_POOL_ALLOWED_EGRESS_DOMAINS:-github.com,api.github.com,registry.npmjs.org,api.openai.com}");
     expect(compose).toContain("GITHUB_APP_ID: ${GITHUB_APP_ID:-}");

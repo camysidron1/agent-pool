@@ -136,6 +136,7 @@ export type E2BRuntimeProviderConfig = {
   readonly egressProxyUrl?: string | null;
   readonly egressProxyAllowOut?: readonly string[];
   readonly egressProxyNoProxy?: string | null;
+  readonly packageProxyUrl?: string | null;
   readonly localAllowDirectEgress?: boolean;
   readonly allowedEgressDomains?: readonly string[];
 };
@@ -622,6 +623,7 @@ export function buildE2BLaunchSpec(request: RuntimeSessionRequest, options: E2BR
   const egressProxyUrl = config.egressProxyUrl?.trim() || null;
   const egressAllowOut = [...(config.egressProxyAllowOut ?? [])];
   const egressNoProxy = config.egressProxyNoProxy?.trim() || null;
+  const configuredPackageProxyUrl = config.packageProxyUrl?.trim() || null;
   const localAllowDirectEgress = Boolean(config.localAllowDirectEgress);
   const runtimeSource = readRuntimeTaskSource(request.task);
   const branchName = runtimeSource ? createTaskBranchName(runtimeSource.taskBranchPrefix, request.taskId) : null;
@@ -672,6 +674,22 @@ export function buildE2BLaunchSpec(request: RuntimeSessionRequest, options: E2BR
         ...(egressNoProxy ? { NO_PROXY: egressNoProxy } : {}),
       }
     : {};
+  const sessionPackageProxyUrl = runnerMode === "codex" && !localAllowDirectEgress && runtimeSource?.allowedEgressDomains?.includes("registry.npmjs.org")
+    ? createSessionProxyUrl({
+        proxyUrl: configuredPackageProxyUrl ?? createDefaultPackageProxyUrl(egressProxyUrl, "registry.npmjs.org"),
+        projectId: request.projectId,
+        sessionId: request.sessionId ?? request.bridge.sessionId,
+        proxyToken: request.bridge.sessionToken.token,
+      })
+    : null;
+  const packageProxyEnvironment: Record<string, string> = sessionPackageProxyUrl
+    ? {
+        AGENT_POOL_PACKAGE_PROXY_MODE: "controlled-cache",
+        AGENT_POOL_PACKAGE_PROXY_URL: sessionPackageProxyUrl,
+        BUN_CONFIG_REGISTRY: sessionPackageProxyUrl,
+        NPM_CONFIG_REGISTRY: sessionPackageProxyUrl,
+      }
+    : {};
 
   return {
     provider: "e2b",
@@ -716,6 +734,7 @@ export function buildE2BLaunchSpec(request: RuntimeSessionRequest, options: E2BR
           ? { AGENT_POOL_ALLOWED_EGRESS_DOMAINS: runtimeSource.allowedEgressDomains.join(",") }
           : {}),
         ...proxyEnvironment,
+        ...packageProxyEnvironment,
       },
       secrets,
     },
@@ -861,11 +880,29 @@ function createSessionProxyUrl(input: {
   return url.toString();
 }
 
+function createDefaultPackageProxyUrl(proxyUrl: string | null, registryHost: string): string {
+  if (!proxyUrl) {
+    throw new Error("package proxy requires strict egress proxy configuration");
+  }
+  const url = new URL(proxyUrl);
+  url.pathname = `/package/npm/${registryHost}/`;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
 function redactE2BVariables(variables: Readonly<Record<string, string>>): Readonly<Record<string, string>> {
   return Object.fromEntries(
     Object.entries(variables).map(([key, value]) => [
       key,
-      key === "HTTP_PROXY" || key === "HTTPS_PROXY" || key === "ALL_PROXY" ? "[REDACTED]" : value,
+      key === "HTTP_PROXY" ||
+      key === "HTTPS_PROXY" ||
+      key === "ALL_PROXY" ||
+      key === "AGENT_POOL_PACKAGE_PROXY_URL" ||
+      key === "BUN_CONFIG_REGISTRY" ||
+      key === "NPM_CONFIG_REGISTRY"
+        ? "[REDACTED]"
+        : value,
     ]),
   );
 }

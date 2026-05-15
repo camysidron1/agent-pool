@@ -81,6 +81,7 @@ export type E2BRuntimeConfig = {
   readonly egressProxyUrl: string | null;
   readonly egressProxyAllowOut: readonly string[];
   readonly egressProxyNoProxy: string | null;
+  readonly packageProxyUrl: string | null;
   readonly localAllowDirectEgress: boolean;
   readonly allowedEgressDomains: readonly string[];
 };
@@ -297,6 +298,7 @@ function readE2BRuntimeConfig(env: EnvSource, runtimeProvider: RuntimeProviderNa
     egressProxyUrl: readOptionalUrlValue(env.EGRESS_PROXY_URL, "EGRESS_PROXY_URL"),
     egressProxyAllowOut: readStringList(env.EGRESS_PROXY_ALLOW_OUT),
     egressProxyNoProxy: env.EGRESS_PROXY_NO_PROXY?.trim() || null,
+    packageProxyUrl: readOptionalUrlValue(env.EGRESS_PACKAGE_PROXY_URL ?? env.PACKAGE_PROXY_URL, "EGRESS_PACKAGE_PROXY_URL"),
     localAllowDirectEgress: readBoolean(env.E2B_LOCAL_ALLOW_DIRECT_EGRESS, false, "E2B_LOCAL_ALLOW_DIRECT_EGRESS"),
     allowedEgressDomains: readDomainList(env.AGENT_POOL_ALLOWED_EGRESS_DOMAINS, "AGENT_POOL_ALLOWED_EGRESS_DOMAINS"),
   };
