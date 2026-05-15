@@ -13,6 +13,7 @@ import {
   INITIAL_MIGRATION_ID,
   MIGRATION_TABLE_NAME,
   ORCHESTRATOR_COMMAND_SCHEMA_MIGRATION_ID,
+  PACKAGE_REGISTRY_AUDIT_SCHEMA_MIGRATION_ID,
   RUNTIME_SANDBOX_LIFECYCLE_SCHEMA_MIGRATION_ID,
   SESSION_HEARTBEAT_SCHEMA_MIGRATION_ID,
   SESSION_SCHEMA_MIGRATION_ID,
@@ -88,6 +89,10 @@ describe("web/sandbox database migration harness", () => {
           id: RUNTIME_SANDBOX_LIFECYCLE_SCHEMA_MIGRATION_ID,
           description: "Add runtime sandbox cleanup and snapshot lifecycle schema",
         },
+        {
+          id: PACKAGE_REGISTRY_AUDIT_SCHEMA_MIGRATION_ID,
+          description: "Add package registry authorization audit schema",
+        },
       ]);
 
       const database = new Database(dbPath, { readonly: true, strict: true });
@@ -124,6 +129,7 @@ describe("web/sandbox database migration harness", () => {
         TASK_RUNTIME_SOURCE_SCHEMA_MIGRATION_ID,
         TASK_PRIORITY_SCHEMA_MIGRATION_ID,
         RUNTIME_SANDBOX_LIFECYCLE_SCHEMA_MIGRATION_ID,
+        PACKAGE_REGISTRY_AUDIT_SCHEMA_MIGRATION_ID,
       ]);
       expect(second.applied).toEqual([]);
     } finally {

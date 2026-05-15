@@ -226,6 +226,133 @@ describe("API service skeleton", () => {
     }
   });
 
+  test("internal package registry authz audits package decisions and enforces service token", async () => {
+    const { baseUrl, config, database, close } = await startTestApi({
+      env: {
+        AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,registry.npmjs.org",
+      },
+    });
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      const project = services.createProject({ id: "project_packages", slug: "packages", name: "Packages" });
+      services.createTask({
+        id: "task_packages",
+        projectId: project.id,
+        title: "Packages",
+        runtimeSource: {
+          repositoryUrl: "https://github.com/example/tiny-fixture.git",
+          baseRef: "main",
+          taskBranchPrefix: "agent-pool/task",
+          allowedEgressDomains: ["github.com", "registry.npmjs.org"],
+          allowedPackageScopes: ["@agent-pool/*"],
+          commandProfile: "agent-pool-bun-pr",
+        },
+      });
+      const claim = services.claimNextTask({ projectId: project.id, sessionId: "session_packages" });
+      expect(claim).toMatchObject({ ok: true });
+      if (!claim.ok) throw new Error("claim failed");
+      expect(services.reportStartupSucceeded({ projectId: project.id, sessionId: "session_packages" })).toMatchObject({ ok: true });
+      const proxyToken = claim.session.bridge.sessionToken.token;
+
+      const missing = await fetch(`${baseUrl}/internal/packages/authorize`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: project.id,
+          sessionId: "session_packages",
+          proxyToken,
+          registryHost: "registry.npmjs.org",
+          packageName: "@agent-pool/sdk",
+        }),
+      });
+      expect(missing.status).toBe(401);
+
+      const allowed = await fetch(`${baseUrl}/internal/packages/authorize`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+        body: JSON.stringify({
+          projectId: project.id,
+          sessionId: "session_packages",
+          proxyToken,
+          registryHost: "registry.npmjs.org",
+          packageName: "@agent-pool/sdk",
+          requestedVersion: "^1.0.0",
+          metadata: { proxyPassword: "must-redact" },
+        }),
+      });
+      expect(allowed.status).toBe(200);
+      expect(await allowed.json()).toMatchObject({
+        ok: true,
+        allowed: true,
+        reason: "allowed",
+        audit: {
+          decision: "allowed",
+          packageName: "@agent-pool/sdk",
+          registryHost: "registry.npmjs.org",
+          metadata: { proxyPassword: "[REDACTED]" },
+        },
+      });
+
+      const denied = await fetch(`${baseUrl}/internal/packages/authorize`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+        body: JSON.stringify({
+          projectId: project.id,
+          sessionId: "session_packages",
+          proxyToken,
+          registryHost: "registry.npmjs.org",
+          packageName: "left-pad",
+        }),
+      });
+      expect(await denied.json()).toMatchObject({
+        ok: true,
+        allowed: false,
+        reason: "package_scope_not_declared",
+        audit: { decision: "denied", packageName: "left-pad" },
+      });
+
+      const failed = await fetch(`${baseUrl}/internal/packages/report`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+        body: JSON.stringify({
+          projectId: project.id,
+          sessionId: "session_packages",
+          proxyToken,
+          registryHost: "registry.npmjs.org",
+          packageName: "@agent-pool/sdk",
+          requestedVersion: "^9.9.9",
+          decision: "failed",
+          reason: "resolution failed",
+        }),
+      });
+      expect(await failed.json()).toMatchObject({
+        ok: true,
+        audit: { decision: "failed", reason: "resolution_failed" },
+      });
+      expect(database.sqlite.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM package_registry_audits").get()?.count).toBe(3);
+      const output = database.sqlite
+        .query<{ payload_json: string }, []>(
+          "SELECT payload_json FROM events WHERE type = 'session.output' AND payload_json LIKE '%security.package%' ORDER BY created_at ASC",
+        )
+        .all();
+      expect(output.length).toBeGreaterThanOrEqual(3);
+      expect(JSON.stringify(output)).not.toContain(proxyToken);
+      expect(JSON.stringify(output)).not.toContain("must-redact");
+    } finally {
+      await close();
+    }
+  });
+
   test("public API identity route requires deterministic operator auth", async () => {
     const { baseUrl, config, close } = await startTestApi();
 

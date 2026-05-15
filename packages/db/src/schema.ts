@@ -57,6 +57,9 @@ export type StorageObjectKind = (typeof storageObjectKindValues)[number];
 export const logStreamKindValues = ["stdout", "stderr", "combined", "system"] as const;
 export type LogStreamKind = (typeof logStreamKindValues)[number];
 
+export const packageRegistryDecisionValues = ["allowed", "denied", "failed"] as const;
+export type PackageRegistryDecision = (typeof packageRegistryDecisionValues)[number];
+
 const timestampNow = sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`;
 
 export const projects = sqliteTable(
@@ -545,6 +548,42 @@ export const logStreams = sqliteTable(
   ],
 );
 
+export const packageRegistryAudits = sqliteTable(
+  "package_registry_audits",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    taskId: text("task_id").notNull(),
+    sessionId: text("session_id").notNull(),
+    ecosystem: text("ecosystem").notNull(),
+    registryHost: text("registry_host").notNull(),
+    packageName: text("package_name").notNull(),
+    requestedVersion: text("requested_version"),
+    resolvedVersion: text("resolved_version"),
+    decision: text("decision", { enum: packageRegistryDecisionValues }).notNull(),
+    reason: text("reason").notNull(),
+    metadataJson: text("metadata_json").notNull().default("{}"),
+    createdAt: text("created_at").notNull().default(timestampNow),
+  },
+  (table) => [
+    index("package_registry_audits_session_idx").on(table.projectId, table.sessionId, table.createdAt),
+    index("package_registry_audits_package_idx").on(table.projectId, table.registryHost, table.packageName),
+    index("package_registry_audits_decision_idx").on(table.projectId, table.decision, table.createdAt),
+    foreignKey({
+      name: "package_registry_audits_task_fk",
+      columns: [table.projectId, table.taskId],
+      foreignColumns: [tasks.projectId, tasks.id],
+    }).onDelete("cascade").onUpdate("cascade"),
+    foreignKey({
+      name: "package_registry_audits_session_fk",
+      columns: [table.projectId, table.sessionId],
+      foreignColumns: [sessions.projectId, sessions.id],
+    }).onDelete("cascade").onUpdate("cascade"),
+  ],
+);
+
 export type ProjectRow = typeof projects.$inferSelect;
 export type NewProjectRow = typeof projects.$inferInsert;
 export type TaskRow = typeof tasks.$inferSelect;
@@ -575,3 +614,5 @@ export type StorageObjectRow = typeof storageObjects.$inferSelect;
 export type NewStorageObjectRow = typeof storageObjects.$inferInsert;
 export type LogStreamRow = typeof logStreams.$inferSelect;
 export type NewLogStreamRow = typeof logStreams.$inferInsert;
+export type PackageRegistryAuditRow = typeof packageRegistryAudits.$inferSelect;
+export type NewPackageRegistryAuditRow = typeof packageRegistryAudits.$inferInsert;

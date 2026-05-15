@@ -26,8 +26,67 @@ export type TaskRuntimeSourceMetadata = {
   readonly baseRef: string;
   readonly taskBranchPrefix: string;
   readonly allowedEgressDomains?: readonly string[];
+  readonly allowedPackageScopes?: readonly string[];
   readonly commandProfile?: string | null;
 };
+
+export type PackageRegistryAuditDecision = "allowed" | "denied" | "failed";
+
+export type PackageRegistryAuditRecord = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly ecosystem: string;
+  readonly registryHost: string;
+  readonly packageName: string;
+  readonly requestedVersion: string | null;
+  readonly resolvedVersion: string | null;
+  readonly decision: PackageRegistryAuditDecision;
+  readonly reason: string;
+  readonly metadata: Readonly<Record<string, unknown>>;
+  readonly createdAt: string;
+};
+
+export type AuthorizePackageRegistryAccessInput = {
+  readonly id?: string;
+  readonly projectId: string;
+  readonly sessionId: string;
+  readonly registryHost: string;
+  readonly packageName: string;
+  readonly ecosystem?: string | null;
+  readonly requestedVersion?: string | null;
+  readonly resolvedVersion?: string | null;
+  readonly globalAllowedRegistryHosts?: readonly string[];
+  readonly metadata?: Readonly<Record<string, unknown>>;
+};
+
+export type AuthorizePackageRegistryAccessResult =
+  | {
+      readonly ok: true;
+      readonly allowed: boolean;
+      readonly reason: string;
+      readonly audit: PackageRegistryAuditRecord;
+    }
+  | { readonly ok: false; readonly error: { readonly code: "not_found" | "validation_error"; readonly message: string } };
+
+export type RecordPackageRegistryAuditInput = {
+  readonly id?: string;
+  readonly projectId: string;
+  readonly sessionId: string;
+  readonly registryHost: string;
+  readonly packageName: string;
+  readonly ecosystem?: string | null;
+  readonly requestedVersion?: string | null;
+  readonly resolvedVersion?: string | null;
+  readonly decision: PackageRegistryAuditDecision;
+  readonly reason: string;
+  readonly metadata?: Readonly<Record<string, unknown>>;
+};
+
+export type RecordPackageRegistryAuditResult =
+  | { readonly ok: true; readonly audit: PackageRegistryAuditRecord }
+  | { readonly ok: false; readonly error: { readonly code: "not_found" | "validation_error"; readonly message: string } };
 
 export type AppendEventInput = {
   readonly id?: string;
@@ -805,6 +864,14 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
 
     listPublicEvents(input: ListPublicEventsInput): readonly PublicEventSummary[] {
       return listPublicEvents(database, input);
+    },
+
+    authorizePackageRegistryAccess(input: AuthorizePackageRegistryAccessInput): AuthorizePackageRegistryAccessResult {
+      return authorizePackageRegistryAccess(database, input);
+    },
+
+    recordPackageRegistryAudit(input: RecordPackageRegistryAuditInput): RecordPackageRegistryAuditResult {
+      return recordPackageRegistryAudit(database, input);
     },
 
     readTaskDetail(input: ReadTaskDetailInput): ReadTaskDetailResult {
@@ -1690,6 +1757,160 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
         return { ok: true, idempotent: Boolean(existing), event, outbox } as const;
       });
     },
+  };
+}
+
+function authorizePackageRegistryAccess(
+  database: WebSandboxSqliteDatabase,
+  input: AuthorizePackageRegistryAccessInput,
+): AuthorizePackageRegistryAccessResult {
+  const normalized = normalizePackageRegistryInput(input);
+  if (!normalized.ok) return normalized;
+  const scope = readPackageRegistrySessionScope(database, input.projectId, input.sessionId);
+  if (!scope) {
+    return { ok: false, error: { code: "not_found", message: `session not found: ${input.sessionId}` } };
+  }
+
+  const globalAllowedHosts = new Set((input.globalAllowedRegistryHosts ?? []).map(normalizeDomainValue));
+  const globallyAllowed = globalAllowedHosts.has(normalized.registryHost);
+  const sessionHostAllowed = scope.runtimeSource.allowedEgressDomains?.includes(normalized.registryHost) ?? false;
+  const packageScopeAllowed = isPackageAllowedByScope(normalized.packageName, scope.runtimeSource.allowedPackageScopes ?? []);
+  const allowed = globallyAllowed && sessionHostAllowed && packageScopeAllowed;
+  const reason = globallyAllowed
+    ? sessionHostAllowed
+      ? packageScopeAllowed
+        ? "allowed"
+        : "package_scope_not_declared"
+      : "registry_not_declared_for_session"
+    : "registry_not_globally_allowed";
+
+  const audit = insertPackageRegistryAudit(database, {
+    id: input.id,
+    projectId: input.projectId,
+    taskId: scope.taskId,
+    sessionId: input.sessionId,
+    ecosystem: normalized.ecosystem,
+    registryHost: normalized.registryHost,
+    packageName: normalized.packageName,
+    requestedVersion: normalized.requestedVersion,
+    resolvedVersion: normalized.resolvedVersion,
+    decision: allowed ? "allowed" : "denied",
+    reason,
+    metadata: sanitizeMetadata(input.metadata),
+  });
+
+  return { ok: true, allowed, reason, audit };
+}
+
+function recordPackageRegistryAudit(
+  database: WebSandboxSqliteDatabase,
+  input: RecordPackageRegistryAuditInput,
+): RecordPackageRegistryAuditResult {
+  const normalized = normalizePackageRegistryInput(input);
+  if (!normalized.ok) return normalized;
+  const scope = readPackageRegistrySessionScope(database, input.projectId, input.sessionId);
+  if (!scope) {
+    return { ok: false, error: { code: "not_found", message: `session not found: ${input.sessionId}` } };
+  }
+
+  return {
+    ok: true,
+    audit: insertPackageRegistryAudit(database, {
+      id: input.id,
+      projectId: input.projectId,
+      taskId: scope.taskId,
+      sessionId: input.sessionId,
+      ecosystem: normalized.ecosystem,
+      registryHost: normalized.registryHost,
+      packageName: normalized.packageName,
+      requestedVersion: normalized.requestedVersion,
+      resolvedVersion: normalized.resolvedVersion,
+      decision: input.decision,
+      reason: normalizeAuditReason(input.reason),
+      metadata: sanitizeMetadata(input.metadata),
+    }),
+  };
+}
+
+function insertPackageRegistryAudit(
+  database: WebSandboxSqliteDatabase,
+  input: {
+    readonly id?: string;
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly sessionId: string;
+    readonly ecosystem: string;
+    readonly registryHost: string;
+    readonly packageName: string;
+    readonly requestedVersion: string | null;
+    readonly resolvedVersion: string | null;
+    readonly decision: PackageRegistryAuditDecision;
+    readonly reason: string;
+    readonly metadata: Readonly<Record<string, unknown>>;
+  },
+): PackageRegistryAuditRecord {
+  const id = input.id ?? createId("pkg_audit");
+  database
+    .query(
+      `INSERT INTO package_registry_audits
+       (id, project_id, task_id, session_id, ecosystem, registry_host, package_name, requested_version, resolved_version, decision, reason, metadata_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      id,
+      input.projectId,
+      input.taskId,
+      input.sessionId,
+      input.ecosystem,
+      input.registryHost,
+      input.packageName,
+      input.requestedVersion,
+      input.resolvedVersion,
+      input.decision,
+      input.reason,
+      JSON.stringify(input.metadata),
+    );
+
+  const row = database
+    .query<
+      {
+        id: string;
+        project_id: string;
+        task_id: string;
+        session_id: string;
+        ecosystem: string;
+        registry_host: string;
+        package_name: string;
+        requested_version: string | null;
+        resolved_version: string | null;
+        decision: PackageRegistryAuditDecision;
+        reason: string;
+        metadata_json: string;
+        created_at: string;
+      },
+      [string]
+    >(
+      `SELECT id, project_id, task_id, session_id, ecosystem, registry_host, package_name, requested_version,
+              resolved_version, decision, reason, metadata_json, created_at
+       FROM package_registry_audits
+       WHERE id = ?`,
+    )
+    .get(id);
+  if (!row) throw new Error(`package registry audit disappeared: ${id}`);
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    taskId: row.task_id,
+    sessionId: row.session_id,
+    ecosystem: row.ecosystem,
+    registryHost: row.registry_host,
+    packageName: row.package_name,
+    requestedVersion: row.requested_version,
+    resolvedVersion: row.resolved_version,
+    decision: row.decision,
+    reason: row.reason,
+    metadata: parseJsonObject(row.metadata_json),
+    createdAt: row.created_at,
   };
 }
 
@@ -4147,6 +4368,7 @@ function sanitizeTaskRuntimeSource(input: TaskRuntimeSourceMetadata | null | und
   const taskBranchPrefix = input.taskBranchPrefix.trim();
   const commandProfile = input.commandProfile?.trim() || null;
   const allowedEgressDomains = sanitizeEgressDomains(input.allowedEgressDomains);
+  const allowedPackageScopes = sanitizePackageScopes(input.allowedPackageScopes);
 
   if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(repositoryUrl)) {
     throw new Error("task runtime source repositoryUrl must be an https GitHub repository URL");
@@ -4166,6 +4388,7 @@ function sanitizeTaskRuntimeSource(input: TaskRuntimeSourceMetadata | null | und
     baseRef,
     taskBranchPrefix,
     ...(allowedEgressDomains.length > 0 ? { allowedEgressDomains } : {}),
+    ...(allowedPackageScopes.length > 0 ? { allowedPackageScopes } : {}),
     ...(commandProfile ? { commandProfile } : {}),
   };
   const serialized = JSON.stringify(source);
@@ -4174,6 +4397,156 @@ function sanitizeTaskRuntimeSource(input: TaskRuntimeSourceMetadata | null | und
   }
 
   return source;
+}
+
+function sanitizePackageScopes(input: readonly string[] | undefined): readonly string[] {
+  if (!input) return [];
+  if (!Array.isArray(input)) {
+    throw new Error("task runtime source allowedPackageScopes must be an array");
+  }
+  return [
+    ...new Set(
+      input.map((value) => {
+        const scope = value.trim().toLowerCase();
+        if (
+          !scope ||
+          scope.includes("..") ||
+          scope.includes("\\") ||
+          scope.includes("://") ||
+          scope.startsWith("-") ||
+          !/^(?:\*|@[a-z0-9_.-]+\/\*|@[a-z0-9_.-]+\/[a-z0-9_.-]+|[a-z0-9_.-]+(?:\/\*)?)$/.test(scope)
+        ) {
+          throw new Error("task runtime source allowedPackageScopes contains an invalid package scope");
+        }
+        return scope;
+      }),
+    ),
+  ];
+}
+
+function normalizePackageRegistryInput(input: {
+  readonly registryHost: string;
+  readonly packageName: string;
+  readonly ecosystem?: string | null;
+  readonly requestedVersion?: string | null;
+  readonly resolvedVersion?: string | null;
+}):
+  | {
+      readonly ok: true;
+      readonly registryHost: string;
+      readonly packageName: string;
+      readonly ecosystem: string;
+      readonly requestedVersion: string | null;
+      readonly resolvedVersion: string | null;
+    }
+  | { readonly ok: false; readonly error: { readonly code: "validation_error"; readonly message: string } } {
+  let registryHost: string;
+  try {
+    registryHost = normalizeDomainValue(input.registryHost);
+  } catch (error) {
+    return { ok: false, error: { code: "validation_error", message: errorMessage(error) } };
+  }
+  const packageName = input.packageName.trim().toLowerCase();
+  const ecosystem = input.ecosystem?.trim().toLowerCase() || "npm";
+  if (!/^[a-z0-9_.-]+$/.test(ecosystem)) {
+    return { ok: false, error: { code: "validation_error", message: "package ecosystem is invalid" } };
+  }
+  if (!isValidPackageName(packageName)) {
+    return { ok: false, error: { code: "validation_error", message: "package name is invalid" } };
+  }
+  let requestedVersion: string | null;
+  let resolvedVersion: string | null;
+  try {
+    requestedVersion = normalizeOptionalPackageText(input.requestedVersion);
+    resolvedVersion = normalizeOptionalPackageText(input.resolvedVersion);
+  } catch (error) {
+    return { ok: false, error: { code: "validation_error", message: errorMessage(error) } };
+  }
+  return {
+    ok: true,
+    registryHost,
+    packageName,
+    ecosystem,
+    requestedVersion,
+    resolvedVersion,
+  };
+}
+
+function normalizeDomainValue(value: string): string {
+  const domain = value.trim().toLowerCase().replace(/\.$/, "");
+  if (!domain || domain.includes("/") || domain.includes(":") || domain.includes("*") || domain.startsWith(".") || domain.endsWith(".")) {
+    throw new Error("registry host is invalid");
+  }
+  if (!/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/.test(domain) || !domain.includes(".")) {
+    throw new Error("registry host is invalid");
+  }
+  return domain;
+}
+
+function normalizeAuditReason(value: string): string {
+  const reason = value.trim().toLowerCase().replace(/[^a-z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "");
+  return reason || "unknown";
+}
+
+function normalizeOptionalPackageText(value: string | null | undefined): string | null {
+  const text = value?.trim() ?? "";
+  if (!text) return null;
+  if (text.length > 200 || /token|secret|password|github_pat_|ghp_/i.test(text)) {
+    throw new Error("package version metadata is invalid");
+  }
+  return text;
+}
+
+function isValidPackageName(value: string): boolean {
+  return /^(?:@[a-z0-9_.-]+\/[a-z0-9_.-]+|[a-z0-9_.-]+)$/.test(value) && !value.includes("..");
+}
+
+function isPackageAllowedByScope(packageName: string, scopes: readonly string[]): boolean {
+  if (scopes.length === 0) return false;
+  return scopes.some((scope) => {
+    if (scope === "*") return true;
+    if (scope.endsWith("/*")) {
+      const prefix = scope.slice(0, -1);
+      return packageName.startsWith(prefix);
+    }
+    return packageName === scope;
+  });
+}
+
+function sanitizeMetadata(value: Readonly<Record<string, unknown>> | undefined): Readonly<Record<string, unknown>> {
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value ?? {})) {
+    if (/token|secret|password|key|proxy/i.test(key)) {
+      output[key] = "[REDACTED]";
+    } else if (typeof item === "string") {
+      output[key] = /token|secret|password|github_pat_|ghp_/i.test(item) ? "[REDACTED]" : item.slice(0, 500);
+    } else if (typeof item === "number" || typeof item === "boolean" || item === null) {
+      output[key] = item;
+    }
+  }
+  return output;
+}
+
+function readPackageRegistrySessionScope(
+  database: WebSandboxSqliteDatabase,
+  projectId: string,
+  sessionId: string,
+): { readonly taskId: string; readonly runtimeSource: TaskRuntimeSourceMetadata } | null {
+  const row = database
+    .query<{ task_id: string; runtime_source_json: string | null }, [string, string]>(
+      `SELECT s.task_id, t.runtime_source_json
+       FROM sessions s
+       JOIN tasks t ON t.project_id = s.project_id AND t.id = s.task_id
+       WHERE s.project_id = ? AND s.id = ?`,
+    )
+    .get(projectId, sessionId);
+  if (!row?.runtime_source_json) return null;
+  const runtimeSource = readRuntimeSourceJson(row.runtime_source_json);
+  return runtimeSource ? { taskId: row.task_id, runtimeSource } : null;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function sanitizeEgressDomains(input: readonly string[] | undefined): readonly string[] {

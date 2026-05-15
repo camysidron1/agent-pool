@@ -230,6 +230,12 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
   app.post("/internal/egress/report", requireInternalServiceToken, (request, response) => {
     respondWithEgressReport(response, { database, services }, request);
   });
+  app.post("/internal/packages/authorize", requireInternalServiceToken, (request, response) => {
+    respondWithPackageRegistryAuthorization(response, { database, services, config }, request);
+  });
+  app.post("/internal/packages/report", requireInternalServiceToken, (request, response) => {
+    respondWithPackageRegistryReport(response, { database, services }, request);
+  });
   app.post("/internal/orchestrator/reconcile", requireInternalServiceToken, (request, response) => {
     respondWithReconcile(response, services, request);
   });
@@ -677,6 +683,132 @@ function respondWithEgressReport(
     return;
   }
   response.status(200).json({ ok: true, output: result.output, event: result.event, outbox: result.outbox });
+}
+
+function respondWithPackageRegistryAuthorization(
+  response: Response,
+  options: {
+    readonly database?: ApiDatabaseConnection;
+    readonly services: ApiBackendServices | null;
+    readonly config: AppConfig;
+  },
+  request: Request,
+): void {
+  if (!options.database || !options.services) {
+    response.status(503).json({ ok: false, error: "database_unavailable" });
+    return;
+  }
+
+  const body = parseObjectBody(request.body);
+  const projectId = readOptionalString(body.projectId);
+  const sessionId = readOptionalString(body.sessionId);
+  const proxyToken = readOptionalString(body.proxyToken);
+  const registryHost = normalizeHost(readOptionalString(body.registryHost) ?? readOptionalString(body.host));
+  const packageName = readOptionalString(body.packageName);
+  if (!projectId || !sessionId || !proxyToken || !registryHost || !packageName) {
+    response.status(400).json({ ok: false, error: "invalid_package_authorization_request" });
+    return;
+  }
+
+  const runtimeSource = readSessionRuntimeSource(options.database, projectId, sessionId);
+  if (!runtimeSource) {
+    response.status(404).json({ ok: false, error: "session_runtime_source_not_found" });
+    return;
+  }
+  if (proxyToken !== runtimeSource.sessionToken) {
+    response.status(403).json({ ok: false, allowed: false, reason: "invalid_proxy_token" });
+    return;
+  }
+
+  const result = options.services.authorizePackageRegistryAccess({
+    projectId,
+    sessionId,
+    registryHost,
+    packageName,
+    ecosystem: readOptionalString(body.ecosystem),
+    requestedVersion: readOptionalString(body.requestedVersion),
+    resolvedVersion: readOptionalString(body.resolvedVersion),
+    globalAllowedRegistryHosts: options.config.controlPlane.e2b.allowedEgressDomains,
+    metadata: readOptionalObject(body.metadata),
+  });
+  if (!result.ok) {
+    response.status(result.error.code === "not_found" ? 404 : 400).json({ ok: false, error: result.error });
+    return;
+  }
+  const output = recordPackageRegistrySecurityOutput(options.database, options.services, {
+    projectId,
+    taskId: result.audit.taskId,
+    sessionId,
+    audit: result.audit,
+  });
+  response.status(200).json({
+    ok: true,
+    allowed: result.allowed,
+    reason: result.reason,
+    audit: result.audit,
+    ...(output ? { output: output.output, event: output.event, outbox: output.outbox } : {}),
+  });
+}
+
+function respondWithPackageRegistryReport(
+  response: Response,
+  options: {
+    readonly database?: ApiDatabaseConnection;
+    readonly services: ApiBackendServices | null;
+  },
+  request: Request,
+): void {
+  if (!options.database || !options.services) {
+    response.status(503).json({ ok: false, error: "database_unavailable" });
+    return;
+  }
+
+  const body = parseObjectBody(request.body);
+  const projectId = readOptionalString(body.projectId);
+  const sessionId = readOptionalString(body.sessionId);
+  const proxyToken = readOptionalString(body.proxyToken);
+  const registryHost = normalizeHost(readOptionalString(body.registryHost) ?? readOptionalString(body.host));
+  const packageName = readOptionalString(body.packageName);
+  const decision = readPackageRegistryDecision(body.decision);
+  const reason = readOptionalString(body.reason) ?? (decision === "failed" ? "resolution_failed" : "reported");
+  if (!projectId || !sessionId || !proxyToken || !registryHost || !packageName || !decision) {
+    response.status(400).json({ ok: false, error: "invalid_package_report_request" });
+    return;
+  }
+
+  const runtimeSource = readSessionRuntimeSource(options.database, projectId, sessionId);
+  if (!runtimeSource) {
+    response.status(404).json({ ok: false, error: "session_runtime_source_not_found" });
+    return;
+  }
+  if (proxyToken !== runtimeSource.sessionToken) {
+    response.status(403).json({ ok: false, error: "invalid_proxy_token" });
+    return;
+  }
+
+  const result = options.services.recordPackageRegistryAudit({
+    projectId,
+    sessionId,
+    registryHost,
+    packageName,
+    ecosystem: readOptionalString(body.ecosystem),
+    requestedVersion: readOptionalString(body.requestedVersion),
+    resolvedVersion: readOptionalString(body.resolvedVersion),
+    decision,
+    reason,
+    metadata: readOptionalObject(body.metadata),
+  });
+  if (!result.ok) {
+    response.status(result.error.code === "not_found" ? 404 : 400).json({ ok: false, error: result.error });
+    return;
+  }
+  const output = recordPackageRegistrySecurityOutput(options.database, options.services, {
+    projectId,
+    taskId: result.audit.taskId,
+    sessionId,
+    audit: result.audit,
+  });
+  response.status(200).json({ ok: true, audit: result.audit, ...(output ? { output: output.output, event: output.event, outbox: output.outbox } : {}) });
 }
 
 function respondWithReconcile(
@@ -1306,6 +1438,10 @@ function readBridgeOutputStream(value: unknown): "stdout" | "stderr" | "combined
   return value === "stdout" || value === "stderr" || value === "combined" || value === "system" ? value : undefined;
 }
 
+function readPackageRegistryDecision(value: unknown): "allowed" | "denied" | "failed" | undefined {
+  return value === "allowed" || value === "denied" || value === "failed" ? value : undefined;
+}
+
 function readInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isInteger(value) ? value : undefined;
 }
@@ -1348,6 +1484,58 @@ function readSessionRuntimeSource(
   } catch {
     return null;
   }
+}
+
+function recordPackageRegistrySecurityOutput(
+  database: ApiDatabaseConnection,
+  services: ApiBackendServices,
+  input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly sessionId: string;
+    readonly audit: {
+      readonly ecosystem: string;
+      readonly registryHost: string;
+      readonly packageName: string;
+      readonly requestedVersion: string | null;
+      readonly resolvedVersion: string | null;
+      readonly decision: "allowed" | "denied" | "failed";
+      readonly reason: string;
+    };
+  },
+):
+  | {
+      readonly output: unknown;
+      readonly event: unknown;
+      readonly outbox: unknown;
+    }
+  | null {
+  const stream = "system" as const;
+  const sequence = nextOutputSequence(database, input.projectId, input.taskId, input.sessionId, stream);
+  const byteOffset = currentLogByteOffset(database, input.projectId, input.taskId, input.sessionId, stream);
+  const text = `${JSON.stringify({
+    type: "security.package",
+    securityKind: "package-registry",
+    ecosystem: input.audit.ecosystem,
+    registryHost: input.audit.registryHost,
+    packageName: input.audit.packageName,
+    requestedVersion: input.audit.requestedVersion,
+    resolvedVersion: input.audit.resolvedVersion,
+    decision: input.audit.decision,
+    allowed: input.audit.decision === "allowed",
+    reason: input.audit.reason,
+  })}\n`;
+  const result = services.recordSessionOutput({
+    projectId: input.projectId,
+    taskId: input.taskId,
+    sessionId: input.sessionId,
+    stream,
+    sequence,
+    byteOffset,
+    text,
+    observedAt: new Date().toISOString(),
+  });
+  return result.ok ? { output: result.output, event: result.event, outbox: result.outbox } : null;
 }
 
 function nextOutputSequence(
