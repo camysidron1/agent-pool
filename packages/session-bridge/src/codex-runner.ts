@@ -15,6 +15,7 @@ import {
   createCodexCommandSupervisor,
   type CodexCommandSupervisorDecision,
 } from "./command-supervisor";
+import { inspectUntrustedRepositoryContext, type UntrustedContextFinding } from "./untrusted-context";
 
 export type CodexRunnerEnvironment = Readonly<Record<string, string | undefined>>;
 
@@ -97,6 +98,11 @@ export async function runCodexBridgeSession(options: CodexBridgeSessionOptions):
   await mkdir(dirname(config.finalResponsePath), { recursive: true });
   await mkdir(config.codexHome, { recursive: true });
 
+  const untrustedContext = await inspectUntrustedRepositoryContext({
+    workspaceRoot: options.workspaceRoot,
+    commandProfile: config.commandProfile,
+    allowedEgressDomains: config.allowedEgressDomains,
+  });
   const prompt = createCodexPrompt({
     taskTitle: config.taskTitle,
     taskDescription: config.taskDescription ?? undefined,
@@ -106,6 +112,7 @@ export async function runCodexBridgeSession(options: CodexBridgeSessionOptions):
     branchName: config.branchName ?? undefined,
     commandProfile: config.commandProfile,
     allowedEgressDomains: config.allowedEgressDomains,
+    untrustedContextSummaries: untrustedContext.promptSummaries,
   });
   await writeCodexPolicyFiles(config);
   const commandSupervisor = createCodexCommandSupervisor({
@@ -119,6 +126,7 @@ export async function runCodexBridgeSession(options: CodexBridgeSessionOptions):
         stream: "system",
         text: `codex runner starting with command profile ${config.commandProfile}`,
       },
+      ...untrustedContext.findings.map((finding) => securityOutput("untrusted-context", untrustedContextMetadata(finding, config))),
     ],
   });
 
@@ -624,6 +632,21 @@ function commandDecisionMetadata(
     policy: decision.policy,
     allowed: decision.kind === "allowed",
     ...(decision.kind === "denied" ? { reason: decision.reason } : {}),
+  };
+}
+
+function untrustedContextMetadata(
+  finding: UntrustedContextFinding,
+  config: Pick<CodexRunnerConfig, "commandProfile" | "allowedEgressDomains">,
+): Readonly<Record<string, unknown>> {
+  return {
+    source: finding.source,
+    contextKind: finding.kind,
+    allowed: finding.allowed,
+    reason: finding.reasons.join(","),
+    summary: finding.summary,
+    policy: config.commandProfile,
+    allowedEgressDomains: config.allowedEgressDomains,
   };
 }
 
