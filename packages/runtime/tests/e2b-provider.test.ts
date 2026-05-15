@@ -170,6 +170,7 @@ describe("E2B runtime provider", () => {
     ]);
     expect(events.find((event) => event.event === "runtime.command.started")).toMatchObject({
       provider: "e2b",
+      stage: "bootstrap-clone",
       projectId: "project_a",
       taskId: "task_1",
       sessionId: "session_1",
@@ -183,6 +184,7 @@ describe("E2B runtime provider", () => {
     });
     expect(events.find((event) => event.event === "runtime.sandbox.cleanup.succeeded")).toMatchObject({
       provider: "e2b",
+      stage: "cleanup",
       sessionId: "session_1",
       sandboxId: "sandbox_1",
     });

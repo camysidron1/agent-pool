@@ -19,6 +19,7 @@ export type RuntimeLifecycleLogLevel = "debug" | "info" | "warn" | "error";
 export type RuntimeLifecycleLogEvent = {
   readonly level?: RuntimeLifecycleLogLevel;
   readonly event: string;
+  readonly stage?: string;
   readonly provider: RuntimeProviderKind | string;
   readonly projectId?: string;
   readonly taskId?: string;
@@ -1331,6 +1332,7 @@ async function startE2BSession(
     emitRuntimeLog(options.logger, {
       ...logBase,
       event: "runtime.sandbox.starting",
+      stage: "sandbox-create",
     });
     const bridgeStartup = buildSandboxBridgeStartupPlan(launchSpec);
     const bootstrapPlan = buildGitHubBootstrapPlan({
@@ -1353,6 +1355,7 @@ async function startE2BSession(
     emitRuntimeLog(options.logger, {
       ...logBase,
       event: "runtime.sandbox.created",
+      stage: "sandbox-create",
       sandboxId,
     });
 
@@ -1374,6 +1377,7 @@ async function startE2BSession(
     emitRuntimeLog(options.logger, {
       ...logBase,
       event: "runtime.sandbox.started",
+      stage: "sandbox-create",
       sandboxId,
     });
 
@@ -1401,6 +1405,7 @@ async function startE2BSession(
       const cleanupSandboxId = sandboxId;
       emitRuntimeLog(options.logger, {
         event: "runtime.sandbox.cleanup.started",
+        stage: "cleanup",
         provider: "e2b",
         projectId: request.projectId,
         taskId: request.taskId,
@@ -1413,6 +1418,7 @@ async function startE2BSession(
         .then(() => {
           emitRuntimeLog(options.logger, {
             event: "runtime.sandbox.cleanup.succeeded",
+            stage: "cleanup",
             provider: "e2b",
             projectId: request.projectId,
             taskId: request.taskId,
@@ -1425,6 +1431,7 @@ async function startE2BSession(
           emitRuntimeLog(options.logger, {
             level: "error",
             event: "runtime.sandbox.cleanup.failed",
+            stage: "cleanup",
             provider: "e2b",
             projectId: request.projectId,
             taskId: request.taskId,
@@ -1438,6 +1445,7 @@ async function startE2BSession(
     emitRuntimeLog(options.logger, {
       level: "error",
       event: "runtime.sandbox.start_failed",
+      stage: sandboxId ? "bootstrap-clone" : "sandbox-create",
       provider: "e2b",
       projectId: request.projectId,
       taskId: request.taskId,
@@ -1476,6 +1484,7 @@ async function stopE2BSession(
   if (stoppedSandboxIds.has(sandboxId)) {
     emitRuntimeLog(options.logger, {
       event: "runtime.sandbox.cleanup.skipped",
+      stage: "cleanup",
       provider: "e2b",
       projectId: handle.projectId,
       taskId: handle.taskId,
@@ -1489,6 +1498,7 @@ async function stopE2BSession(
   try {
     emitRuntimeLog(options.logger, {
       event: "runtime.sandbox.cleanup.started",
+      stage: "cleanup",
       provider: "e2b",
       projectId: handle.projectId,
       taskId: handle.taskId,
@@ -1499,6 +1509,7 @@ async function stopE2BSession(
     stoppedSandboxIds.add(sandboxId);
     emitRuntimeLog(options.logger, {
       event: "runtime.sandbox.cleanup.succeeded",
+      stage: "cleanup",
       provider: "e2b",
       projectId: handle.projectId,
       taskId: handle.taskId,
@@ -1509,6 +1520,7 @@ async function stopE2BSession(
     emitRuntimeLog(options.logger, {
       level: "error",
       event: "runtime.sandbox.cleanup.failed",
+      stage: "cleanup",
       provider: "e2b",
       projectId: handle.projectId,
       taskId: handle.taskId,
@@ -1537,6 +1549,7 @@ async function createE2BSnapshot(
   try {
     emitRuntimeLog(options.logger, {
       event: "runtime.snapshot.create.started",
+      stage: "snapshot",
       provider: "e2b",
       projectId: handle.projectId,
       taskId: handle.taskId,
@@ -1546,6 +1559,7 @@ async function createE2BSnapshot(
     const snapshot = await client.createSnapshot(sandboxId, { timeoutMs: config.cleanupTimeoutMs ?? 30_000 });
     emitRuntimeLog(options.logger, {
       event: "runtime.snapshot.create.succeeded",
+      stage: "snapshot",
       provider: "e2b",
       projectId: handle.projectId,
       taskId: handle.taskId,
@@ -1565,6 +1579,7 @@ async function createE2BSnapshot(
     emitRuntimeLog(options.logger, {
       level: "error",
       event: "runtime.snapshot.create.failed",
+      stage: "snapshot",
       provider: "e2b",
       projectId: handle.projectId,
       taskId: handle.taskId,
@@ -1588,12 +1603,14 @@ async function deleteE2BSnapshot(snapshot: RuntimeSnapshotHandle, options: E2BRu
   try {
     emitRuntimeLog(options.logger, {
       event: "runtime.snapshot.delete.started",
+      stage: "snapshot",
       provider: "e2b",
       snapshotId: snapshot.snapshotId,
     });
     await client.deleteSnapshot(snapshot.snapshotId, { timeoutMs: config.cleanupTimeoutMs ?? 30_000 });
     emitRuntimeLog(options.logger, {
       event: "runtime.snapshot.delete.succeeded",
+      stage: "snapshot",
       provider: "e2b",
       snapshotId: snapshot.snapshotId,
     });
@@ -1601,6 +1618,7 @@ async function deleteE2BSnapshot(snapshot: RuntimeSnapshotHandle, options: E2BRu
     emitRuntimeLog(options.logger, {
       level: "error",
       event: "runtime.snapshot.delete.failed",
+      stage: "snapshot",
       provider: "e2b",
       snapshotId: snapshot.snapshotId,
       errorMessage: redactSecretValues(errorMessage(error), collectOptionSecretValues(options)),
@@ -1623,10 +1641,11 @@ async function runE2BCommand(
 ): Promise<void> {
   const base = log?.base;
   if (base) {
-    emitRuntimeLog(log?.logger, {
-      ...base,
-      event: "runtime.command.started",
-      sandboxId,
+      emitRuntimeLog(log?.logger, {
+        ...base,
+        event: "runtime.command.started",
+        stage: runtimeStageForCommandLabel(label),
+        sandboxId,
       commandLabel: label,
       command: redactCommand(command, log.secretValues),
     });
@@ -1640,6 +1659,7 @@ async function runE2BCommand(
         ...base,
         level: "error",
         event: "runtime.command.failed",
+        stage: runtimeStageForCommandLabel(label),
         sandboxId,
         commandLabel: label,
         command: redactCommand(command, log.secretValues),
@@ -1653,6 +1673,7 @@ async function runE2BCommand(
       emitRuntimeLog(log?.logger, {
         ...base,
         event: "runtime.command.succeeded",
+        stage: runtimeStageForCommandLabel(label),
         sandboxId,
         commandLabel: label,
         exitCode: typeof result.exitCode === "number" ? result.exitCode : 0,
@@ -1668,6 +1689,7 @@ async function runE2BCommand(
       ...base,
       level: "error",
       event: "runtime.command.failed",
+      stage: runtimeStageForCommandLabel(label),
       sandboxId,
       commandLabel: label,
       command: redactCommand(command, log.secretValues),
@@ -1676,6 +1698,10 @@ async function runE2BCommand(
     });
   }
   throw new Error(`e2b command failed (${label}, exit ${exitCode}): ${output}`);
+}
+
+function runtimeStageForCommandLabel(label: string): "bootstrap-clone" | "codex" {
+  return label === "start bridge" ? "codex" : "bootstrap-clone";
 }
 
 function readRuntimeTaskSource(task: Readonly<Record<string, unknown>> | undefined): RuntimeTaskSourceMetadata | null {

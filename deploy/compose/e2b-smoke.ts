@@ -113,6 +113,18 @@ export type E2BCallbackReachabilityResult = {
   readonly nextAction: string | null;
 };
 
+export type E2BSmokeDiagnosticStage =
+  | "readiness"
+  | "seed"
+  | "claim"
+  | "sandbox-create"
+  | "bootstrap-clone"
+  | "install"
+  | "codex"
+  | "pr"
+  | "cleanup"
+  | "snapshot";
+
 export type E2BReadinessReport = {
   readonly ok: true;
   readonly kind: "e2b-readiness";
@@ -168,6 +180,18 @@ const MALICIOUS_FIXTURE_IDS = [
   "metadata-instruction-injection",
   "credential-persistence",
 ] as const;
+
+class E2BSmokeStageError extends Error {
+  readonly stage: E2BSmokeDiagnosticStage;
+  readonly diagnostics: unknown;
+
+  constructor(stage: E2BSmokeDiagnosticStage, message: string, diagnostics?: unknown) {
+    super(message);
+    this.name = "E2BSmokeStageError";
+    this.stage = stage;
+    this.diagnostics = diagnostics ?? null;
+  }
+}
 
 export function createE2BSmokePlan(input: Partial<ParsedE2BSmokeArgs> & { readonly env?: EnvSource } = {}): E2BSmokePlan {
   const env = input.env ?? readProcessEnv();
@@ -642,8 +666,12 @@ export async function runE2BSmokeCli(args: readonly string[] = process.argv.slic
           `${JSON.stringify(
             {
               ok: false,
-              stage: "github-app-verification",
+              stage: "readiness",
               error: readVerificationError(githubApp),
+              diagnostics: {
+                failedStage: "readiness",
+                detail: "GitHub App installation or repository permissions are not ready for Codex E2B smoke.",
+              },
               githubApp,
             },
             null,
@@ -655,10 +683,22 @@ export async function runE2BSmokeCli(args: readonly string[] = process.argv.slic
     }
     const seed = await seedE2BSmokeFixture(plan, serviceToken, fetchImpl);
     const status = await waitForE2BSmokeCompletion(plan, serviceToken, fetchImpl, options);
-    write(`${JSON.stringify({ ok: true, seed, status }, null, 2)}\n`);
+    write(`${JSON.stringify({ ok: true, stage: "complete", seed, status, diagnostics: readSmokeStatusDiagnostics(status) }, null, 2)}\n`);
     return 0;
   } catch (error) {
-    write(`${JSON.stringify({ ok: false, error: errorMessage(error) }, null, 2)}\n`);
+    const stageError = error instanceof E2BSmokeStageError ? error : null;
+    write(
+      `${JSON.stringify(
+        {
+          ok: false,
+          stage: stageError?.stage ?? "readiness",
+          error: errorMessage(error),
+          diagnostics: stageError?.diagnostics ?? null,
+        },
+        null,
+        2,
+      )}\n`,
+    );
     return 1;
   }
 }
@@ -870,7 +910,7 @@ async function seedE2BSmokeFixture(plan: E2BSmokePlan, serviceToken: string, fet
   });
   const body = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(`e2b smoke seed failed with HTTP ${response.status}`);
+    throw new E2BSmokeStageError("seed", `e2b smoke seed failed with HTTP ${response.status}`, readSmokeStatusDiagnostics(body));
   }
   return body;
 }
@@ -912,29 +952,73 @@ async function waitForE2BSmokeCompletion(
     });
     const body = await response.json().catch(() => null);
     if (!response.ok) {
-      throw new Error(`e2b smoke status failed with HTTP ${response.status}`);
+      throw new E2BSmokeStageError("claim", `e2b smoke status failed with HTTP ${response.status}`, readSmokeStatusDiagnostics(body));
     }
     if (isCompleteSmokeStatus(body)) return body;
     if (isFailedSmokeStatus(body)) {
-      throw new Error("e2b smoke task failed before completion");
+      const stage = readSmokeStatusStage(body) ?? "codex";
+      throw new E2BSmokeStageError(stage, `e2b smoke task failed during ${stage}`, readSmokeStatusDiagnostics(body));
     }
     await sleep(250);
   }
 
-  throw new Error(`e2b smoke timed out after ${plan.timeoutMs}ms`);
+  throw new E2BSmokeStageError("claim", `e2b smoke timed out after ${plan.timeoutMs}ms`);
 }
 
 function isCompleteSmokeStatus(body: unknown): boolean {
   const record = readRecord(body);
-  return Boolean(
+  const baseComplete = Boolean(
     readRecord(record?.finalResponse)?.recorded &&
       readRecord(record?.completion)?.completed &&
       readRecord(record?.cleanup)?.completed,
   );
+  if (!baseComplete) return false;
+  const diagnostics = readRecord(record?.diagnostics);
+  if (!diagnostics) return true;
+  if (readSmokeStatusStage(record)) return false;
+  const stages = Array.isArray(diagnostics.stages) ? diagnostics.stages : [];
+  const snapshot = stages.map(readRecord).find((stage) => stage?.id === "snapshot");
+  return !snapshot || snapshot.status === "passed";
 }
 
 function isFailedSmokeStatus(body: unknown): boolean {
-  return Boolean(readRecord(readRecord(body)?.failure)?.failed);
+  return Boolean(readRecord(readRecord(body)?.failure)?.failed || readSmokeStatusStage(body));
+}
+
+function readSmokeStatusDiagnostics(body: unknown): unknown {
+  return readRecord(readRecord(body)?.diagnostics) ?? null;
+}
+
+function readSmokeStatusStage(body: unknown): E2BSmokeDiagnosticStage | null {
+  const diagnostics = readRecord(readRecord(body)?.diagnostics);
+  if (!diagnostics) return null;
+  const failedStage = readDiagnosticStage(diagnostics.failedStage);
+  if (failedStage) return failedStage;
+  const stages = Array.isArray(diagnostics.stages) ? diagnostics.stages : [];
+  const failed = stages
+    .map(readRecord)
+    .find((stage) => stage && (stage.status === "failed" || stage.status === "risk"));
+  return readDiagnosticStage(failed?.id);
+}
+
+function readDiagnosticStage(value: unknown): E2BSmokeDiagnosticStage | null {
+  if (typeof value !== "string") return null;
+  return isE2BSmokeDiagnosticStage(value) ? value : null;
+}
+
+function isE2BSmokeDiagnosticStage(value: string): value is E2BSmokeDiagnosticStage {
+  return [
+    "readiness",
+    "seed",
+    "claim",
+    "sandbox-create",
+    "bootstrap-clone",
+    "install",
+    "codex",
+    "pr",
+    "cleanup",
+    "snapshot",
+  ].includes(value);
 }
 
 function isSuccessfulVerification(body: unknown): boolean {

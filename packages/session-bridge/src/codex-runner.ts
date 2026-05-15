@@ -126,6 +126,7 @@ export async function runCodexBridgeSession(options: CodexBridgeSessionOptions):
         stream: "system",
         text: `codex runner starting with command profile ${config.commandProfile}`,
       },
+      securityOutput("codex-started", { allowed: true, policy: config.commandProfile }),
       ...untrustedContext.findings.map((finding) => securityOutput("untrusted-context", untrustedContextMetadata(finding, config))),
     ],
   });
@@ -718,8 +719,16 @@ function isLockfilePath(path: string): boolean {
 function securityOutput(securityKind: string, metadata: Readonly<Record<string, unknown>>): BridgeRunnerOutputInput {
   return {
     stream: "system",
-    text: `${JSON.stringify({ type: "security", securityKind, ...redactMetadata(metadata) })}\n`,
+    text: `${JSON.stringify({ type: "security", securityKind, stage: securityStageForKind(securityKind), ...redactMetadata(metadata) })}\n`,
   };
+}
+
+function securityStageForKind(securityKind: string): "readiness" | "install" | "codex" | "pr" | "cleanup" {
+  if (securityKind === "untrusted-context") return "readiness";
+  if (securityKind === "package-registry" || securityKind === "package-install" || securityKind.startsWith("dependency-install")) return "install";
+  if (securityKind === "postflight") return "pr";
+  if (securityKind.startsWith("credentials-scrub")) return "cleanup";
+  return "codex";
 }
 
 function redactMetadata(metadata: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {

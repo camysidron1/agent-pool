@@ -1619,6 +1619,25 @@ describe("API service skeleton", () => {
         }),
       ).resolves.toMatchObject({ status: 200 });
       await expect(
+        postBridgeCallback(baseUrl, "output", callbackHeaders, {
+          kind: "output",
+          projectId: "compose-smoke",
+          taskId: "compose-smoke-task-1",
+          sessionId: "session_smoke",
+          stream: "system",
+          sequence: 1,
+          byteOffset: 0,
+          text: `${JSON.stringify({
+            type: "security",
+            securityKind: "dependency-install-finished",
+            stage: "install",
+            allowed: true,
+            policy: "agent-pool-bun-pr",
+            command: "bun install --frozen-lockfile",
+          })}\n`,
+        }),
+      ).resolves.toMatchObject({ status: 200 });
+      await expect(
         postBridgeCallback(baseUrl, "document", callbackHeaders, {
           kind: "document",
           projectId: "compose-smoke",
@@ -1675,13 +1694,48 @@ describe("API service skeleton", () => {
           },
         },
         heartbeat: { fresh: 1, latestAt: "2026-05-12T12:00:00.000Z" },
-        output: { events: 1, totalLineCount: 1 },
+        output: { events: 2, totalLineCount: 2 },
         artifacts: { documents: 1, finalResponseUrls: 1 },
         finalResponse: { recorded: true, sessions: 1, artifacts: 1 },
         completion: { completed: true, events: 1 },
         failure: { failed: false, events: 0 },
         cleanup: { completed: true, events: 1 },
+        diagnostics: {
+          currentStage: "snapshot",
+          failedStage: null,
+          runtimeSandbox: {
+            provider: "fake",
+            providerSandboxId: "runtime_smoke",
+          },
+          securityEvents: [
+            {
+              securityKind: "dependency-install-finished",
+              count: 1,
+              allowed: 1,
+              denied: 0,
+              lastStage: "install",
+              lastCommand: "bun install --frozen-lockfile",
+            },
+          ],
+          logSnippets: expect.arrayContaining([
+            expect.objectContaining({ stream: "stdout", text: "smoke ok" }),
+            expect.objectContaining({ stream: "system", text: expect.stringContaining("dependency-install-finished") }),
+          ]),
+        },
       });
+      expect(statusBody.diagnostics.stages.map((stage: { id: string; status: string }) => [stage.id, stage.status])).toEqual([
+        ["readiness", "passed"],
+        ["seed", "passed"],
+        ["claim", "passed"],
+        ["sandbox-create", "passed"],
+        ["bootstrap-clone", "passed"],
+        ["install", "passed"],
+        ["codex", "passed"],
+        ["pr", "passed"],
+        ["cleanup", "passed"],
+        ["snapshot", "passed"],
+      ]);
+      expect(JSON.stringify(statusBody.diagnostics)).not.toContain("~/.agent-pool/data/agent-pool.db");
       expect(statusBody.outbox.total).toBeGreaterThan(1);
       expect(database.sqlite.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM tasks WHERE project_id = 'compose-smoke'").get()?.count).toBe(1);
     } finally {

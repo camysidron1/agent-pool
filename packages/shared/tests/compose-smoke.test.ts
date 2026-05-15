@@ -980,6 +980,68 @@ describe("compose smoke runner", () => {
     expect(JSON.stringify(payload)).not.toContain("service-secret");
   });
 
+  test("attributes opt-in E2B smoke failures to staged diagnostics", async () => {
+    const baseEnv: EnvSource = {
+      AUTH_MODE: "test",
+      E2B_API_KEY: "e2b-secret",
+      E2B_TEMPLATE_ID: "template-1",
+      E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN",
+      GITHUB_TOKEN: "github-secret",
+    };
+    const runFailure = async (stage: string, status = stage === "snapshot" ? "risk" : "failed") => {
+      const writes: string[] = [];
+      const code = await runE2BSmokeCli(["--api-url", "http://api.local", "--service-token", "service-secret", "--timeout-ms", "1000"], {
+        env: baseEnv,
+        write: (text) => writes.push(text),
+        fetch: async (input) => {
+          if (String(input).endsWith("/internal/smoke/seed")) {
+            return Response.json({ ok: true, projectId: "compose-smoke", taskId: "compose-smoke-task-1" });
+          }
+          return Response.json({
+            ok: true,
+            failure: { failed: true },
+            diagnostics: {
+              currentStage: stage,
+              failedStage: stage,
+              stages: [{ id: stage, status }],
+              logSnippets: [{ text: "redacted diagnostic" }],
+            },
+          });
+        },
+        sleep: async () => {},
+      });
+      return { code, payload: JSON.parse(writes.join("")) };
+    };
+
+    const seedWrites: string[] = [];
+    const seedCode = await runE2BSmokeCli(["--api-url", "http://api.local", "--service-token", "service-secret"], {
+      env: baseEnv,
+      write: (text) => seedWrites.push(text),
+      fetch: async () => Response.json({ ok: false, diagnostics: { failedStage: "seed" } }, { status: 500 }),
+    });
+    expect(seedCode).toBe(1);
+    expect(JSON.parse(seedWrites.join(""))).toMatchObject({
+      ok: false,
+      stage: "seed",
+      diagnostics: { failedStage: "seed" },
+    });
+
+    for (const stage of ["sandbox-create", "bootstrap-clone", "install", "codex", "pr", "cleanup", "snapshot"]) {
+      const result = await runFailure(stage);
+      expect(result).toMatchObject({
+        code: 1,
+        payload: {
+          ok: false,
+          stage,
+          diagnostics: {
+            failedStage: stage,
+            stages: [{ id: stage }],
+          },
+        },
+      });
+    }
+  });
+
   test("verifies GitHub App readiness before seeding Codex E2B smoke tasks", async () => {
     const writes: string[] = [];
     const requests: string[] = [];
@@ -1023,8 +1085,12 @@ describe("compose smoke runner", () => {
     expect(requests).toEqual(["http://api.local/internal/orchestrator/github-app/verify"]);
     expect(payload).toEqual({
       ok: false,
-      stage: "github-app-verification",
+      stage: "readiness",
       error: "github_app_permissions_insufficient",
+      diagnostics: {
+        failedStage: "readiness",
+        detail: "GitHub App installation or repository permissions are not ready for Codex E2B smoke.",
+      },
       githubApp: {
         ok: false,
         status: 403,

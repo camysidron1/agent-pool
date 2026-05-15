@@ -86,6 +86,8 @@ describe("Codex bridge runner", () => {
     expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("dependency-install-started");
     expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("dependency-install-finished");
     expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("package-install");
+    expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("codex-started");
+    expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain('"stage":"codex"');
     expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("command-policy");
     expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("credentials-scrub-started");
     expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("credentials-scrub-succeeded");
