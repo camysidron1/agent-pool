@@ -15,7 +15,11 @@ describe("Kubernetes secret apply helper", () => {
       env: {
         OPERATOR_PASSWORD: "operator-password-123",
         E2B_API_KEY: "e2b-secret-value",
+        CODEX_API_KEY: "codex-secret-value",
         GITHUB_TOKEN: "github-secret-value",
+        GITHUB_APP_ID: "12345",
+        GITHUB_APP_PRIVATE_KEY: "github-app-private-key",
+        GITHUB_APP_INSTALLATION_ID: "67890",
       },
       write: (text) => writes.push(text),
       randomSecret: (bytes) => `generated-${bytes}-${"x".repeat(bytes)}`,
@@ -28,10 +32,14 @@ describe("Kubernetes secret apply helper", () => {
     const output = writes.join("");
     expect(output).toContain('"ok": true');
     expect(output).toContain('"E2B_API_KEY"');
+    expect(output).toContain('"CODEX_API_KEY"');
     expect(output).toContain('"GITHUB_TOKEN"');
+    expect(output).toContain('"GITHUB_APP_PRIVATE_KEY"');
     expect(output).toContain('"source": "env"');
     expect(output).not.toContain("e2b-secret-value");
+    expect(output).not.toContain("codex-secret-value");
     expect(output).not.toContain("github-secret-value");
+    expect(output).not.toContain("github-app-private-key");
     expect(output).not.toContain("operator-password-123");
     expect(output).not.toContain("generated-48");
   });
@@ -47,6 +55,10 @@ describe("Kubernetes secret apply helper", () => {
         RABBITMQ_DEFAULT_PASS: b64("existing-rabbitmq-password"),
         MINIO_ROOT_PASSWORD: b64("existing-minio-password"),
         E2B_API_KEY: b64("existing-e2b-key"),
+        CODEX_API_KEY: b64("existing-codex-key"),
+        GITHUB_APP_ID: b64("existing-github-app-id"),
+        GITHUB_APP_PRIVATE_KEY: b64("existing-github-app-private-key"),
+        GITHUB_APP_INSTALLATION_ID: b64("existing-github-app-installation-id"),
       },
     };
 
@@ -72,7 +84,9 @@ describe("Kubernetes secret apply helper", () => {
     const manifest = JSON.parse(appliedManifests[0]) as { readonly stringData: Record<string, string> };
     expect(manifest.stringData.INTERNAL_SERVICE_TOKEN).toBe("existing-service-token");
     expect(manifest.stringData.E2B_API_KEY).toBe("existing-e2b-key");
+    expect(manifest.stringData.CODEX_API_KEY).toBe("existing-codex-key");
     expect(manifest.stringData.GITHUB_TOKEN).toBe("new-github-token");
+    expect(manifest.stringData.GITHUB_APP_PRIVATE_KEY).toBe("existing-github-app-private-key");
     expect(manifest.stringData.RABBITMQ_URL).toContain("existing-rabbitmq-password");
 
     const output = writes.join("");
@@ -81,7 +95,9 @@ describe("Kubernetes secret apply helper", () => {
     expect(output).toContain('"source": "env"');
     expect(output).not.toContain("existing-service-token");
     expect(output).not.toContain("existing-e2b-key");
+    expect(output).not.toContain("existing-codex-key");
     expect(output).not.toContain("new-github-token");
+    expect(output).not.toContain("existing-github-app-private-key");
   });
 
   test("requires explicit operator password and optional real E2B credentials", () => {
@@ -101,7 +117,9 @@ describe("Kubernetes secret apply helper", () => {
         requireE2B: true,
         randomSecret: (bytes) => `generated-${bytes}`,
       }),
-    ).toThrow("missing required secret values: E2B_API_KEY, GITHUB_TOKEN");
+    ).toThrow(
+      "missing required secret values: E2B_API_KEY, CODEX_API_KEY, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, GITHUB_APP_INSTALLATION_ID",
+    );
   });
 
   test("parses env files and keeps command defaults injectable", () => {
@@ -110,12 +128,22 @@ describe("Kubernetes secret apply helper", () => {
         # local only
         OPERATOR_PASSWORD="operator-password-123"
         E2B_API_KEY='e2b-secret'
+        CODEX_API_KEY=codex-secret
         GITHUB_TOKEN=github-token
+        GITHUB_APP_ID=12345
       `),
     ).toEqual({
       OPERATOR_PASSWORD: "operator-password-123",
       E2B_API_KEY: "e2b-secret",
+      CODEX_API_KEY: "codex-secret",
       GITHUB_TOKEN: "github-token",
+      GITHUB_APP_ID: "12345",
+    });
+
+    expect(parseKubernetesSecretsArgs([])).toMatchObject({
+      namespace: "agent-pool",
+      name: "agent-pool-secrets",
+      envFile: ".env",
     });
 
     expect(

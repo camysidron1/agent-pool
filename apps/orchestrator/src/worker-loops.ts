@@ -1,6 +1,12 @@
 import type { AppConfig } from "@agent-pool/config";
 import type { RabbitMqAdapter } from "@agent-pool/queue";
-import type { E2BRuntimeClient, FakeRuntimeProviderOptions } from "@agent-pool/runtime";
+import {
+  createRuntimeProvider,
+  type E2BRuntimeClient,
+  type FakeRuntimeProviderOptions,
+  type RuntimeLifecycleLogger,
+  type RuntimeProvider,
+} from "@agent-pool/runtime";
 
 import type { BackendInternalApiClient } from "./backend-client";
 import type { CapacityLimiter } from "./capacity";
@@ -10,6 +16,8 @@ import { createE2BRuntimeClient } from "./e2b-client";
 import type { OrchestratorMetricsRecorder } from "./metrics";
 import type { ReconciliationClock, ReconciliationOnceResult } from "./reconciliation-loop";
 import { runReconciliationOnce } from "./reconciliation-loop";
+import type { RuntimeSandboxFinalizerOnceResult } from "./runtime-sandbox-finalizer";
+import { runRuntimeSandboxFinalizerOnce } from "./runtime-sandbox-finalizer";
 import { createRuntimeStarter } from "./runtime-starter";
 import type { TaskQueueConsumerRunResult, TaskRuntimeStarter } from "./task-consumer";
 import { runTaskQueueConsumerOnce } from "./task-consumer";
@@ -32,6 +40,7 @@ export type OrchestratorWorkerLoopsState = {
   readonly task: OrchestratorWorkerLoopState;
   readonly control: OrchestratorWorkerLoopState;
   readonly reconcile: OrchestratorWorkerLoopState;
+  readonly finalizer: OrchestratorWorkerLoopState;
 };
 
 export type OrchestratorWorkerLoops = {
@@ -39,6 +48,7 @@ export type OrchestratorWorkerLoops = {
   readonly tickTask: () => Promise<TaskQueueConsumerRunResult | null>;
   readonly tickControl: () => Promise<ControlQueueConsumerRunResult | null>;
   readonly tickReconcile: () => Promise<ReconciliationOnceResult | null>;
+  readonly tickFinalizer: () => Promise<RuntimeSandboxFinalizerOnceResult | null>;
   readonly start: () => void;
   readonly stop: () => void;
 };
@@ -49,6 +59,7 @@ export type OrchestratorWorkerLoopsOptions = {
   readonly backend: BackendInternalApiClient;
   readonly projectId?: string;
   readonly runtimeStarter?: TaskRuntimeStarter;
+  readonly runtimeProviderInstance?: RuntimeProvider;
   readonly capacityLimiter?: CapacityLimiter;
   readonly metrics?: OrchestratorMetricsRecorder;
   readonly scheduler?: OrchestratorWorkerLoopScheduler;
@@ -57,7 +68,8 @@ export type OrchestratorWorkerLoopsOptions = {
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly e2bRuntimeClient?: E2BRuntimeClient;
   readonly fakeRuntime?: FakeRuntimeProviderOptions;
-  readonly onError?: (loop: "task" | "control" | "reconcile", error: unknown) => void;
+  readonly runtimeLogger?: RuntimeLifecycleLogger;
+  readonly onError?: (loop: "task" | "control" | "reconcile" | "finalizer", error: unknown) => void;
 };
 
 type WorkerLoop<TResult> = {
@@ -70,7 +82,16 @@ type WorkerLoop<TResult> = {
 export function createOrchestratorWorkerLoops(options: OrchestratorWorkerLoopsOptions): OrchestratorWorkerLoops {
   const projectId = options.projectId ?? options.config.controlPlane.smokeProjectId;
   const scheduler = options.scheduler ?? globalScheduler();
-  const runtimeStarter = options.runtimeStarter ?? createConfiguredRuntimeStarter(options);
+  const runtimeProvider = options.runtimeProviderInstance ?? createConfiguredRuntimeProvider(options);
+  const runtimeStarter =
+    options.runtimeStarter ??
+    createRuntimeStarter({
+      provider: runtimeProvider,
+      githubTokenBroker: options.backend,
+      requiresGitHubTokenBroker:
+        options.config.controlPlane.runtimeProvider === "e2b" &&
+        options.config.controlPlane.e2b.agentRunnerMode === "codex",
+    });
   const task = createWorkerLoop<TaskQueueConsumerRunResult>({
     intervalMs: options.config.controlPlane.workerPollIntervalMs,
     scheduler,
@@ -112,6 +133,18 @@ export function createOrchestratorWorkerLoops(options: OrchestratorWorkerLoopsOp
       }),
     onError: (error) => options.onError?.("reconcile", error),
   });
+  const finalizer = createWorkerLoop<RuntimeSandboxFinalizerOnceResult>({
+    intervalMs: options.config.controlPlane.reconcileIntervalMs,
+    scheduler,
+    runOnce: () =>
+      runRuntimeSandboxFinalizerOnce({
+        projectId,
+        backend: options.backend,
+        runtimeProvider,
+        clock: options.clock,
+      }),
+    onError: (error) => options.onError?.("finalizer", error),
+  });
 
   return {
     get state(): OrchestratorWorkerLoopsState {
@@ -119,49 +152,55 @@ export function createOrchestratorWorkerLoops(options: OrchestratorWorkerLoopsOp
         task: task.state,
         control: control.state,
         reconcile: reconcile.state,
+        finalizer: finalizer.state,
       };
     },
     tickTask: task.tick,
     tickControl: control.tick,
     tickReconcile: reconcile.tick,
+    tickFinalizer: finalizer.tick,
     start(): void {
       task.start();
       control.start();
       reconcile.start();
+      finalizer.start();
     },
     stop(): void {
       task.stop();
       control.stop();
       reconcile.stop();
+      finalizer.stop();
     },
   };
 }
 
-function createConfiguredRuntimeStarter(options: OrchestratorWorkerLoopsOptions): TaskRuntimeStarter {
+function createConfiguredRuntimeProvider(options: OrchestratorWorkerLoopsOptions): RuntimeProvider {
   if (options.config.controlPlane.runtimeProvider === "e2b") {
     const e2b = options.config.controlPlane.e2b;
     const env = options.env ?? readProcessEnv();
-    return createRuntimeStarter({
-      providerKind: "e2b",
+    return createRuntimeProvider({
+      kind: "e2b",
       e2b: {
         client: options.e2bRuntimeClient ?? createE2BRuntimeClient({ env, apiKeyEnvName: e2b.apiKeyEnvName }),
         config: e2b,
         env,
         secretEnvNames: e2b.allowedSecretEnvNames,
+        logger: options.runtimeLogger,
       },
     });
   }
 
   if (options.config.controlPlane.runtimeProvider !== "fake") {
-    return createRuntimeStarter({ providerKind: options.config.controlPlane.runtimeProvider });
+    return createRuntimeProvider({ kind: options.config.controlPlane.runtimeProvider });
   }
 
-  return createRuntimeStarter({
-    providerKind: "fake",
+  return createRuntimeProvider({
+    kind: "fake",
     fake: {
       bridgeRunMode: "after-startup",
       ...options.fakeRuntime,
       fetch: options.fakeRuntime?.fetch ?? options.fetch ?? fetch,
+      logger: options.fakeRuntime?.logger ?? options.runtimeLogger,
     },
   });
 }

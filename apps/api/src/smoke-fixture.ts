@@ -21,6 +21,8 @@ export type SmokeRuntimeSourceInput = {
   readonly repositoryUrl: string;
   readonly baseRef: string;
   readonly taskBranchPrefix: string;
+  readonly allowedEgressDomains?: readonly string[];
+  readonly commandProfile?: string | null;
 };
 
 export type SmokeFixtureIds = {

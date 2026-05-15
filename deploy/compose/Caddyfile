@@ -1,0 +1,44 @@
+:8080 {
+	@notSse {
+		not {
+			header Accept text/event-stream
+		}
+	}
+	encode @notSse zstd gzip
+
+	handle /healthz {
+		respond "ok\n" 200
+	}
+
+	handle /api/* {
+		reverse_proxy api:3000
+	}
+
+	handle /internal/* {
+		reverse_proxy api:3000
+	}
+
+	handle /callbacks/* {
+		reverse_proxy api:3000
+	}
+
+	handle /steering/* {
+		reverse_proxy api:3000
+	}
+
+	handle /health {
+		reverse_proxy api:3000
+	}
+
+	handle /metrics {
+		reverse_proxy api:3000
+	}
+
+	handle_path /orchestrator/* {
+		reverse_proxy orchestrator:3001
+	}
+
+	handle {
+		reverse_proxy web:5173
+	}
+}

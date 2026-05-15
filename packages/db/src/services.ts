@@ -25,6 +25,8 @@ export type TaskRuntimeSourceMetadata = {
   readonly repositoryUrl: string;
   readonly baseRef: string;
   readonly taskBranchPrefix: string;
+  readonly allowedEgressDomains?: readonly string[];
+  readonly commandProfile?: string | null;
 };
 
 export type AppendEventInput = {
@@ -94,6 +96,7 @@ export type PublicSessionSummary = {
   readonly status: string;
   readonly runtimeProvider: string | null;
   readonly runtimeSessionId: string | null;
+  readonly sourceSnapshotId: string | null;
   readonly createdAt: string;
   readonly startedAt: string | null;
   readonly endedAt: string | null;
@@ -400,6 +403,7 @@ export type CommandReportResult =
 export type ClaimNextTaskInput = {
   readonly projectId?: string;
   readonly sessionId?: string;
+  readonly sourceSnapshotId?: string | null;
   readonly runtimeProvider?: string | null;
   readonly bridgeCallbackBaseUrl?: string | null;
   readonly bridgeSessionTokenHeaderName?: string | null;
@@ -413,7 +417,14 @@ export type ClaimedTaskRecord = TaskRecord & {
 export type ClaimedSessionRecord = SessionRecord & {
   readonly status: "starting";
   readonly runtimeProvider: string | null;
+  readonly sourceSnapshot: ClaimedSourceSnapshotRecord | null;
   readonly bridge: BridgeSessionCallbackConfig;
+};
+
+export type ClaimedSourceSnapshotRecord = {
+  readonly id: string;
+  readonly provider: string;
+  readonly providerSnapshotId: string;
 };
 
 export type BridgeSessionCallbackConfig = {
@@ -648,6 +659,126 @@ export type SessionCleanupResult =
       readonly idempotent: boolean;
       readonly event: EventRecord;
       readonly outbox: OutboxRecord;
+    }
+  | { readonly ok: false; readonly error: { readonly code: "not_found" | "invalid_state"; readonly message: string } };
+
+export type RuntimeSandboxFinalizationRecord = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly sessionStatus: "succeeded" | "failed" | "canceled";
+  readonly provider: string;
+  readonly providerSandboxId: string;
+  readonly sourceSnapshotId: string | null;
+  readonly snapshotRequired: boolean;
+};
+
+export type ClaimNextRuntimeSandboxFinalizationInput = {
+  readonly projectId?: string | null;
+  readonly cleanupGraceBefore?: string | null;
+};
+
+export type ClaimNextRuntimeSandboxFinalizationResult =
+  | {
+      readonly ok: true;
+      readonly finalization: RuntimeSandboxFinalizationRecord;
+      readonly event: EventRecord;
+      readonly outbox: OutboxRecord;
+    }
+  | { readonly ok: false; readonly reason: "no_runtime_sandbox_finalization" };
+
+export type ReportRuntimeSandboxSnapshotCreatedInput = {
+  readonly projectId: string;
+  readonly runtimeSandboxId: string;
+  readonly providerSnapshotId: string;
+  readonly expiresAt?: string | null;
+  readonly metadata?: Readonly<Record<string, unknown>>;
+};
+
+export type ReportRuntimeSandboxSnapshotFailedInput = {
+  readonly projectId: string;
+  readonly runtimeSandboxId: string;
+  readonly errorMessage: string;
+};
+
+export type RuntimeSandboxSnapshotReportResult =
+  | {
+      readonly ok: true;
+      readonly idempotent: boolean;
+      readonly snapshot: SessionSnapshotRecord | null;
+      readonly event: EventRecord | null;
+      readonly outbox: OutboxRecord | null;
+    }
+  | { readonly ok: false; readonly error: { readonly code: "not_found" | "invalid_state" | "conflict"; readonly message: string } };
+
+export type SessionSnapshotRecord = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly sessionId: string;
+  readonly provider: string | null;
+  readonly providerSnapshotId: string | null;
+  readonly status: string;
+  readonly expiresAt: string | null;
+};
+
+export type ReportRuntimeSandboxCleanupInput = {
+  readonly projectId: string;
+  readonly runtimeSandboxId: string;
+  readonly errorMessage?: string | null;
+};
+
+export type RuntimeSandboxCleanupReportResult =
+  | {
+      readonly ok: true;
+      readonly idempotent: boolean;
+      readonly runtimeSandbox: RuntimeSandboxCleanupRecord;
+      readonly event: EventRecord | null;
+      readonly outbox: OutboxRecord | null;
+    }
+  | { readonly ok: false; readonly error: { readonly code: "not_found" | "invalid_state"; readonly message: string } };
+
+export type RuntimeSandboxCleanupRecord = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly sessionId: string;
+  readonly status: "cleanup_succeeded" | "cleanup_failed";
+};
+
+export type ExpiredSnapshotDeletionRecord = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly provider: string;
+  readonly providerSnapshotId: string;
+};
+
+export type ClaimNextExpiredSnapshotDeletionInput = {
+  readonly projectId?: string | null;
+  readonly now?: string | null;
+};
+
+export type ClaimNextExpiredSnapshotDeletionResult =
+  | {
+      readonly ok: true;
+      readonly snapshot: ExpiredSnapshotDeletionRecord;
+      readonly event: EventRecord;
+      readonly outbox: OutboxRecord;
+    }
+  | { readonly ok: false; readonly reason: "no_expired_snapshot" };
+
+export type ReportExpiredSnapshotDeletionInput = {
+  readonly projectId: string;
+  readonly snapshotId: string;
+  readonly errorMessage?: string | null;
+};
+
+export type ExpiredSnapshotDeletionReportResult =
+  | {
+      readonly ok: true;
+      readonly idempotent: boolean;
+      readonly snapshot: SessionSnapshotRecord;
+      readonly event: EventRecord | null;
+      readonly outbox: OutboxRecord | null;
     }
   | { readonly ok: false; readonly error: { readonly code: "not_found" | "invalid_state"; readonly message: string } };
 
@@ -938,7 +1069,14 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
 
         const sessionId = input.sessionId ?? createId("session");
         const attemptNumber = nextSessionAttemptNumber(database, task.project_id, task.id);
-        const runtimeProvider = input.runtimeProvider ?? null;
+        const sourceSnapshot = input.sourceSnapshotId
+          ? claimReadySourceSnapshot(database, {
+              projectId: task.project_id,
+              snapshotId: input.sourceSnapshotId,
+              runtimeProvider: input.runtimeProvider,
+            })
+          : null;
+        const runtimeProvider = input.runtimeProvider ?? sourceSnapshot?.provider ?? null;
         const bridge = bridgeCallbackConfig({
           projectId: task.project_id,
           taskId: task.id,
@@ -953,7 +1091,7 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
           .run(task.project_id, task.id);
         database
           .query(
-            "INSERT INTO sessions (id, project_id, task_id, attempt_number, status, runtime_provider, bridge_callback_base_url, bridge_session_token_header, bridge_session_token, started_at) VALUES (?, ?, ?, ?, 'starting', ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+            "INSERT INTO sessions (id, project_id, task_id, attempt_number, status, runtime_provider, runtime_session_id, source_snapshot_id, bridge_callback_base_url, bridge_session_token_header, bridge_session_token, started_at) VALUES (?, ?, ?, ?, 'starting', ?, NULL, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
           )
           .run(
             sessionId,
@@ -961,6 +1099,7 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
             task.id,
             attemptNumber,
             runtimeProvider,
+            sourceSnapshot?.id ?? null,
             bridge.callbackBaseUrl,
             bridge.sessionToken.headerName,
             bridge.sessionToken.token,
@@ -998,6 +1137,7 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
             attemptNumber,
             status: "starting",
             runtimeProvider,
+            sourceSnapshot,
             bridge,
           },
           event,
@@ -1096,6 +1236,38 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
 
     reconcileLostSessions(input: HeartbeatReconcileInput): HeartbeatReconcileResult {
       return reconcileLostSessions(database, input);
+    },
+
+    claimNextRuntimeSandboxFinalization(input: ClaimNextRuntimeSandboxFinalizationInput = {}): ClaimNextRuntimeSandboxFinalizationResult {
+      return claimNextRuntimeSandboxFinalization(database, input);
+    },
+
+    reportRuntimeSandboxSnapshotCreated(input: ReportRuntimeSandboxSnapshotCreatedInput): RuntimeSandboxSnapshotReportResult {
+      return reportRuntimeSandboxSnapshotCreated(database, input);
+    },
+
+    reportRuntimeSandboxSnapshotFailed(input: ReportRuntimeSandboxSnapshotFailedInput): RuntimeSandboxSnapshotReportResult {
+      return reportRuntimeSandboxSnapshotFailed(database, input);
+    },
+
+    reportRuntimeSandboxCleanupSucceeded(input: ReportRuntimeSandboxCleanupInput): RuntimeSandboxCleanupReportResult {
+      return reportRuntimeSandboxCleanup(database, input, "cleanup_succeeded");
+    },
+
+    reportRuntimeSandboxCleanupFailed(input: ReportRuntimeSandboxCleanupInput): RuntimeSandboxCleanupReportResult {
+      return reportRuntimeSandboxCleanup(database, input, "cleanup_failed");
+    },
+
+    claimNextExpiredSnapshotDeletion(input: ClaimNextExpiredSnapshotDeletionInput = {}): ClaimNextExpiredSnapshotDeletionResult {
+      return claimNextExpiredSnapshotDeletion(database, input);
+    },
+
+    reportExpiredSnapshotDeletionSucceeded(input: ReportExpiredSnapshotDeletionInput): ExpiredSnapshotDeletionReportResult {
+      return reportExpiredSnapshotDeletion(database, input, "deleted");
+    },
+
+    reportExpiredSnapshotDeletionFailed(input: ReportExpiredSnapshotDeletionInput): ExpiredSnapshotDeletionReportResult {
+      return reportExpiredSnapshotDeletion(database, input, "delete_failed");
     },
 
     requestCommand(input: RequestCommandInput): RequestCommandResult {
@@ -1400,6 +1572,7 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
         database
           .query("UPDATE sessions SET status = 'succeeded', ended_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ?")
           .run(input.projectId, input.sessionId);
+        markRuntimeSandboxTerminal(database, input.projectId, input.sessionId, "succeeded");
         database
           .query("UPDATE tasks SET status = 'completed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ?")
           .run(input.projectId, input.taskId);
@@ -1447,6 +1620,7 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
         database
           .query("UPDATE sessions SET status = 'failed', ended_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ?")
           .run(input.projectId, input.sessionId);
+        markRuntimeSandboxTerminal(database, input.projectId, input.sessionId, "failed");
         database
           .query("UPDATE tasks SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ?")
           .run(taskStatus, input.projectId, input.taskId);
@@ -2351,6 +2525,16 @@ function reportStartupSucceeded(database: WebSandboxSqliteDatabase, input: Start
         "UPDATE sessions SET status = 'running', runtime_session_id = ?, started_at = COALESCE(started_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), ended_at = NULL WHERE project_id = ? AND id = ?",
       )
       .run(nextRuntimeSessionId, input.projectId, input.sessionId);
+    if (current.runtime_provider && nextRuntimeSessionId) {
+      upsertRuntimeSandbox(database, {
+        projectId: input.projectId,
+        taskId: current.task_id,
+        sessionId: input.sessionId,
+        provider: current.runtime_provider,
+        providerSandboxId: nextRuntimeSessionId,
+        sourceSnapshotId: current.source_snapshot_id,
+      });
+    }
     database
       .query("UPDATE tasks SET status = 'running', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND id = ?")
       .run(current.project_id, current.task_id);
@@ -2457,7 +2641,9 @@ type StartupSessionState = {
   readonly project_id: string;
   readonly task_id: string;
   readonly status: string;
+  readonly runtime_provider: string | null;
   readonly runtime_session_id: string | null;
+  readonly source_snapshot_id: string | null;
   readonly task_status: string;
 };
 
@@ -2465,7 +2651,7 @@ function readStartupSessionState(database: WebSandboxSqliteDatabase, projectId: 
   return database
     .query<StartupSessionState, [string, string]>(
       `
-        SELECT s.id, s.project_id, s.task_id, s.status, s.runtime_session_id, t.status AS task_status
+        SELECT s.id, s.project_id, s.task_id, s.status, s.runtime_provider, s.runtime_session_id, s.source_snapshot_id, t.status AS task_status
         FROM sessions s
         JOIN tasks t ON t.project_id = s.project_id AND t.id = s.task_id
         WHERE s.project_id = ? AND s.id = ?
@@ -2583,6 +2769,7 @@ function reconcileLostSessions(database: WebSandboxSqliteDatabase, input: Heartb
       database
         .query("UPDATE tasks SET status = 'blocked', updated_at = ? WHERE project_id = ? AND id = ? AND status = 'running'")
         .run(now, candidate.project_id, candidate.task_id);
+      markRuntimeSandboxTerminal(database, candidate.project_id, candidate.id, "failed", now);
 
       const { event, outbox } = appendHeartbeatReconcileEvent(database, candidate, "session.lost", {
         reason: "heartbeat_lost",
@@ -2826,6 +3013,7 @@ type PublicSessionRow = {
   readonly status: string;
   readonly runtime_provider: string | null;
   readonly runtime_session_id: string | null;
+  readonly source_snapshot_id: string | null;
   readonly created_at: string;
   readonly started_at: string | null;
   readonly ended_at: string | null;
@@ -3003,7 +3191,7 @@ function readLatestPublicSessionForTask(database: WebSandboxSqliteDatabase, proj
   const row = database
     .query<PublicSessionRow, [string, string]>(
       `
-        SELECT id, project_id, task_id, attempt_number, status, runtime_provider, runtime_session_id, created_at, started_at, ended_at,
+        SELECT id, project_id, task_id, attempt_number, status, runtime_provider, runtime_session_id, source_snapshot_id, created_at, started_at, ended_at,
           final_response_text, final_response_metadata_json, final_response_recorded_at, last_heartbeat_at, heartbeat_status, stale_at, lost_at
         FROM sessions
         WHERE project_id = ? AND task_id = ?
@@ -3020,7 +3208,7 @@ function listPublicSessionsForTask(database: WebSandboxSqliteDatabase, projectId
   return database
     .query<PublicSessionRow, [string, string]>(
       `
-        SELECT id, project_id, task_id, attempt_number, status, runtime_provider, runtime_session_id, created_at, started_at, ended_at,
+        SELECT id, project_id, task_id, attempt_number, status, runtime_provider, runtime_session_id, source_snapshot_id, created_at, started_at, ended_at,
           final_response_text, final_response_metadata_json, final_response_recorded_at, last_heartbeat_at, heartbeat_status, stale_at, lost_at
         FROM sessions
         WHERE project_id = ? AND task_id = ?
@@ -3190,6 +3378,7 @@ function publicSessionSummary(row: PublicSessionRow): PublicSessionSummary {
     status: row.status,
     runtimeProvider: row.runtime_provider,
     runtimeSessionId: row.runtime_session_id,
+    sourceSnapshotId: row.source_snapshot_id,
     createdAt: row.created_at,
     startedAt: row.started_at,
     endedAt: row.ended_at,
@@ -3300,6 +3489,586 @@ function emptyTaskCounts(): Record<"queued" | "running" | "blocked" | "completed
   };
 }
 
+function upsertRuntimeSandbox(
+  database: WebSandboxSqliteDatabase,
+  input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly sessionId: string;
+    readonly provider: string;
+    readonly providerSandboxId: string;
+    readonly sourceSnapshotId?: string | null;
+  },
+): void {
+  database
+    .query(
+      `
+        INSERT INTO runtime_sandboxes (
+          id, project_id, task_id, session_id, provider, provider_sandbox_id, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id, session_id) DO UPDATE SET
+          provider = excluded.provider,
+          provider_sandbox_id = excluded.provider_sandbox_id,
+          metadata_json = excluded.metadata_json,
+          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      `,
+    )
+    .run(
+      createId("runtime_sandbox"),
+      input.projectId,
+      input.taskId,
+      input.sessionId,
+      input.provider,
+      input.providerSandboxId,
+      JSON.stringify({ sourceSnapshotId: input.sourceSnapshotId ?? null }),
+    );
+}
+
+function markRuntimeSandboxTerminal(
+  database: WebSandboxSqliteDatabase,
+  projectId: string,
+  sessionId: string,
+  sessionStatus: "succeeded" | "failed" | "canceled",
+  terminalAt?: string,
+): void {
+  const snapshotStatus = sessionStatus === "succeeded" ? "pending" : "skipped";
+  database
+    .query(
+      `
+        UPDATE runtime_sandboxes
+        SET status = 'terminal',
+            snapshot_status = CASE WHEN snapshot_status IN ('not_required', 'pending') THEN ? ELSE snapshot_status END,
+            terminal_at = COALESCE(terminal_at, ?),
+            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE project_id = ?
+          AND session_id = ?
+          AND status = 'active'
+      `,
+    )
+    .run(snapshotStatus, terminalAt ?? readDatabaseTimestamp(database), projectId, sessionId);
+}
+
+type SourceSnapshotRow = {
+  readonly id: string;
+  readonly provider: string | null;
+  readonly provider_snapshot_id: string | null;
+  readonly status: string;
+  readonly expires_at: string | null;
+};
+
+function claimReadySourceSnapshot(
+  database: WebSandboxSqliteDatabase,
+  input: {
+    readonly projectId: string;
+    readonly snapshotId: string;
+    readonly runtimeProvider?: string | null;
+  },
+): ClaimedSourceSnapshotRecord {
+  const snapshot = database
+    .query<SourceSnapshotRow, [string, string]>(
+      `
+        SELECT id, provider, provider_snapshot_id, status, expires_at
+        FROM session_snapshots
+        WHERE project_id = ? AND id = ?
+      `,
+    )
+    .get(input.projectId, input.snapshotId.trim());
+
+  if (!snapshot) throw new Error(`source snapshot not found: ${input.snapshotId}`);
+  if (snapshot.status !== "ready") throw new Error(`source snapshot must be ready; got ${snapshot.status}`);
+  if (!snapshot.provider || !snapshot.provider_snapshot_id) throw new Error("source snapshot is missing provider identity");
+
+  const runtimeProvider = input.runtimeProvider?.trim() || null;
+  if (runtimeProvider && runtimeProvider !== snapshot.provider) {
+    throw new Error(`source snapshot provider mismatch: expected ${runtimeProvider}, got ${snapshot.provider}`);
+  }
+
+  const now = readDatabaseTimestamp(database);
+  if (snapshot.expires_at && snapshot.expires_at <= now) throw new Error("source snapshot is expired");
+
+  database
+    .query("UPDATE session_snapshots SET last_used_at = ?, usage_count = usage_count + 1 WHERE project_id = ? AND id = ?")
+    .run(now, input.projectId, snapshot.id);
+
+  return {
+    id: snapshot.id,
+    provider: snapshot.provider,
+    providerSnapshotId: snapshot.provider_snapshot_id,
+  };
+}
+
+type RuntimeSandboxFinalizationRow = {
+  readonly id: string;
+  readonly project_id: string;
+  readonly task_id: string;
+  readonly session_id: string;
+  readonly session_status: "succeeded" | "failed" | "canceled";
+  readonly provider: string;
+  readonly provider_sandbox_id: string;
+  readonly source_snapshot_id: string | null;
+  readonly snapshot_status: "not_required" | "pending" | "claimed" | "succeeded" | "failed" | "skipped";
+};
+
+function claimNextRuntimeSandboxFinalization(
+  database: WebSandboxSqliteDatabase,
+  input: ClaimNextRuntimeSandboxFinalizationInput,
+): ClaimNextRuntimeSandboxFinalizationResult {
+  const projectId = input.projectId?.trim() || null;
+  const cleanupGraceBefore = input.cleanupGraceBefore?.trim() || readDatabaseTimestamp(database);
+
+  return transaction(database, () => {
+    const candidate = database
+      .query<RuntimeSandboxFinalizationRow, [string | null, string | null, string]>(
+        `
+          SELECT rs.id, rs.project_id, rs.task_id, rs.session_id, s.status AS session_status,
+                 rs.provider, rs.provider_sandbox_id, s.source_snapshot_id, rs.snapshot_status
+          FROM runtime_sandboxes rs
+          JOIN sessions s ON s.project_id = rs.project_id AND s.id = rs.session_id
+          JOIN projects p ON p.id = rs.project_id
+          WHERE rs.status IN ('terminal', 'cleanup_failed')
+            AND s.status IN ('succeeded', 'failed', 'canceled')
+            AND p.status = 'active'
+            AND (? IS NULL OR rs.project_id = ?)
+            AND (
+              rs.status = 'cleanup_failed'
+              OR s.status != 'succeeded'
+              OR EXISTS (
+                SELECT 1 FROM events e
+                WHERE e.project_id = rs.project_id
+                  AND e.session_id = rs.session_id
+                  AND e.type = 'session.cleanup'
+              )
+              OR s.ended_at <= ?
+            )
+          ORDER BY rs.updated_at ASC, rs.rowid ASC
+          LIMIT 1
+        `,
+      )
+      .get(projectId, projectId, cleanupGraceBefore);
+
+    if (!candidate) return { ok: false, reason: "no_runtime_sandbox_finalization" } as const;
+
+    const snapshotRequired = candidate.snapshot_status === "pending";
+    database
+      .query(
+        `
+          UPDATE runtime_sandboxes
+          SET status = 'cleanup_claimed',
+              cleanup_attempts = cleanup_attempts + 1,
+              cleanup_claimed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+              snapshot_status = CASE WHEN snapshot_status = 'pending' THEN 'claimed' ELSE snapshot_status END,
+              snapshot_attempts = CASE WHEN snapshot_status = 'pending' THEN snapshot_attempts + 1 ELSE snapshot_attempts END,
+              snapshot_claimed_at = CASE WHEN snapshot_status = 'pending' THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE snapshot_claimed_at END,
+              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+          WHERE project_id = ? AND id = ?
+        `,
+      )
+      .run(candidate.project_id, candidate.id);
+
+    const event = appendEvent(database, {
+      projectId: candidate.project_id,
+      taskId: candidate.task_id,
+      sessionId: candidate.session_id,
+      type: "runtime_sandbox.finalization_claimed",
+      payload: {
+        runtimeSandboxId: candidate.id,
+        provider: candidate.provider,
+        providerSandboxId: candidate.provider_sandbox_id,
+        snapshotRequired,
+      },
+    });
+    const outbox = enqueueOutbox(database, {
+      projectId: candidate.project_id,
+      eventId: event.id,
+      routingKey: projectRoutingKey(candidate.project_id, "control"),
+      payload: { eventId: event.id, sessionId: candidate.session_id, type: event.type },
+    });
+
+    return {
+      ok: true,
+      finalization: {
+        id: candidate.id,
+        projectId: candidate.project_id,
+        taskId: candidate.task_id,
+        sessionId: candidate.session_id,
+        sessionStatus: candidate.session_status,
+        provider: candidate.provider,
+        providerSandboxId: candidate.provider_sandbox_id,
+        sourceSnapshotId: candidate.source_snapshot_id,
+        snapshotRequired,
+      },
+      event,
+      outbox,
+    } as const;
+  });
+}
+
+type RuntimeSandboxLifecycleRow = {
+  readonly id: string;
+  readonly project_id: string;
+  readonly task_id: string;
+  readonly session_id: string;
+  readonly provider: string;
+  readonly provider_sandbox_id: string;
+  readonly status: string;
+  readonly snapshot_status: string;
+};
+
+function readRuntimeSandboxLifecycleRow(database: WebSandboxSqliteDatabase, projectId: string, runtimeSandboxId: string): RuntimeSandboxLifecycleRow | null {
+  return database
+    .query<RuntimeSandboxLifecycleRow, [string, string]>(
+      `
+        SELECT id, project_id, task_id, session_id, provider, provider_sandbox_id, status, snapshot_status
+        FROM runtime_sandboxes
+        WHERE project_id = ? AND id = ?
+      `,
+    )
+    .get(projectId, runtimeSandboxId);
+}
+
+function reportRuntimeSandboxSnapshotCreated(
+  database: WebSandboxSqliteDatabase,
+  input: ReportRuntimeSandboxSnapshotCreatedInput,
+): RuntimeSandboxSnapshotReportResult {
+  const providerSnapshotId = input.providerSnapshotId.trim();
+  if (!providerSnapshotId) return { ok: false, error: { code: "invalid_state", message: "provider snapshot id is required" } };
+
+  return transaction(database, () => {
+    const sandbox = readRuntimeSandboxLifecycleRow(database, input.projectId, input.runtimeSandboxId);
+    if (!sandbox) return { ok: false, error: { code: "not_found", message: `runtime sandbox not found: ${input.runtimeSandboxId}` } } as const;
+    if (sandbox.snapshot_status === "succeeded") {
+      return {
+        ok: true,
+        idempotent: true,
+        snapshot: readSessionSnapshotByRuntimeSandbox(database, input.projectId, input.runtimeSandboxId),
+        event: null,
+        outbox: null,
+      } as const;
+    }
+    if (sandbox.status !== "cleanup_claimed" || sandbox.snapshot_status !== "claimed") {
+      return { ok: false, error: { code: "invalid_state", message: `snapshot report requires claimed finalization; got ${sandbox.status}/${sandbox.snapshot_status}` } } as const;
+    }
+
+    const snapshotId = createId("snapshot");
+    database
+      .query(
+        `
+          INSERT INTO session_snapshots (
+            id, project_id, session_id, kind, provider, status, provider_snapshot_id,
+            source_runtime_sandbox_id, source_session_id, provider_sandbox_id, expires_at, metadata_json
+          ) VALUES (?, ?, ?, 'system', ?, 'ready', ?, ?, ?, ?, ?, ?)
+        `,
+      )
+      .run(
+        snapshotId,
+        sandbox.project_id,
+        sandbox.session_id,
+        sandbox.provider,
+        providerSnapshotId,
+        sandbox.id,
+        sandbox.session_id,
+        sandbox.provider_sandbox_id,
+        input.expiresAt ?? null,
+        JSON.stringify(input.metadata ?? {}),
+      );
+    database
+      .query(
+        `
+          UPDATE runtime_sandboxes
+          SET snapshot_status = 'succeeded',
+              snapshot_completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+          WHERE project_id = ? AND id = ?
+        `,
+      )
+      .run(input.projectId, input.runtimeSandboxId);
+
+    const snapshot = readSessionSnapshot(database, sandbox.project_id, snapshotId);
+    if (!snapshot) throw new Error(`created snapshot disappeared: ${snapshotId}`);
+    const event = appendEvent(database, {
+      projectId: sandbox.project_id,
+      taskId: sandbox.task_id,
+      sessionId: sandbox.session_id,
+      type: "session.snapshot.created",
+      payload: { snapshotId, runtimeSandboxId: sandbox.id, provider: sandbox.provider, expiresAt: input.expiresAt ?? null },
+    });
+    const outbox = enqueueOutbox(database, {
+      projectId: sandbox.project_id,
+      eventId: event.id,
+      routingKey: projectRoutingKey(sandbox.project_id, "events"),
+      payload: { eventId: event.id, sessionId: sandbox.session_id, type: event.type },
+    });
+
+    return { ok: true, idempotent: false, snapshot, event, outbox } as const;
+  });
+}
+
+function reportRuntimeSandboxSnapshotFailed(
+  database: WebSandboxSqliteDatabase,
+  input: ReportRuntimeSandboxSnapshotFailedInput,
+): RuntimeSandboxSnapshotReportResult {
+  return transaction(database, () => {
+    const sandbox = readRuntimeSandboxLifecycleRow(database, input.projectId, input.runtimeSandboxId);
+    if (!sandbox) return { ok: false, error: { code: "not_found", message: `runtime sandbox not found: ${input.runtimeSandboxId}` } } as const;
+    if (sandbox.snapshot_status === "succeeded") {
+      return { ok: false, error: { code: "conflict", message: "snapshot already succeeded" } } as const;
+    }
+    if (sandbox.status !== "cleanup_claimed" || sandbox.snapshot_status !== "claimed") {
+      return { ok: false, error: { code: "invalid_state", message: `snapshot failure requires claimed finalization; got ${sandbox.status}/${sandbox.snapshot_status}` } } as const;
+    }
+
+    database
+      .query(
+        `
+          UPDATE runtime_sandboxes
+          SET snapshot_status = 'failed',
+              snapshot_completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+              last_error_message = ?,
+              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+          WHERE project_id = ? AND id = ?
+        `,
+      )
+      .run(input.errorMessage, input.projectId, input.runtimeSandboxId);
+
+    const event = appendEvent(database, {
+      projectId: sandbox.project_id,
+      taskId: sandbox.task_id,
+      sessionId: sandbox.session_id,
+      type: "session.snapshot.failed",
+      payload: { runtimeSandboxId: sandbox.id, errorMessage: input.errorMessage },
+    });
+    const outbox = enqueueOutbox(database, {
+      projectId: sandbox.project_id,
+      eventId: event.id,
+      routingKey: projectRoutingKey(sandbox.project_id, "events"),
+      payload: { eventId: event.id, sessionId: sandbox.session_id, type: event.type },
+    });
+
+    return { ok: true, idempotent: false, snapshot: null, event, outbox } as const;
+  });
+}
+
+function reportRuntimeSandboxCleanup(
+  database: WebSandboxSqliteDatabase,
+  input: ReportRuntimeSandboxCleanupInput,
+  status: "cleanup_succeeded" | "cleanup_failed",
+): RuntimeSandboxCleanupReportResult {
+  return transaction(database, () => {
+    const sandbox = readRuntimeSandboxLifecycleRow(database, input.projectId, input.runtimeSandboxId);
+    if (!sandbox) return { ok: false, error: { code: "not_found", message: `runtime sandbox not found: ${input.runtimeSandboxId}` } } as const;
+    if (sandbox.status === status) {
+      return { ok: true, idempotent: true, runtimeSandbox: runtimeSandboxCleanupRecord(sandbox, status), event: null, outbox: null } as const;
+    }
+    if (sandbox.status !== "cleanup_claimed") {
+      return { ok: false, error: { code: "invalid_state", message: `cleanup report requires claimed finalization; got ${sandbox.status}` } } as const;
+    }
+
+    const errorMessage = status === "cleanup_failed" ? input.errorMessage ?? "cleanup failed without details" : null;
+    database
+      .query(
+        `
+          UPDATE runtime_sandboxes
+          SET status = ?,
+              cleanup_completed_at = CASE WHEN ? = 'cleanup_succeeded' THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE cleanup_completed_at END,
+              last_error_message = ?,
+              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+          WHERE project_id = ? AND id = ?
+        `,
+      )
+      .run(status, status, errorMessage, input.projectId, input.runtimeSandboxId);
+
+    const eventType = status === "cleanup_succeeded" ? "runtime_sandbox.cleanup_succeeded" : "runtime_sandbox.cleanup_failed";
+    const event = appendEvent(database, {
+      projectId: sandbox.project_id,
+      taskId: sandbox.task_id,
+      sessionId: sandbox.session_id,
+      type: eventType,
+      payload: {
+        runtimeSandboxId: sandbox.id,
+        provider: sandbox.provider,
+        providerSandboxId: sandbox.provider_sandbox_id,
+        errorMessage,
+      },
+    });
+    const outbox = enqueueOutbox(database, {
+      projectId: sandbox.project_id,
+      eventId: event.id,
+      routingKey: projectRoutingKey(sandbox.project_id, "events"),
+      payload: { eventId: event.id, sessionId: sandbox.session_id, type: event.type },
+    });
+
+    return { ok: true, idempotent: false, runtimeSandbox: runtimeSandboxCleanupRecord(sandbox, status), event, outbox } as const;
+  });
+}
+
+function claimNextExpiredSnapshotDeletion(
+  database: WebSandboxSqliteDatabase,
+  input: ClaimNextExpiredSnapshotDeletionInput,
+): ClaimNextExpiredSnapshotDeletionResult {
+  const projectId = input.projectId?.trim() || null;
+  const now = input.now?.trim() || readDatabaseTimestamp(database);
+
+  return transaction(database, () => {
+    const row = database
+      .query<
+        { id: string; project_id: string; provider: string; provider_snapshot_id: string },
+        [string, string | null, string | null]
+      >(
+        `
+          SELECT id, project_id, provider, provider_snapshot_id
+          FROM session_snapshots
+          WHERE status IN ('ready', 'delete_failed')
+            AND expires_at IS NOT NULL
+            AND expires_at <= ?
+            AND provider IS NOT NULL
+            AND provider_snapshot_id IS NOT NULL
+            AND (? IS NULL OR project_id = ?)
+          ORDER BY expires_at ASC, rowid ASC
+          LIMIT 1
+        `,
+      )
+      .get(now, projectId, projectId);
+
+    if (!row) return { ok: false, reason: "no_expired_snapshot" } as const;
+
+    database
+      .query("UPDATE session_snapshots SET status = 'delete_claimed', delete_claimed_at = ? WHERE project_id = ? AND id = ?")
+      .run(now, row.project_id, row.id);
+
+    const snapshot = {
+      id: row.id,
+      projectId: row.project_id,
+      provider: row.provider,
+      providerSnapshotId: row.provider_snapshot_id,
+    };
+    const event = appendEvent(database, {
+      projectId: row.project_id,
+      type: "session.snapshot.delete_claimed",
+      payload: { snapshotId: row.id, provider: row.provider },
+    });
+    const outbox = enqueueOutbox(database, {
+      projectId: row.project_id,
+      eventId: event.id,
+      routingKey: projectRoutingKey(row.project_id, "control"),
+      payload: { eventId: event.id, snapshotId: row.id, type: event.type },
+    });
+
+    return { ok: true, snapshot, event, outbox } as const;
+  });
+}
+
+function reportExpiredSnapshotDeletion(
+  database: WebSandboxSqliteDatabase,
+  input: ReportExpiredSnapshotDeletionInput,
+  status: "deleted" | "delete_failed",
+): ExpiredSnapshotDeletionReportResult {
+  return transaction(database, () => {
+    const snapshot = readSessionSnapshot(database, input.projectId, input.snapshotId);
+    if (!snapshot) return { ok: false, error: { code: "not_found", message: `snapshot not found: ${input.snapshotId}` } } as const;
+    if (snapshot.status === status) return { ok: true, idempotent: true, snapshot, event: null, outbox: null } as const;
+    if (snapshot.status !== "delete_claimed") {
+      return { ok: false, error: { code: "invalid_state", message: `snapshot deletion report requires delete_claimed; got ${snapshot.status}` } } as const;
+    }
+
+    database
+      .query(
+        `
+          UPDATE session_snapshots
+          SET status = ?,
+              deleted_at = CASE WHEN ? = 'deleted' THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE deleted_at END,
+              error_message = ?,
+              delete_claimed_at = CASE WHEN ? = 'delete_failed' THEN NULL ELSE delete_claimed_at END
+          WHERE project_id = ? AND id = ?
+        `,
+      )
+      .run(
+        status,
+        status,
+        status === "delete_failed" ? input.errorMessage ?? "snapshot deletion failed without details" : null,
+        status,
+        input.projectId,
+        input.snapshotId,
+      );
+
+    const updated = readSessionSnapshot(database, input.projectId, input.snapshotId);
+    if (!updated) throw new Error(`snapshot disappeared after deletion report: ${input.snapshotId}`);
+    const event = appendEvent(database, {
+      projectId: updated.projectId,
+      sessionId: updated.sessionId,
+      type: status === "deleted" ? "session.snapshot.deleted" : "session.snapshot.delete_failed",
+      payload: { snapshotId: updated.id, errorMessage: status === "delete_failed" ? input.errorMessage ?? null : null },
+    });
+    const outbox = enqueueOutbox(database, {
+      projectId: updated.projectId,
+      eventId: event.id,
+      routingKey: projectRoutingKey(updated.projectId, "events"),
+      payload: { eventId: event.id, snapshotId: updated.id, type: event.type },
+    });
+
+    return { ok: true, idempotent: false, snapshot: updated, event, outbox } as const;
+  });
+}
+
+function readSessionSnapshotByRuntimeSandbox(
+  database: WebSandboxSqliteDatabase,
+  projectId: string,
+  runtimeSandboxId: string,
+): SessionSnapshotRecord | null {
+  const row = database
+    .query<{ id: string }, [string, string]>(
+      "SELECT id FROM session_snapshots WHERE project_id = ? AND source_runtime_sandbox_id = ? ORDER BY created_at DESC LIMIT 1",
+    )
+    .get(projectId, runtimeSandboxId);
+
+  return row ? readSessionSnapshot(database, projectId, row.id) : null;
+}
+
+function readSessionSnapshot(database: WebSandboxSqliteDatabase, projectId: string, snapshotId: string): SessionSnapshotRecord | null {
+  const row = database
+    .query<
+      {
+        id: string;
+        project_id: string;
+        session_id: string;
+        provider: string | null;
+        provider_snapshot_id: string | null;
+        status: string;
+        expires_at: string | null;
+      },
+      [string, string]
+    >(
+      `
+        SELECT id, project_id, session_id, provider, provider_snapshot_id, status, expires_at
+        FROM session_snapshots
+        WHERE project_id = ? AND id = ?
+      `,
+    )
+    .get(projectId, snapshotId);
+
+  if (!row) return null;
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    sessionId: row.session_id,
+    provider: row.provider,
+    providerSnapshotId: row.provider_snapshot_id,
+    status: row.status,
+    expiresAt: row.expires_at,
+  };
+}
+
+function runtimeSandboxCleanupRecord(
+  sandbox: Pick<RuntimeSandboxLifecycleRow, "id" | "project_id" | "session_id">,
+  status: "cleanup_succeeded" | "cleanup_failed",
+): RuntimeSandboxCleanupRecord {
+  return {
+    id: sandbox.id,
+    projectId: sandbox.project_id,
+    sessionId: sandbox.session_id,
+    status,
+  };
+}
+
 function selectNextQueuedCommand(
   database: WebSandboxSqliteDatabase,
   projectId?: string,
@@ -3376,6 +4145,8 @@ function sanitizeTaskRuntimeSource(input: TaskRuntimeSourceMetadata | null | und
   const repositoryUrl = input.repositoryUrl.trim();
   const baseRef = input.baseRef.trim();
   const taskBranchPrefix = input.taskBranchPrefix.trim();
+  const commandProfile = input.commandProfile?.trim() || null;
+  const allowedEgressDomains = sanitizeEgressDomains(input.allowedEgressDomains);
 
   if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(repositoryUrl)) {
     throw new Error("task runtime source repositoryUrl must be an https GitHub repository URL");
@@ -3386,14 +4157,50 @@ function sanitizeTaskRuntimeSource(input: TaskRuntimeSourceMetadata | null | und
   if (!/^[A-Za-z0-9._/-]+$/.test(taskBranchPrefix) || taskBranchPrefix.includes("..")) {
     throw new Error("task runtime source taskBranchPrefix is invalid");
   }
+  if (commandProfile !== null && commandProfile !== "agent-pool-bun-pr") {
+    throw new Error("task runtime source commandProfile is invalid");
+  }
 
-  const source = { repositoryUrl, baseRef, taskBranchPrefix };
+  const source: TaskRuntimeSourceMetadata = {
+    repositoryUrl,
+    baseRef,
+    taskBranchPrefix,
+    ...(allowedEgressDomains.length > 0 ? { allowedEgressDomains } : {}),
+    ...(commandProfile ? { commandProfile } : {}),
+  };
   const serialized = JSON.stringify(source);
   if (/token|secret|password|github_pat_|ghp_/i.test(serialized)) {
     throw new Error("task runtime source must not contain secret values");
   }
 
   return source;
+}
+
+function sanitizeEgressDomains(input: readonly string[] | undefined): readonly string[] {
+  if (!input) return [];
+  if (!Array.isArray(input)) {
+    throw new Error("task runtime source allowedEgressDomains must be an array");
+  }
+  return [
+    ...new Set(
+      input.map((value) => {
+        const domain = value.trim().toLowerCase();
+        if (
+          !domain ||
+          domain.includes("/") ||
+          domain.includes(":") ||
+          domain.includes("*") ||
+          domain.startsWith(".") ||
+          domain.endsWith(".") ||
+          !/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/.test(domain) ||
+          !domain.includes(".")
+        ) {
+          throw new Error("task runtime source allowedEgressDomains contains an invalid domain");
+        }
+        return domain;
+      }),
+    ),
+  ];
 }
 
 function readRuntimeSourceJson(value: string | null): TaskRuntimeSourceMetadata | null {

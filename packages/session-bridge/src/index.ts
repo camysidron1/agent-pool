@@ -161,6 +161,24 @@ export const SESSION_BRIDGE_PACKAGE_BOUNDARY = {
 } as const;
 
 export {
+  checkCodexCommandPolicy,
+  createCodexPrompt,
+  extractPullRequestUrl,
+  AGENT_POOL_CODEX_COMMAND_PROFILE,
+  type CodexCommandPolicyCheck,
+  type CodexPromptInput,
+} from "./codex-policy";
+export {
+  runCodexBridgeSession,
+  scrubCodexSandboxSecrets,
+  type CodexBridgeSessionOptions,
+  type CodexBridgeSessionResult,
+  type CodexProcessExecutionInput,
+  type CodexProcessExecutionResult,
+  type CodexProcessExecutor,
+  type CodexRunnerEnvironment,
+} from "./codex-runner";
+export {
   createBridgeCallbackClient,
   type BridgeCallbackClientOptions,
 } from "./callback-client";

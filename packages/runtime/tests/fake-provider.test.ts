@@ -44,6 +44,9 @@ describe("fake runtime provider", () => {
       suspend: false,
       resume: false,
       fork: false,
+      snapshot: true,
+      deleteSnapshot: true,
+      startFromSnapshot: true,
     });
     expect(provider.state.started).toHaveLength(1);
     expect(provider.state.started[0]?.request).toMatchObject({
@@ -58,6 +61,12 @@ describe("fake runtime provider", () => {
 
     expect(provider.state.active).toEqual([]);
     expect(provider.state.stopped).toEqual([handle]);
+
+    const snapshot = await provider.createSnapshot(handle);
+    await provider.deleteSnapshot(snapshot);
+    expect(snapshot).toMatchObject({ provider: "fake", snapshotId: "fake-snapshot-runtime_session_fixed" });
+    expect(provider.state.snapshots).toEqual([]);
+    expect(provider.state.deletedSnapshots).toEqual([snapshot]);
   });
 
   test("uses factory defaults and keeps docker provider unavailable in default CI", async () => {
@@ -96,6 +105,12 @@ describe("fake runtime provider", () => {
       async destroySandbox() {
         return undefined;
       },
+      async createSnapshot() {
+        return { snapshotId: "snapshot_1" };
+      },
+      async deleteSnapshot() {
+        return undefined;
+      },
     };
     const provider = createRuntimeProvider({
       kind: "e2b",
@@ -115,6 +130,9 @@ describe("fake runtime provider", () => {
       suspend: false,
       resume: false,
       fork: false,
+      snapshot: true,
+      deleteSnapshot: true,
+      startFromSnapshot: true,
     });
     await expect(provider.startSession({ projectId: "project_a", taskId: "task_1" })).rejects.toThrow(
       "e2b launch spec requires bridge session options",

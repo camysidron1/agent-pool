@@ -9,6 +9,7 @@ import {
   getArtifactTitle,
   getAttemptTimeline,
   getFinalResultDetail,
+  getSessionInitializationMilestones,
   getRawLogEntries,
   groupArtifacts,
   shouldFollowRawLogScroll,
@@ -117,6 +118,44 @@ describe("web task detail helpers", () => {
       urls: ["https://example.test/result"],
     });
   });
+
+  test("summarizes sandbox initialization milestones for task investigation", () => {
+    const detail = {
+      ...detailTask(),
+      runtimeSource: {
+        repositoryUrl: "https://github.com/example/tiny-fixture.git",
+        baseRef: "main",
+        taskBranchPrefix: "agent-pool/task",
+        allowedEgressDomains: ["github.com"],
+        commandProfile: "agent-pool-bun-pr",
+      },
+      latestSession: session("session-1", 1, "running", {
+        finalResponseMetadata: { runner: "codex" },
+        runtimeSessionId: "sandbox_1",
+      }),
+      sessions: [
+        session("session-1", 1, "running", {
+          finalResponseMetadata: { runner: "codex" },
+          runtimeSessionId: "sandbox_1",
+        }),
+      ],
+      events: [
+        outputEvent("event-codex", 1, "codex runner starting\n"),
+      ],
+    };
+
+    expect(getSessionInitializationMilestones(detail, detail.latestSession)).toEqual([
+      { id: "sandbox", label: "Set up cloud container", status: "done", detail: "Sandbox sandbox_1" },
+      {
+        id: "repository",
+        label: "Cloned repository",
+        status: "done",
+        detail: "https://github.com/example/tiny-fixture.git @ main",
+      },
+      { id: "setup", label: "Run setup script", status: "skipped", detail: "No setup script configured." },
+      { id: "agent", label: "Started Codex", status: "done", detail: "codex" },
+    ]);
+  });
 });
 
 function outputEvent(id: string, sequence: number, text: string) {
@@ -166,6 +205,7 @@ function session(
   status: string,
   options: {
     readonly staleAt?: string | null;
+    readonly runtimeSessionId?: string | null;
     readonly finalResponseText?: string | null;
     readonly finalResponseMetadata?: Readonly<Record<string, unknown>>;
     readonly finalResponseRecordedAt?: string | null;
@@ -178,7 +218,8 @@ function session(
     attemptNumber,
     status,
     runtimeProvider: "fake",
-    runtimeSessionId: null,
+    runtimeSessionId: options.runtimeSessionId ?? null,
+    sourceSnapshotId: null,
     createdAt: "2026-05-13T00:00:00.000Z",
     startedAt: "2026-05-13T00:01:00.000Z",
     endedAt: status === "succeeded" || status === "failed" ? "2026-05-13T00:03:00.000Z" : null,

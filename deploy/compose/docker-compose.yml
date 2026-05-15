@@ -5,11 +5,11 @@ services:
     command: sh -lc "bun install --frozen-lockfile && cd apps/api && bun run start"
     environment:
       AUTH_MODE: test
-      INTERNAL_SERVICE_TOKEN: compose-internal-service-token
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-compose-internal-service-token}
       API_PORT: "3000"
       API_PUBLIC_URL: http://localhost:3000
       API_INTERNAL_URL: http://api:3000
-      BRIDGE_CALLBACK_BASE_URL: http://api:3000
+      BRIDGE_CALLBACK_BASE_URL: ${BRIDGE_CALLBACK_BASE_URL:-http://api:3000}
       AGENT_POOL_WEB_SANDBOX_DB_PATH: /data/web-sandbox.db
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
       RABBITMQ_MANAGEMENT_URL: http://guest:guest@rabbitmq:15672
@@ -20,6 +20,26 @@ services:
       STORAGE_LOCAL_ROOT: /data/storage
       COMPOSE_SMOKE_ENABLED: "true"
       COMPOSE_SMOKE_PROJECT_ID: compose-smoke
+      RUNTIME_PROVIDER: ${RUNTIME_PROVIDER:-fake}
+      AGENT_RUNNER_MODE: ${AGENT_RUNNER_MODE:-bridge-smoke}
+      E2B_API_KEY_ENV_NAME: ${E2B_API_KEY_ENV_NAME:-E2B_API_KEY}
+      E2B_API_KEY: ${E2B_API_KEY:-}
+      E2B_TEMPLATE_ID: ${E2B_TEMPLATE_ID:-}
+      E2B_SANDBOX_IMAGE_ID: ${E2B_SANDBOX_IMAGE_ID:-}
+      E2B_GITHUB_TOKEN_ENV_NAME: ${E2B_GITHUB_TOKEN_ENV_NAME:-GITHUB_TOKEN}
+      E2B_ALLOWED_SECRET_ENV_NAMES: ${E2B_ALLOWED_SECRET_ENV_NAMES:-GITHUB_TOKEN,CODEX_API_KEY}
+      CODEX_API_KEY_ENV_NAME: ${CODEX_API_KEY_ENV_NAME:-CODEX_API_KEY}
+      CODEX_API_KEY: ${CODEX_API_KEY:-}
+      CODEX_COMMAND_PROFILE: ${CODEX_COMMAND_PROFILE:-agent-pool-bun-pr}
+      EGRESS_PROXY_URL: ${EGRESS_PROXY_URL:-}
+      EGRESS_PROXY_ALLOW_OUT: ${EGRESS_PROXY_ALLOW_OUT:-}
+      E2B_LOCAL_ALLOW_DIRECT_EGRESS: ${E2B_LOCAL_ALLOW_DIRECT_EGRESS:-false}
+      AGENT_POOL_ALLOWED_EGRESS_DOMAINS: ${AGENT_POOL_ALLOWED_EGRESS_DOMAINS:-github.com,api.github.com,registry.npmjs.org,api.openai.com}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID:-}
+      GITHUB_APP_TOKEN_ENV_NAME: ${GITHUB_APP_TOKEN_ENV_NAME:-GITHUB_TOKEN}
+      EGRESS_GATEWAY_BACKEND_INTERNAL_URL: http://api:3000
     ports:
       - "3000:3000"
     volumes:
@@ -43,7 +63,7 @@ services:
     command: sh -lc "bun install --frozen-lockfile && cd apps/orchestrator && bun run start"
     environment:
       AUTH_MODE: test
-      INTERNAL_SERVICE_TOKEN: compose-internal-service-token
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-compose-internal-service-token}
       ORCHESTRATOR_PORT: "3001"
       ORCHESTRATOR_PUBLIC_URL: http://localhost:3001
       ORCHESTRATOR_BACKEND_INTERNAL_URL: http://api:3000
@@ -54,11 +74,33 @@ services:
       STORAGE_ADAPTER: blob
       STORAGE_BUCKET: agent-pool-local
       STORAGE_LOCAL_ROOT: /workspace/.agent-pool/web-sandbox/storage
-      RUNTIME_PROVIDER: fake
+      RUNTIME_PROVIDER: ${RUNTIME_PROVIDER:-fake}
       COMPOSE_SMOKE_ENABLED: "true"
       COMPOSE_SMOKE_PROJECT_ID: compose-smoke
       CONTROL_PLANE_WORKER_POLL_INTERVAL_MS: "1000"
       CONTROL_PLANE_RECONCILE_INTERVAL_MS: "5000"
+      E2B_API_KEY_ENV_NAME: ${E2B_API_KEY_ENV_NAME:-E2B_API_KEY}
+      E2B_API_KEY: ${E2B_API_KEY:-}
+      E2B_TEMPLATE_ID: ${E2B_TEMPLATE_ID:-}
+      E2B_SANDBOX_IMAGE_ID: ${E2B_SANDBOX_IMAGE_ID:-}
+      E2B_GITHUB_TOKEN_ENV_NAME: ${E2B_GITHUB_TOKEN_ENV_NAME:-GITHUB_TOKEN}
+      E2B_ALLOWED_SECRET_ENV_NAMES: ${E2B_ALLOWED_SECRET_ENV_NAMES:-GITHUB_TOKEN,CODEX_API_KEY}
+      E2B_WORKING_DIRECTORY: ${E2B_WORKING_DIRECTORY:-/workspace/agent-pool}
+      E2B_STARTUP_TIMEOUT_MS: ${E2B_STARTUP_TIMEOUT_MS:-120000}
+      E2B_CLEANUP_TIMEOUT_MS: ${E2B_CLEANUP_TIMEOUT_MS:-30000}
+      AGENT_RUNNER_MODE: ${AGENT_RUNNER_MODE:-bridge-smoke}
+      CODEX_COMMAND: ${CODEX_COMMAND:-codex}
+      CODEX_API_KEY_ENV_NAME: ${CODEX_API_KEY_ENV_NAME:-CODEX_API_KEY}
+      CODEX_API_KEY: ${CODEX_API_KEY:-}
+      CODEX_MODEL: ${CODEX_MODEL:-}
+      CODEX_COMMAND_PROFILE: ${CODEX_COMMAND_PROFILE:-agent-pool-bun-pr}
+      EGRESS_PROXY_URL: ${EGRESS_PROXY_URL:-}
+      EGRESS_PROXY_ALLOW_OUT: ${EGRESS_PROXY_ALLOW_OUT:-}
+      EGRESS_PROXY_NO_PROXY: ${EGRESS_PROXY_NO_PROXY:-}
+      E2B_LOCAL_ALLOW_DIRECT_EGRESS: ${E2B_LOCAL_ALLOW_DIRECT_EGRESS:-false}
+      AGENT_POOL_ALLOWED_EGRESS_DOMAINS: ${AGENT_POOL_ALLOWED_EGRESS_DOMAINS:-github.com,api.github.com,registry.npmjs.org,api.openai.com}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      EGRESS_GATEWAY_BACKEND_INTERNAL_URL: http://api:3000
     ports:
       - "3001:3001"
     volumes:
@@ -73,6 +115,65 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:3001/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  web:
+    image: oven/bun:1.2.23
+    working_dir: /workspace
+    command: sh -lc "bun install --frozen-lockfile && cd apps/web && bun run dev -- --host 0.0.0.0 --port 5173"
+    volumes:
+      - ../..:/workspace
+      - bun-cache:/root/.bun
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:5173/').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  caddy:
+    image: caddy:2.8.4-alpine
+    ports:
+      - "${AGENT_POOL_COMPOSE_EDGE_PORT:-3080}:8080"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      orchestrator:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  egress-gateway:
+    image: oven/bun:1.2.23
+    working_dir: /workspace
+    command: sh -lc "bun install --frozen-lockfile && cd apps/egress-gateway && bun run start"
+    environment:
+      AUTH_MODE: test
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-compose-internal-service-token}
+      EGRESS_GATEWAY_PORT: "3002"
+      EGRESS_GATEWAY_BACKEND_INTERNAL_URL: http://api:3000
+      EGRESS_GATEWAY_DEFAULT_DENY: "true"
+    ports:
+      - "3002:3002"
+    volumes:
+      - ../..:/workspace
+      - bun-cache:/root/.bun
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:3002/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 12

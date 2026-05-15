@@ -68,6 +68,8 @@ import {
   getAttemptTimeline,
   getFinalResultDetail,
   getRawLogEntries,
+  getSecurityLifecycleBadges,
+  getSessionInitializationMilestones,
   groupArtifacts,
   shouldFollowRawLogScroll,
   summarizeLogFallback,
@@ -81,6 +83,8 @@ export type AppProps = {
 
 const DEFAULT_RUNTIME_SOURCE_BASE_REF = "web-sandbox-mvp";
 const DEFAULT_RUNTIME_SOURCE_BRANCH_PREFIX = "agent-pool/task";
+const DEFAULT_RUNTIME_SOURCE_EGRESS_DOMAINS = "github.com, api.github.com, registry.npmjs.org, api.openai.com";
+const DEFAULT_RUNTIME_SOURCE_COMMAND_PROFILE = "agent-pool-bun-pr";
 
 export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
   const initialOperatorId = readStoredOperatorId(storage) ?? "";
@@ -104,6 +108,7 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
   const [newTaskRepositoryUrl, setNewTaskRepositoryUrl] = useState("");
   const [newTaskBaseRef, setNewTaskBaseRef] = useState(DEFAULT_RUNTIME_SOURCE_BASE_REF);
   const [newTaskBranchPrefix, setNewTaskBranchPrefix] = useState(DEFAULT_RUNTIME_SOURCE_BRANCH_PREFIX);
+  const [newTaskAllowedEgressDomains, setNewTaskAllowedEgressDomains] = useState(DEFAULT_RUNTIME_SOURCE_EGRESS_DOMAINS);
   const [taskCreateState, setTaskCreateState] = useState<"idle" | "submitting">("idle");
   const [taskCreateError, setTaskCreateError] = useState<string | null>(null);
   const [priorityMutations, setPriorityMutations] = useState<ReadonlySet<string>>(() => new Set());
@@ -114,6 +119,7 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
   const [taskDetailLoadState, setTaskDetailLoadState] = useState<LoadState>("idle");
   const [taskDetailError, setTaskDetailError] = useState<string | null>(null);
   const [taskDetailMode, setTaskDetailMode] = useState<TaskDetailMode>("panel");
+  const selectedTaskIdRef = useRef<string | null>(selectedTaskId);
   const isAuthenticated = operatorId.length > 0;
   const api = useMemo(
     () => (isAuthenticated ? createPublicApiClient({ baseUrl: apiBaseUrl, operatorId }) : null),
@@ -121,6 +127,10 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
   );
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? null;
   const groupedTasks = useMemo(() => groupTasksByColumn(tasks), [tasks]);
+
+  useEffect(() => {
+    selectedTaskIdRef.current = selectedTaskId;
+  }, [selectedTaskId]);
 
   useEffect(() => {
     if (!api) {
@@ -208,8 +218,9 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
           setTaskMutationError(null);
           if (projectsResponse) setProjects(projectsResponse.projects);
         }
-        if (selectedTaskId) {
-          const detailResponse = await api.readTask(selectedProjectId, selectedTaskId);
+        const currentSelectedTaskId = selectedTaskIdRef.current;
+        if (currentSelectedTaskId) {
+          const detailResponse = await api.readTask(selectedProjectId, currentSelectedTaskId);
           if (!cancelled) {
             setTaskDetail((current) => (shouldUseIncomingTaskDetail(current, detailResponse.task) ? detailResponse.task : current));
             setTasks((current) => replaceTask(current, detailResponse.task));
@@ -239,7 +250,7 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
       cancelled = true;
       unsubscribe();
     };
-  }, [api, apiBaseUrl, operatorId, selectedProjectId, selectedTaskId]);
+  }, [api, apiBaseUrl, operatorId, selectedProjectId]);
 
   useEffect(() => {
     if (!api || !selectedProjectId || !selectedTaskId) {
@@ -326,6 +337,7 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
     setNewTaskRepositoryUrl("");
     setNewTaskBaseRef(DEFAULT_RUNTIME_SOURCE_BASE_REF);
     setNewTaskBranchPrefix(DEFAULT_RUNTIME_SOURCE_BRANCH_PREFIX);
+    setNewTaskAllowedEgressDomains(DEFAULT_RUNTIME_SOURCE_EGRESS_DOMAINS);
     setTaskCreateError(null);
   }
 
@@ -377,6 +389,10 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
     setNewTaskBranchPrefix(event.currentTarget.value);
   }
 
+  function updateNewTaskAllowedEgressDomains(event: ChangeEvent<HTMLInputElement>): void {
+    setNewTaskAllowedEgressDomains(event.currentTarget.value);
+  }
+
   async function submitNewTask(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (!api || !selectedProjectId) return;
@@ -392,6 +408,7 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
       repositoryUrl: newTaskRepositoryUrl,
       baseRef: newTaskBaseRef,
       taskBranchPrefix: newTaskBranchPrefix,
+      allowedEgressDomains: newTaskAllowedEgressDomains,
     });
     if (!runtimeSource.ok) {
       setTaskCreateError(runtimeSource.message);
@@ -785,6 +802,15 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
                       onChange={updateNewTaskBranchPrefix}
                     />
                   </label>
+                  <label htmlFor="new-task-egress-domains">
+                    <span>Allowed egress</span>
+                    <input
+                      id="new-task-egress-domains"
+                      name="new-task-egress-domains"
+                      value={newTaskAllowedEgressDomains}
+                      onChange={updateNewTaskAllowedEgressDomains}
+                    />
+                  </label>
                 </div>
               ) : null}
               {taskCreateError ? <p className="inline-error task-composer-error">{taskCreateError}</p> : null}
@@ -909,13 +935,15 @@ function readTaskRuntimeSourceInput(input: {
   readonly repositoryUrl: string;
   readonly baseRef: string;
   readonly taskBranchPrefix: string;
+  readonly allowedEgressDomains: string;
 }): { readonly ok: true; readonly source: PublicRuntimeSource | null } | { readonly ok: false; readonly message: string } {
   if (!input.enabled) return { ok: true, source: null };
 
   const repositoryUrl = input.repositoryUrl.trim();
   const baseRef = input.baseRef.trim();
   const taskBranchPrefix = input.taskBranchPrefix.trim();
-  const serialized = JSON.stringify({ repositoryUrl, baseRef, taskBranchPrefix });
+  const allowedEgressDomains = parseAllowedEgressDomains(input.allowedEgressDomains);
+  const serialized = JSON.stringify({ repositoryUrl, baseRef, taskBranchPrefix, allowedEgressDomains });
 
   if (!repositoryUrl || !baseRef || !taskBranchPrefix) {
     return { ok: false, message: "Repository, base ref, and branch prefix are required for GitHub source." };
@@ -932,8 +960,31 @@ function readTaskRuntimeSourceInput(input: {
   if (/token|secret|password|github_pat_|ghp_/i.test(serialized)) {
     return { ok: false, message: "GitHub source fields must not contain secret values." };
   }
+  if (allowedEgressDomains.length === 0) {
+    return { ok: false, message: "At least one allowed egress domain is required for GitHub source." };
+  }
 
-  return { ok: true, source: { repositoryUrl, baseRef, taskBranchPrefix } };
+  return {
+    ok: true,
+    source: {
+      repositoryUrl,
+      baseRef,
+      taskBranchPrefix,
+      allowedEgressDomains,
+      commandProfile: DEFAULT_RUNTIME_SOURCE_COMMAND_PROFILE,
+    },
+  };
+}
+
+function parseAllowedEgressDomains(value: string): readonly string[] {
+  return [
+    ...new Set(
+      value
+        .split(",")
+        .map((part) => part.trim().toLowerCase())
+        .filter((domain) => /^[a-z0-9][a-z0-9.-]*[a-z0-9]$/.test(domain) && !domain.includes("..")),
+    ),
+  ];
 }
 
 function TaskPanel({
@@ -1082,6 +1133,9 @@ function TaskPanel({
       {loadState === "ready" && detail ? (
         <div className="task-panel-body">
           <section className="panel-section" aria-label="Task summary">
+            <div className="task-prompt-bubble">
+              <p>{detail.description ? `${detail.title}: ${detail.description}` : detail.title}</p>
+            </div>
             <dl className="detail-grid">
               <div>
                 <dt>Status</dt>
@@ -1098,6 +1152,8 @@ function TaskPanel({
             </dl>
             {detail.description ? <p>{detail.description}</p> : null}
           </section>
+
+          <SessionInitializationSection detail={detail} session={activeSession} />
 
           <ArtifactSection detail={detail} onPreview={setPreviewArtifact} />
 
@@ -1293,6 +1349,44 @@ function TaskPanel({
         </div>
       ) : null}
     </aside>
+  );
+}
+
+function SessionInitializationSection({
+  detail,
+  session,
+}: {
+  readonly detail: PublicTaskDetail;
+  readonly session: PublicSessionSummary | null;
+}) {
+  const milestones = getSessionInitializationMilestones(detail, session);
+  const securityBadges = getSecurityLifecycleBadges(detail);
+
+  return (
+    <section className="panel-section session-initialization-section" aria-label="Session initialization">
+      <header className="session-init-header">
+        <h3>Initialized Session</h3>
+        <span>{session?.status ?? "queued"}</span>
+      </header>
+      <ol className="session-milestone-list">
+        {milestones.map((milestone) => (
+          <li key={milestone.id} className={`session-milestone session-milestone-${milestone.status}`}>
+            <span className="session-milestone-icon" aria-hidden="true" />
+            <div>
+              <strong>{milestone.label}</strong>
+              {milestone.detail ? <p>{milestone.detail}</p> : null}
+            </div>
+          </li>
+        ))}
+      </ol>
+      <ul className="security-badge-list" aria-label="Sandbox security status">
+        {securityBadges.map((badge) => (
+          <li key={badge.id} className={`security-badge security-badge-${badge.tone}`}>
+            {badge.label}
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 

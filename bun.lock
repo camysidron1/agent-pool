@@ -20,6 +20,14 @@
         "express": "^5.1.0",
       },
     },
+    "apps/egress-gateway": {
+      "name": "@agent-pool/egress-gateway",
+      "version": "0.0.0",
+      "dependencies": {
+        "@agent-pool/auth": "workspace:*",
+        "@agent-pool/config": "workspace:*",
+      },
+    },
     "apps/orchestrator": {
       "name": "@agent-pool/orchestrator",
       "version": "0.0.0",
@@ -113,6 +121,8 @@
     "@agent-pool/config": ["@agent-pool/config@workspace:packages/config"],
 
     "@agent-pool/db": ["@agent-pool/db@workspace:packages/db"],
+
+    "@agent-pool/egress-gateway": ["@agent-pool/egress-gateway@workspace:apps/egress-gateway"],
 
     "@agent-pool/orchestrator": ["@agent-pool/orchestrator@workspace:apps/orchestrator"],
 

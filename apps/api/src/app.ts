@@ -8,6 +8,7 @@ import { createStorageAdapter, type StorageAdapter } from "@agent-pool/storage";
 
 import { createApiBackendServices } from "./backend-services";
 import type { ApiDatabaseConnection } from "./database";
+import { createGitHubAppTokenBroker, type GitHubTokenBroker } from "./github-token-broker";
 import { createOutboxPublisher, type OutboxPublisher } from "./outbox-publisher";
 import type { OutboxPublisherLoop } from "./outbox-publisher-loop";
 import { registerPublicApiRoutes, type PublicSseHub } from "./public-api";
@@ -23,6 +24,7 @@ export type ApiAppOptions = {
   readonly publicSseHub?: PublicSseHub;
   readonly outboxPublisher?: OutboxPublisher;
   readonly outboxPublisherLoop?: OutboxPublisherLoop;
+  readonly githubTokenBroker?: GitHubTokenBroker | null;
 };
 
 export function createApiApp(options: ApiAppOptions = {}): Express {
@@ -32,6 +34,10 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
   const storage = options.storage ?? createStorageAdapter(config.storage);
   const outboxPublisher = options.outboxPublisher ?? (database ? createOutboxPublisher({ database, queue }) : null);
   const outboxPublisherLoop = options.outboxPublisherLoop ?? null;
+  const githubTokenBroker =
+    options.githubTokenBroker === undefined
+      ? createGitHubAppTokenBroker({ config: config.githubApp })
+      : options.githubTokenBroker;
   const services = database ? createApiBackendServices({ database, queue }) : null;
   const app = express();
   const requireInternalServiceToken = createInternalServiceTokenMiddleware(config);
@@ -142,13 +148,22 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
     }
 
     const body = parseObjectBody(request.body);
-    const result = services.claimNextTask({
-      projectId: readOptionalString(body.projectId),
-      sessionId: readOptionalString(body.sessionId),
-      runtimeProvider: readOptionalString(body.runtimeProvider),
-      bridgeCallbackBaseUrl: config.bridge.callbackBaseUrl,
-      bridgeSessionTokenHeaderName: config.bridge.sessionTokenHeaderName,
-    });
+    const sourceSnapshotId = readOptionalString(body.sourceSnapshotId);
+    let result;
+    try {
+      result = services.claimNextTask({
+        projectId: readOptionalString(body.projectId),
+        sessionId: readOptionalString(body.sessionId),
+        sourceSnapshotId,
+        runtimeProvider: readOptionalString(body.runtimeProvider),
+        bridgeCallbackBaseUrl: config.bridge.callbackBaseUrl,
+        bridgeSessionTokenHeaderName: config.bridge.sessionTokenHeaderName,
+      });
+    } catch (error) {
+      if (!sourceSnapshotId) throw error;
+      response.status(409).json({ ok: false, error: { code: "invalid_source_snapshot", message: errorMessage(error) } });
+      return;
+    }
 
     if (!result.ok) {
       response.status(200).json({ ok: true, claimed: false, reason: result.reason });
@@ -206,8 +221,41 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
   app.post("/internal/orchestrator/sessions/:sessionId/heartbeat", requireInternalServiceToken, (request, response) => {
     respondWithSessionHeartbeat(response, services, request);
   });
+  app.post("/internal/orchestrator/sessions/:sessionId/github-token", requireInternalServiceToken, async (request, response) => {
+    await respondWithGitHubSessionToken(response, { database, broker: githubTokenBroker, config }, request);
+  });
+  app.post("/internal/egress/authorize", requireInternalServiceToken, (request, response) => {
+    respondWithEgressAuthorization(response, { database, config }, request);
+  });
+  app.post("/internal/egress/report", requireInternalServiceToken, (request, response) => {
+    respondWithEgressReport(response, { database, services }, request);
+  });
   app.post("/internal/orchestrator/reconcile", requireInternalServiceToken, (request, response) => {
     respondWithReconcile(response, services, request);
+  });
+  app.post("/internal/orchestrator/runtime-sandboxes/claim-finalization", requireInternalServiceToken, (request, response) => {
+    respondWithRuntimeSandboxFinalizationClaim(response, services, request);
+  });
+  app.post("/internal/orchestrator/runtime-sandboxes/:runtimeSandboxId/snapshot-created", requireInternalServiceToken, (request, response) => {
+    respondWithRuntimeSandboxSnapshotReport(response, services, request, "created");
+  });
+  app.post("/internal/orchestrator/runtime-sandboxes/:runtimeSandboxId/snapshot-failed", requireInternalServiceToken, (request, response) => {
+    respondWithRuntimeSandboxSnapshotReport(response, services, request, "failed");
+  });
+  app.post("/internal/orchestrator/runtime-sandboxes/:runtimeSandboxId/cleanup-succeeded", requireInternalServiceToken, (request, response) => {
+    respondWithRuntimeSandboxCleanupReport(response, services, request, "succeeded");
+  });
+  app.post("/internal/orchestrator/runtime-sandboxes/:runtimeSandboxId/cleanup-failed", requireInternalServiceToken, (request, response) => {
+    respondWithRuntimeSandboxCleanupReport(response, services, request, "failed");
+  });
+  app.post("/internal/orchestrator/snapshots/claim-expired", requireInternalServiceToken, (request, response) => {
+    respondWithExpiredSnapshotDeletionClaim(response, services, request);
+  });
+  app.post("/internal/orchestrator/snapshots/:snapshotId/deleted", requireInternalServiceToken, (request, response) => {
+    respondWithExpiredSnapshotDeletionReport(response, services, request, "deleted");
+  });
+  app.post("/internal/orchestrator/snapshots/:snapshotId/delete-failed", requireInternalServiceToken, (request, response) => {
+    respondWithExpiredSnapshotDeletionReport(response, services, request, "failed");
   });
   app.post("/callbacks/:kind", (request, response) => {
     respondWithBridgeCallback(response, services, request);
@@ -274,6 +322,8 @@ function readSmokeRuntimeSource(body: unknown): SmokeRuntimeSourceInput | null {
     repositoryUrl: readRequiredString(runtimeSource, "repositoryUrl", "runtimeSource"),
     baseRef: readRequiredString(runtimeSource, "baseRef", "runtimeSource"),
     taskBranchPrefix: readRequiredString(runtimeSource, "taskBranchPrefix", "runtimeSource"),
+    allowedEgressDomains: readOptionalRecordStringArray(runtimeSource, "allowedEgressDomains", "runtimeSource"),
+    commandProfile: readOptionalRecordString(runtimeSource, "commandProfile", "runtimeSource"),
   };
 }
 
@@ -287,6 +337,24 @@ function readRequiredString(record: Readonly<Record<string, unknown>>, key: stri
     throw new Error(`${name} is missing ${key}`);
   }
   return value.trim();
+}
+
+function readOptionalRecordString(record: Readonly<Record<string, unknown>>, key: string, name: string): string | null {
+  const value = record[key];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") {
+    throw new Error(`${name}.${key} must be a string`);
+  }
+  return value.trim() || null;
+}
+
+function readOptionalRecordStringArray(record: Readonly<Record<string, unknown>>, key: string, name: string): readonly string[] | undefined {
+  const value = record[key];
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) {
+    throw new Error(`${name}.${key} must be an array of strings`);
+  }
+  return value.map((item) => item.trim());
 }
 
 function createInternalServiceTokenMiddleware(config: AppConfig) {
@@ -447,6 +515,170 @@ function respondWithSessionHeartbeat(
   });
 }
 
+async function respondWithGitHubSessionToken(
+  response: Response,
+  options: {
+    readonly database?: ApiDatabaseConnection;
+    readonly broker: GitHubTokenBroker | null;
+    readonly config: AppConfig;
+  },
+  request: Request,
+): Promise<void> {
+  if (!options.database) {
+    response.status(503).json({ ok: false, error: "database_unavailable" });
+    return;
+  }
+  if (!options.broker) {
+    response.status(503).json({ ok: false, error: "github_token_broker_unavailable" });
+    return;
+  }
+
+  const sessionId = request.params?.sessionId;
+  if (!sessionId) {
+    response.status(400).json({ ok: false, error: "missing_session_id" });
+    return;
+  }
+  const body = parseObjectBody(request.body);
+  const projectId = readOptionalString(body.projectId);
+  if (!projectId) {
+    response.status(400).json({ ok: false, error: "missing_project_id" });
+    return;
+  }
+
+  const runtimeSource = readSessionRuntimeSource(options.database, projectId, sessionId);
+  if (!runtimeSource) {
+    response.status(404).json({ ok: false, error: "session_runtime_source_not_found" });
+    return;
+  }
+
+  const result = await options.broker.mintInstallationToken({
+    repositoryUrl: runtimeSource.repositoryUrl,
+  });
+
+  if (!result.ok) {
+    response.status(result.status).json({ ok: false, error: result.error });
+    return;
+  }
+
+  response.status(200).json({
+    ok: true,
+    token: {
+      envName: options.config.githubApp.tokenEnvName,
+      value: result.token.value,
+      expiresAt: result.token.expiresAt,
+      repositoryUrl: result.token.repositoryUrl,
+    },
+  });
+}
+
+function respondWithEgressAuthorization(
+  response: Response,
+  options: {
+    readonly database?: ApiDatabaseConnection;
+    readonly config: AppConfig;
+  },
+  request: Request,
+): void {
+  if (!options.database) {
+    response.status(503).json({ ok: false, error: "database_unavailable" });
+    return;
+  }
+
+  const body = parseObjectBody(request.body);
+  const projectId = readOptionalString(body.projectId);
+  const sessionId = readOptionalString(body.sessionId);
+  const proxyToken = readOptionalString(body.proxyToken);
+  const host = normalizeHost(readOptionalString(body.host));
+  if (!projectId || !sessionId || !proxyToken || !host) {
+    response.status(400).json({ ok: false, error: "invalid_egress_authorization_request" });
+    return;
+  }
+
+  const runtimeSource = readSessionRuntimeSource(options.database, projectId, sessionId);
+  if (!runtimeSource) {
+    response.status(404).json({ ok: false, error: "session_runtime_source_not_found" });
+    return;
+  }
+  if (proxyToken !== runtimeSource.sessionToken) {
+    response.status(403).json({ ok: false, allowed: false, reason: "invalid_proxy_token" });
+    return;
+  }
+
+  const globallyAllowed = options.config.controlPlane.e2b.allowedEgressDomains.includes(host);
+  const sessionAllowed = runtimeSource.allowedEgressDomains.includes(host);
+  response.status(200).json({
+    ok: true,
+    allowed: globallyAllowed && sessionAllowed,
+    reason: globallyAllowed ? (sessionAllowed ? "allowed" : "not_declared_for_session") : "not_globally_allowed",
+    taskId: runtimeSource.taskId,
+  });
+}
+
+function respondWithEgressReport(
+  response: Response,
+  options: {
+    readonly database?: ApiDatabaseConnection;
+    readonly services: ApiBackendServices | null;
+  },
+  request: Request,
+): void {
+  if (!options.database || !options.services) {
+    response.status(503).json({ ok: false, error: "database_unavailable" });
+    return;
+  }
+
+  const body = parseObjectBody(request.body);
+  const projectId = readOptionalString(body.projectId);
+  const sessionId = readOptionalString(body.sessionId);
+  const proxyToken = readOptionalString(body.proxyToken);
+  const host = normalizeHost(readOptionalString(body.host));
+  const reason = readOptionalString(body.reason) ?? "unknown";
+  const method = readOptionalString(body.method) ?? "CONNECT";
+  const allowed = body.allowed === true;
+  if (!projectId || !sessionId || !proxyToken || !host) {
+    response.status(400).json({ ok: false, error: "invalid_egress_report_request" });
+    return;
+  }
+
+  const runtimeSource = readSessionRuntimeSource(options.database, projectId, sessionId);
+  if (!runtimeSource) {
+    response.status(404).json({ ok: false, error: "session_runtime_source_not_found" });
+    return;
+  }
+  if (proxyToken !== runtimeSource.sessionToken) {
+    response.status(403).json({ ok: false, error: "invalid_proxy_token" });
+    return;
+  }
+
+  const stream = "system" as const;
+  const sequence = nextOutputSequence(options.database, projectId, runtimeSource.taskId, sessionId, stream);
+  const byteOffset = currentLogByteOffset(options.database, projectId, runtimeSource.taskId, sessionId, stream);
+  const text = `${JSON.stringify({
+    type: "security.egress",
+    securityKind: "egress",
+    host,
+    method,
+    allowed,
+    reason,
+  })}\n`;
+  const result = options.services.recordSessionOutput({
+    projectId,
+    taskId: runtimeSource.taskId,
+    sessionId,
+    stream,
+    sequence,
+    byteOffset,
+    text,
+    observedAt: new Date().toISOString(),
+  });
+
+  if (!result.ok) {
+    response.status(result.error.code === "not_found" ? 404 : 409).json({ ok: false, error: result.error });
+    return;
+  }
+  response.status(200).json({ ok: true, output: result.output, event: result.event, outbox: result.outbox });
+}
+
 function respondWithReconcile(
   response: Response,
   services: ApiBackendServices | null,
@@ -477,6 +709,215 @@ function respondWithReconcile(
     stale: result.stale,
     lost: result.lost,
     events: result.events,
+    outbox: result.outbox,
+  });
+}
+
+function respondWithRuntimeSandboxFinalizationClaim(
+  response: Response,
+  services: ApiBackendServices | null,
+  request: Request,
+): void {
+  if (!services) {
+    response.status(503).json({ ok: false, error: "database_unavailable" });
+    return;
+  }
+
+  const body = parseObjectBody(request.body);
+  const result = services.claimNextRuntimeSandboxFinalization({
+    projectId: readOptionalString(body.projectId),
+    cleanupGraceBefore: readOptionalString(body.cleanupGraceBefore),
+  });
+
+  if (!result.ok) {
+    response.status(200).json({ ok: true, claimed: false, reason: result.reason });
+    return;
+  }
+
+  response.status(200).json({
+    ok: true,
+    claimed: true,
+    finalization: result.finalization,
+    event: result.event,
+    outbox: result.outbox,
+  });
+}
+
+function respondWithRuntimeSandboxSnapshotReport(
+  response: Response,
+  services: ApiBackendServices | null,
+  request: Request,
+  report: "created" | "failed",
+): void {
+  if (!services) {
+    response.status(503).json({ ok: false, error: "database_unavailable" });
+    return;
+  }
+
+  const runtimeSandboxId = request.params?.runtimeSandboxId;
+  if (!runtimeSandboxId) {
+    response.status(400).json({ ok: false, error: "missing_runtime_sandbox_id" });
+    return;
+  }
+
+  const body = parseObjectBody(request.body);
+  const projectId = readOptionalString(body.projectId);
+  if (!projectId) {
+    response.status(400).json({ ok: false, error: "missing_project_id" });
+    return;
+  }
+
+  const result =
+    report === "created"
+      ? services.reportRuntimeSandboxSnapshotCreated({
+          projectId,
+          runtimeSandboxId,
+          providerSnapshotId: readOptionalString(body.providerSnapshotId) ?? "",
+          expiresAt: readOptionalString(body.expiresAt),
+          metadata: readOptionalObject(body.metadata),
+        })
+      : services.reportRuntimeSandboxSnapshotFailed({
+          projectId,
+          runtimeSandboxId,
+          errorMessage: readOptionalString(body.errorMessage) ?? "snapshot failed without details",
+        });
+
+  if (!result.ok) {
+    response.status(result.error.code === "not_found" ? 404 : 409).json({ ok: false, error: result.error });
+    return;
+  }
+
+  response.status(200).json({
+    ok: true,
+    idempotent: result.idempotent,
+    snapshot: result.snapshot,
+    event: result.event,
+    outbox: result.outbox,
+  });
+}
+
+function respondWithRuntimeSandboxCleanupReport(
+  response: Response,
+  services: ApiBackendServices | null,
+  request: Request,
+  report: "succeeded" | "failed",
+): void {
+  if (!services) {
+    response.status(503).json({ ok: false, error: "database_unavailable" });
+    return;
+  }
+
+  const runtimeSandboxId = request.params?.runtimeSandboxId;
+  if (!runtimeSandboxId) {
+    response.status(400).json({ ok: false, error: "missing_runtime_sandbox_id" });
+    return;
+  }
+
+  const body = parseObjectBody(request.body);
+  const projectId = readOptionalString(body.projectId);
+  if (!projectId) {
+    response.status(400).json({ ok: false, error: "missing_project_id" });
+    return;
+  }
+
+  const input = {
+    projectId,
+    runtimeSandboxId,
+    errorMessage: readOptionalString(body.errorMessage),
+  };
+  const result =
+    report === "succeeded"
+      ? services.reportRuntimeSandboxCleanupSucceeded(input)
+      : services.reportRuntimeSandboxCleanupFailed(input);
+
+  if (!result.ok) {
+    response.status(result.error.code === "not_found" ? 404 : 409).json({ ok: false, error: result.error });
+    return;
+  }
+
+  response.status(200).json({
+    ok: true,
+    idempotent: result.idempotent,
+    runtimeSandbox: result.runtimeSandbox,
+    event: result.event,
+    outbox: result.outbox,
+  });
+}
+
+function respondWithExpiredSnapshotDeletionClaim(
+  response: Response,
+  services: ApiBackendServices | null,
+  request: Request,
+): void {
+  if (!services) {
+    response.status(503).json({ ok: false, error: "database_unavailable" });
+    return;
+  }
+
+  const body = parseObjectBody(request.body);
+  const result = services.claimNextExpiredSnapshotDeletion({
+    projectId: readOptionalString(body.projectId),
+    now: readOptionalString(body.now),
+  });
+
+  if (!result.ok) {
+    response.status(200).json({ ok: true, claimed: false, reason: result.reason });
+    return;
+  }
+
+  response.status(200).json({
+    ok: true,
+    claimed: true,
+    snapshot: result.snapshot,
+    event: result.event,
+    outbox: result.outbox,
+  });
+}
+
+function respondWithExpiredSnapshotDeletionReport(
+  response: Response,
+  services: ApiBackendServices | null,
+  request: Request,
+  report: "deleted" | "failed",
+): void {
+  if (!services) {
+    response.status(503).json({ ok: false, error: "database_unavailable" });
+    return;
+  }
+
+  const snapshotId = request.params?.snapshotId;
+  if (!snapshotId) {
+    response.status(400).json({ ok: false, error: "missing_snapshot_id" });
+    return;
+  }
+
+  const body = parseObjectBody(request.body);
+  const projectId = readOptionalString(body.projectId);
+  if (!projectId) {
+    response.status(400).json({ ok: false, error: "missing_project_id" });
+    return;
+  }
+
+  const input = {
+    projectId,
+    snapshotId,
+    errorMessage: readOptionalString(body.errorMessage),
+  };
+  const result =
+    report === "deleted"
+      ? services.reportExpiredSnapshotDeletionSucceeded(input)
+      : services.reportExpiredSnapshotDeletionFailed(input);
+
+  if (!result.ok) {
+    response.status(result.error.code === "not_found" ? 404 : 409).json({ ok: false, error: result.error });
+    return;
+  }
+
+  response.status(200).json({
+    ok: true,
+    idempotent: result.idempotent,
+    snapshot: result.snapshot,
+    event: result.event,
     outbox: result.outbox,
   });
 }
@@ -832,6 +1273,10 @@ function readOptionalString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function readSteeringReportStatus(value: unknown): "delivered" | "failed" | undefined {
   return value === "delivered" || value === "failed" ? value : undefined;
 }
@@ -871,6 +1316,83 @@ function readOptionalObject(value: unknown): Readonly<Record<string, unknown>> |
 
 function readStringArray(value: unknown): readonly string[] | undefined {
   return Array.isArray(value) && value.every((item) => typeof item === "string") ? value : undefined;
+}
+
+function readSessionRuntimeSource(
+  database: ApiDatabaseConnection,
+  projectId: string,
+  sessionId: string,
+): {
+  readonly taskId: string;
+  readonly repositoryUrl: string;
+  readonly allowedEgressDomains: readonly string[];
+  readonly sessionToken: string;
+} | null {
+  const row = database.sqlite
+    .query<{ task_id: string; runtime_source_json: string | null; bridge_session_token: string | null }, [string, string]>(
+      `SELECT s.task_id, t.runtime_source_json, s.bridge_session_token
+       FROM sessions s
+       JOIN tasks t ON t.project_id = s.project_id AND t.id = s.task_id
+       WHERE s.project_id = ? AND s.id = ?`,
+    )
+    .get(projectId, sessionId);
+
+  if (!row?.runtime_source_json) return null;
+  try {
+    const parsed = JSON.parse(row.runtime_source_json) as Readonly<Record<string, unknown>>;
+    const repositoryUrl = readOptionalString(parsed.repositoryUrl);
+    const allowedEgressDomains = readStringArray(parsed.allowedEgressDomains)?.map((domain) => domain.toLowerCase()) ?? [];
+    return repositoryUrl && row.bridge_session_token
+      ? { taskId: row.task_id, repositoryUrl, allowedEgressDomains, sessionToken: row.bridge_session_token }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function nextOutputSequence(
+  database: ApiDatabaseConnection,
+  projectId: string,
+  taskId: string,
+  sessionId: string,
+  stream: "stdout" | "stderr" | "combined" | "system",
+): number {
+  const rows = database.sqlite
+    .query<{ payload_json: string }, [string, string, string]>(
+      "SELECT payload_json FROM events WHERE project_id = ? AND session_id = ? AND task_id = ? AND type = 'session.output'",
+    )
+    .all(projectId, sessionId, taskId);
+  let max = 0;
+  for (const row of rows) {
+    const payload = readOptionalObject(JSON.parse(row.payload_json));
+    if (payload?.stream === stream && typeof payload.sequence === "number") {
+      max = Math.max(max, payload.sequence);
+    }
+  }
+  return max + 1;
+}
+
+function currentLogByteOffset(
+  database: ApiDatabaseConnection,
+  projectId: string,
+  taskId: string,
+  sessionId: string,
+  stream: "stdout" | "stderr" | "combined" | "system",
+): number {
+  const row = database.sqlite
+    .query<{ byte_offset: number }, [string, string, string, string]>(
+      "SELECT byte_offset FROM log_streams WHERE project_id = ? AND task_id = ? AND session_id = ? AND kind = ? ORDER BY created_at ASC, id ASC LIMIT 1",
+    )
+    .get(projectId, taskId, sessionId, stream);
+  return row?.byte_offset ?? 0;
+}
+
+function normalizeHost(value: string | undefined): string | null {
+  if (!value) return null;
+  const host = value.toLowerCase().replace(/\.$/, "");
+  if (!host || host.includes("/") || host.includes(":") || host.includes("*")) return null;
+  if (!/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/.test(host)) return null;
+  return host;
 }
 
 function countOutboxRows(database: ApiDatabaseConnection, status: "queued" | "published" | "failed"): number {

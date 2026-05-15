@@ -32,6 +32,8 @@ deploy/terraform/**/*.tfplan
 deploy/terraform/**/*.tfvars
 
 # Local deployment secrets
+.env
+.env.*
 .agent-pool.secrets.env
 deploy/kubernetes/*.secrets.env
 

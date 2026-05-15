@@ -11,6 +11,7 @@ import { createApiApp } from "../src/app";
 import { API_DATABASE_PATH_ENV, openApiDatabase } from "../src/database";
 import { createOutboxPublisherLoop, type OutboxPublisherLoop } from "../src/outbox-publisher-loop";
 import { createPublicSseHub, type PublicSseHub } from "../src/public-api";
+import type { GitHubTokenBroker } from "../src/github-token-broker";
 
 const cleanupPaths: string[] = [];
 
@@ -79,6 +80,147 @@ describe("API service skeleton", () => {
       expect(await invalid.json()).toMatchObject({ ok: false, reason: "invalid" });
       expect(ok.status).toBe(200);
       expect(await ok.json()).toMatchObject({ ok: true, subject: "internal-service" });
+    } finally {
+      await close();
+    }
+  });
+
+  test("internal GitHub token broker requires service-token auth and returns short-lived repo-scoped credentials", async () => {
+    const brokerCalls: string[] = [];
+    const broker: GitHubTokenBroker = {
+      async mintInstallationToken(input) {
+        brokerCalls.push(input.repositoryUrl);
+        return {
+          ok: true,
+          token: {
+            envName: "GITHUB_TOKEN",
+            value: "short-lived-installation-token",
+            expiresAt: "2026-05-14T19:00:00.000Z",
+            repositoryUrl: input.repositoryUrl,
+          },
+        };
+      },
+    };
+    const { baseUrl, config, database, close } = await startTestApi({ githubTokenBroker: broker });
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      const project = services.createProject({ id: "project_github_token", slug: "github-token", name: "GitHub Token" });
+      const task = services.createTask({
+        id: "task_github_token",
+        projectId: project.id,
+        title: "Needs token",
+        runtimeSource: {
+          repositoryUrl: "https://github.com/example/tiny-fixture.git",
+          baseRef: "main",
+          taskBranchPrefix: "agent-pool/task",
+          allowedEgressDomains: ["github.com"],
+          commandProfile: "agent-pool-bun-pr",
+        },
+      }).task;
+      expect(services.claimNextTask({ projectId: project.id, sessionId: "session_github_token" })).toMatchObject({
+        ok: true,
+        task: { id: task.id },
+      });
+
+      const missing = await fetch(`${baseUrl}/internal/orchestrator/sessions/session_github_token/github-token`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id }),
+      });
+      const ok = await fetch(`${baseUrl}/internal/orchestrator/sessions/session_github_token/github-token`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+        body: JSON.stringify({ projectId: project.id }),
+      });
+      const okBody = await ok.json();
+
+      expect(missing.status).toBe(401);
+      expect(ok.status).toBe(200);
+      expect(okBody).toEqual({
+        ok: true,
+        token: {
+          envName: "GITHUB_TOKEN",
+          value: "short-lived-installation-token",
+          expiresAt: "2026-05-14T19:00:00.000Z",
+          repositoryUrl: "https://github.com/example/tiny-fixture.git",
+        },
+      });
+      expect(brokerCalls).toEqual(["https://github.com/example/tiny-fixture.git"]);
+    } finally {
+      await close();
+    }
+  });
+
+  test("internal egress authz enforces global and session runtime-source domains", async () => {
+    const { baseUrl, config, database, close } = await startTestApi({
+      env: {
+        AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com",
+      },
+    });
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      const project = services.createProject({ id: "project_egress", slug: "egress", name: "Egress" });
+      services.createTask({
+        id: "task_egress",
+        projectId: project.id,
+        title: "Egress",
+        runtimeSource: {
+          repositoryUrl: "https://github.com/example/tiny-fixture.git",
+          baseRef: "main",
+          taskBranchPrefix: "agent-pool/task",
+          allowedEgressDomains: ["github.com"],
+          commandProfile: "agent-pool-bun-pr",
+        },
+      });
+      const claim = services.claimNextTask({ projectId: project.id, sessionId: "session_egress" });
+      expect(claim).toMatchObject({ ok: true });
+      if (!claim.ok) throw new Error("claim failed");
+      const proxyToken = claim.session.bridge.sessionToken.token;
+
+      const authorize = (host: string) =>
+        fetch(`${baseUrl}/internal/egress/authorize`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            [config.serviceToken.headerName]: config.serviceToken.token,
+          },
+          body: JSON.stringify({ projectId: project.id, sessionId: "session_egress", proxyToken, host }),
+        });
+
+      await expect(authorize("github.com").then((response) => response.json())).resolves.toMatchObject({
+        ok: true,
+        allowed: true,
+        reason: "allowed",
+      });
+      await expect(authorize("api.github.com").then((response) => response.json())).resolves.toMatchObject({
+        ok: true,
+        allowed: false,
+        reason: "not_declared_for_session",
+      });
+      await expect(authorize("registry.npmjs.org").then((response) => response.json())).resolves.toMatchObject({
+        ok: true,
+        allowed: false,
+        reason: "not_globally_allowed",
+      });
+      await expect(
+        fetch(`${baseUrl}/internal/egress/authorize`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            [config.serviceToken.headerName]: config.serviceToken.token,
+          },
+          body: JSON.stringify({ projectId: project.id, sessionId: "session_egress", proxyToken: "wrong", host: "github.com" }),
+        }).then((response) => response.json()),
+      ).resolves.toMatchObject({
+        ok: false,
+        allowed: false,
+        reason: "invalid_proxy_token",
+      });
     } finally {
       await close();
     }
@@ -1166,6 +1308,8 @@ describe("API service skeleton", () => {
         repositoryUrl: "https://github.com/example/tiny-fixture.git",
         baseRef: "main",
         taskBranchPrefix: "agent-pool/e2b-smoke",
+        allowedEgressDomains: ["github.com", "api.github.com"],
+        commandProfile: "agent-pool-bun-pr",
       };
       const firstSeed = await fetch(`${baseUrl}/internal/smoke/seed`, {
         method: "POST",
@@ -2477,6 +2621,7 @@ async function startTestApi(options: {
   readonly outboxPublisherLoop?: OutboxPublisherLoop;
   readonly queue?: RabbitMqAdapter;
   readonly publicSseHub?: PublicSseHub;
+  readonly githubTokenBroker?: GitHubTokenBroker | null;
 } = {}): Promise<{
   readonly baseUrl: string;
   readonly config: ReturnType<typeof loadConfig>;
@@ -2496,7 +2641,14 @@ async function startTestApi(options: {
   const config = loadConfig(env);
   const database = openApiDatabase(env);
   const queue = options.queue ?? createRabbitMqAdapter(config.rabbitmq);
-  const app = createApiApp({ config, database, queue, outboxPublisherLoop: options.outboxPublisherLoop, publicSseHub: options.publicSseHub });
+  const app = createApiApp({
+    config,
+    database,
+    queue,
+    outboxPublisherLoop: options.outboxPublisherLoop,
+    publicSseHub: options.publicSseHub,
+    githubTokenBroker: options.githubTokenBroker,
+  });
   const server = app.listen(0);
   const address = server.address();
 

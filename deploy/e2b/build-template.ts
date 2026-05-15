@@ -1,8 +1,7 @@
 import { Template, defaultBuildLogger } from "e2b";
 
+import { loadLocalEnv, readProcessEnv, type EnvSource } from "../local-env";
 import { AGENT_POOL_E2B_TEMPLATE_NAME, agentPoolE2BTemplate } from "./template";
-
-type EnvSource = Readonly<Record<string, string | undefined>>;
 
 export type E2BTemplateBuildPlan = {
   readonly name: string;
@@ -16,15 +15,16 @@ if (import.meta.main) {
   await main(Bun.argv.slice(2));
 }
 
-export async function main(args: readonly string[], env: EnvSource = readProcessEnv()): Promise<void> {
-  const plan = createE2BTemplateBuildPlan(args, env);
+export async function main(args: readonly string[], env?: EnvSource): Promise<void> {
+  const resolvedEnv = env ?? await loadLocalEnv();
+  const plan = createE2BTemplateBuildPlan(args, resolvedEnv);
 
   if (plan.dryRun) {
     process.stdout.write(`${JSON.stringify({ ok: true, ...plan }, null, 2)}\n`);
     return;
   }
 
-  const apiKey = env.E2B_API_KEY?.trim();
+  const apiKey = resolvedEnv.E2B_API_KEY?.trim();
   if (!apiKey) {
     throw new Error("E2B_API_KEY is required to build the Agent Pool E2B template");
   }
@@ -99,14 +99,4 @@ function readPositiveInteger(value: string | undefined, fallback: number, name: 
   const parsed = Number(raw);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer`);
   return parsed;
-}
-
-function readProcessEnv(): EnvSource {
-  const processLike = globalThis as typeof globalThis & {
-    process?: {
-      env?: EnvSource;
-    };
-  };
-
-  return processLike.process?.env ?? {};
 }

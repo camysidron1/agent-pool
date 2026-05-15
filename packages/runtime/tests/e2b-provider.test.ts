@@ -4,10 +4,13 @@ import {
   createE2BRuntimeProvider,
   type E2BCommandResult,
   type E2BCommandRunOptions,
+  type E2BCreateSnapshotOptions,
+  type E2BDeleteSnapshotOptions,
   type E2BDestroySandboxOptions,
   type E2BRuntimeClient,
   type E2BRuntimeProviderConfig,
   type E2BSandboxCreateInput,
+  type RuntimeLifecycleLogEvent,
   type RuntimeSessionRequest,
 } from "../src";
 
@@ -26,6 +29,16 @@ type E2BClientCall =
       readonly kind: "destroy";
       readonly sandboxId: string;
       readonly options?: E2BDestroySandboxOptions;
+    }
+  | {
+      readonly kind: "snapshot";
+      readonly sandboxId: string;
+      readonly options?: E2BCreateSnapshotOptions;
+    }
+  | {
+      readonly kind: "deleteSnapshot";
+      readonly snapshotId: string;
+      readonly options?: E2BDeleteSnapshotOptions;
     };
 
 const config: E2BRuntimeProviderConfig = {
@@ -96,11 +109,11 @@ describe("E2B runtime provider", () => {
     });
     expect(createCall?.input.redactedLaunchSpec.environment.secrets).toEqual({ GITHUB_TOKEN: "[REDACTED]" });
     expect(commandCalls).toHaveLength(4);
-    expect(commandCalls.map((call) => call.command[0])).toEqual(["git", "git", "git", "sh"]);
+    expect(commandCalls.map((call) => call.command[0])).toEqual(["sh", "git", "git", "sh"]);
     expect(commandCalls[3]?.command).toEqual([
       "sh",
       "-lc",
-      "nohup bun run '/workspace/agent-pool/packages/session-bridge/src/sandbox-entry.ts' > /tmp/agent-pool-session-bridge.log 2>&1 &",
+      "nohup bun run '/agent-pool/session-bridge/src/sandbox-entry.ts' > /tmp/agent-pool-session-bridge.log 2>&1 &",
     ]);
     expect(commandCalls[0]?.options.env).toMatchObject({
       GIT_TERMINAL_PROMPT: "0",
@@ -120,6 +133,61 @@ describe("E2B runtime provider", () => {
     expect(JSON.stringify(handle.metadata)).not.toContain("must-not-project");
   });
 
+  test("emits structured redacted lifecycle logs for sandbox startup commands and cleanup", async () => {
+    const { client } = createRecordingClient();
+    const events: RuntimeLifecycleLogEvent[] = [];
+    const provider = createE2BRuntimeProvider({
+      client,
+      config,
+      env: {
+        GITHUB_TOKEN: "github-secret",
+      },
+      secretEnvNames: ["GITHUB_TOKEN"],
+      logger: (event) => {
+        events.push(event);
+      },
+    });
+
+    const handle = await provider.startSession(request);
+    await provider.stopSession(handle);
+
+    expect(events.map((event) => event.event)).toEqual([
+      "runtime.sandbox.starting",
+      "runtime.sandbox.created",
+      "runtime.command.started",
+      "runtime.command.succeeded",
+      "runtime.command.started",
+      "runtime.command.succeeded",
+      "runtime.command.started",
+      "runtime.command.succeeded",
+      "runtime.command.started",
+      "runtime.command.succeeded",
+      "runtime.sandbox.started",
+      "runtime.sandbox.cleanup.started",
+      "runtime.sandbox.cleanup.succeeded",
+    ]);
+    expect(events.find((event) => event.event === "runtime.command.started")).toMatchObject({
+      provider: "e2b",
+      projectId: "project_a",
+      taskId: "task_1",
+      sessionId: "session_1",
+      sandboxId: "sandbox_1",
+      commandLabel: "prepare repository",
+      command: [
+        "sh",
+        "-lc",
+        expect.stringContaining("git clone --no-checkout https://github.com/example/tiny-fixture.git /workspace/agent-pool"),
+      ],
+    });
+    expect(events.find((event) => event.event === "runtime.sandbox.cleanup.succeeded")).toMatchObject({
+      provider: "e2b",
+      sessionId: "session_1",
+      sandboxId: "sandbox_1",
+    });
+    expect(JSON.stringify(events)).not.toContain("github-secret");
+    expect(JSON.stringify(events)).not.toContain("session-secret");
+  });
+
   test("rejects missing runtime source or GitHub credentials before creating a sandbox", async () => {
     const missingSourceClient = createRecordingClient();
     const missingSourceProvider = createE2BRuntimeProvider({
@@ -132,8 +200,8 @@ describe("E2B runtime provider", () => {
     const missingTokenProvider = createE2BRuntimeProvider({
       client: missingTokenClient.client,
       config: { ...config, githubTokenConfigured: false },
-      env: { GITHUB_TOKEN: "github-secret" },
-      secretEnvNames: ["GITHUB_TOKEN"],
+      env: {},
+      secretEnvNames: [],
     });
 
     await expect(missingSourceProvider.startSession({ ...request, task: {} })).rejects.toThrow(
@@ -181,7 +249,7 @@ describe("E2B runtime provider", () => {
 
     const message = await rejectedMessage(provider.startSession(request));
 
-    expect(message).toContain("e2b command failed (clone repository, exit 128)");
+    expect(message).toContain("e2b command failed (prepare repository, exit 128)");
     expect(message).not.toContain("github-secret");
     expect(calls.some((call) => call.kind === "destroy" && call.sandboxId === "sandbox_1")).toBe(true);
   });
@@ -257,6 +325,9 @@ describe("E2B runtime provider", () => {
       suspend: false,
       resume: false,
       fork: false,
+      snapshot: true,
+      deleteSnapshot: true,
+      startFromSnapshot: true,
     });
     expect("suspendSession" in provider).toBe(false);
     expect("resumeSession" in provider).toBe(false);
@@ -317,6 +388,31 @@ describe("E2B runtime provider", () => {
       "cleanup timed out after 45000ms",
     );
   });
+
+  test("creates and deletes E2B snapshots through the client boundary", async () => {
+    const { client, calls } = createRecordingClient();
+    const provider = createE2BRuntimeProvider({
+      client,
+      config,
+      env: { GITHUB_TOKEN: "github-secret" },
+      secretEnvNames: ["GITHUB_TOKEN"],
+    });
+
+    const snapshot = await provider.createSnapshot({ provider: "e2b", sessionId: "sandbox_1" });
+    await provider.deleteSnapshot(snapshot);
+
+    expect(snapshot).toMatchObject({
+      provider: "e2b",
+      snapshotId: "snapshot_1",
+      sourceSessionId: "sandbox_1",
+    });
+    expect(calls.filter((call) => call.kind === "snapshot")).toEqual([
+      { kind: "snapshot", sandboxId: "sandbox_1", options: { timeoutMs: 45_000 } },
+    ]);
+    expect(calls.filter((call) => call.kind === "deleteSnapshot")).toEqual([
+      { kind: "deleteSnapshot", snapshotId: "snapshot_1", options: { timeoutMs: 45_000 } },
+    ]);
+  });
 });
 
 function createRecordingClient(overrides: {
@@ -327,6 +423,8 @@ function createRecordingClient(overrides: {
     options: E2BCommandRunOptions,
   ) => Promise<E2BCommandResult>;
   readonly destroySandbox?: (sandboxId: string, options?: E2BDestroySandboxOptions) => Promise<void>;
+  readonly createSnapshot?: (sandboxId: string, options?: E2BCreateSnapshotOptions) => Promise<{ readonly snapshotId: string }>;
+  readonly deleteSnapshot?: (snapshotId: string, options?: E2BDeleteSnapshotOptions) => Promise<void>;
 } = {}): { readonly client: E2BRuntimeClient; readonly calls: readonly E2BClientCall[] } {
   const calls: E2BClientCall[] = [];
   const client: E2BRuntimeClient = {
@@ -341,6 +439,14 @@ function createRecordingClient(overrides: {
     async destroySandbox(sandboxId, options) {
       calls.push({ kind: "destroy", sandboxId, options });
       await overrides.destroySandbox?.(sandboxId, options);
+    },
+    async createSnapshot(sandboxId, options) {
+      calls.push({ kind: "snapshot", sandboxId, options });
+      return overrides.createSnapshot?.(sandboxId, options) ?? { snapshotId: "snapshot_1" };
+    },
+    async deleteSnapshot(snapshotId, options) {
+      calls.push({ kind: "deleteSnapshot", snapshotId, options });
+      await overrides.deleteSnapshot?.(snapshotId, options);
     },
   };
 

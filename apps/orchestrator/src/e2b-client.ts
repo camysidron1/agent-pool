@@ -4,6 +4,7 @@ import type {
   E2BDestroySandboxOptions,
   E2BRuntimeClient,
   E2BSandboxCreateInput,
+  E2BSnapshotHandle,
 } from "@agent-pool/runtime";
 
 type E2BSdkCommandStartOptions = {
@@ -28,6 +29,10 @@ type E2BSdkSandboxCreateOptions = {
   readonly requestTimeoutMs?: number;
   readonly secure?: boolean;
   readonly allowInternetAccess?: boolean;
+  readonly network?: {
+    readonly allowOut?: readonly string[];
+    readonly allowPublicTraffic?: boolean;
+  };
 };
 
 type E2BSdkSandboxApiOptions = {
@@ -41,12 +46,15 @@ type E2BSdkSandbox = {
     readonly run: (command: string, options?: E2BSdkCommandStartOptions) => Promise<E2BSdkCommandResult>;
   };
   readonly kill: (options?: Pick<E2BSdkSandboxApiOptions, "requestTimeoutMs">) => Promise<void>;
+  readonly createSnapshot: (options?: E2BSdkSandboxApiOptions) => Promise<E2BSnapshotHandle>;
 };
 
 type E2BSdkSandboxConstructor = {
   readonly create: (template: string, options?: E2BSdkSandboxCreateOptions) => Promise<E2BSdkSandbox>;
   readonly connect: (sandboxId: string, options?: E2BSdkSandboxApiOptions) => Promise<E2BSdkSandbox>;
   readonly kill: (sandboxId: string, options?: E2BSdkSandboxApiOptions) => Promise<boolean>;
+  readonly createSnapshot: (sandboxId: string, options?: E2BSdkSandboxApiOptions) => Promise<E2BSnapshotHandle>;
+  readonly deleteSnapshot: (snapshotId: string, options?: E2BSdkSandboxApiOptions) => Promise<boolean>;
 };
 
 export type E2BSdkLoader = () => Promise<{ readonly Sandbox: E2BSdkSandboxConstructor }>;
@@ -117,6 +125,27 @@ export function createE2BRuntimeClient(options: CreateE2BRuntimeClientOptions = 
         requestTimeoutMs: destroyOptions?.timeoutMs,
       });
     },
+    async createSnapshot(sandboxId, snapshotOptions): Promise<E2BSnapshotHandle> {
+      const normalizedSandboxId = readSandboxId(sandboxId);
+      const cached = sandboxes.get(normalizedSandboxId);
+      if (cached) {
+        return cached.createSnapshot({ requestTimeoutMs: snapshotOptions?.timeoutMs });
+      }
+
+      const { Sandbox } = await loadSdk();
+      return Sandbox.createSnapshot(normalizedSandboxId, {
+        apiKey: readRequiredEnv(env, apiKeyEnvName),
+        requestTimeoutMs: snapshotOptions?.timeoutMs,
+      });
+    },
+    async deleteSnapshot(snapshotId, deleteOptions): Promise<void> {
+      const normalizedSnapshotId = readSnapshotId(snapshotId);
+      const { Sandbox } = await loadSdk();
+      await Sandbox.deleteSnapshot(normalizedSnapshotId, {
+        apiKey: readRequiredEnv(env, apiKeyEnvName),
+        requestTimeoutMs: deleteOptions?.timeoutMs,
+      });
+    },
   };
 
   async function getSandbox(sandboxId: string): Promise<E2BSdkSandbox> {
@@ -161,11 +190,19 @@ function createSandboxOptions(input: E2BSandboxCreateInput, apiKey: string): E2B
     },
     requestTimeoutMs: launchSpec.sandbox.startupTimeoutMs,
     secure: true,
-    allowInternetAccess: true,
+    allowInternetAccess: launchSpec.network.allowInternetAccess,
+    network: {
+      ...(launchSpec.network.allowOut.length > 0 ? { allowOut: [...launchSpec.network.allowOut] } : {}),
+      allowPublicTraffic: launchSpec.network.allowPublicTraffic,
+    },
   };
 }
 
 function readSandboxTemplate(input: E2BSandboxCreateInput): string {
+  const sourceSnapshot = input.launchSpec.sourceSnapshot?.providerSnapshotId;
+  if (sourceSnapshot?.trim()) {
+    return sourceSnapshot.trim();
+  }
   const template = input.launchSpec.sandbox.templateId ?? input.launchSpec.sandbox.sandboxImageId;
   if (!template?.trim()) {
     throw new Error("e2b sdk client requires E2B_TEMPLATE_ID or E2B_SANDBOX_IMAGE_ID");
@@ -236,6 +273,15 @@ function readSandboxId(sandboxId: string): string {
   const trimmed = sandboxId.trim();
   if (!trimmed) {
     throw new Error("e2b sdk client requires sandbox id");
+  }
+
+  return trimmed;
+}
+
+function readSnapshotId(snapshotId: string): string {
+  const trimmed = snapshotId.trim();
+  if (!trimmed) {
+    throw new Error("e2b sdk client requires snapshot id");
   }
 
   return trimmed;

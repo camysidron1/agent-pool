@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -10,6 +11,7 @@ import {
   runComposeSmokeCli,
 } from "../../../deploy/compose/smoke-compose";
 import { createE2BSmokePlan, parseE2BSmokeArgs, runE2BSmokeCli } from "../../../deploy/compose/e2b-smoke";
+import { loadLocalEnv, parseLocalEnvFile, type EnvSource } from "../../../deploy/local-env";
 
 describe("compose smoke runner", () => {
   test("keeps Docker compose smoke out of the default test script", async () => {
@@ -17,11 +19,31 @@ describe("compose smoke runner", () => {
       readonly scripts?: Record<string, string>;
     };
     const scripts = packageJson.scripts ?? {};
+    const gitignore = await readFile(join(process.cwd(), ".gitignore"), "utf8");
 
     expect(scripts.test).toBe("bun test apps packages");
     expect(scripts.test).not.toMatch(/smoke:compose|smoke:e2b|docker|compose|rabbitmq|minio|prometheus|e2b/i);
     expect(scripts["smoke:compose"]).toBe("bun run deploy/compose/smoke-compose.ts");
     expect(scripts["smoke:e2b"]).toBe("bun run deploy/compose/e2b-smoke.ts");
+    expect(gitignore).toContain(".env\n");
+    expect(gitignore).toContain(".env.*\n");
+  });
+
+  test("parses local .env files with shell-style values", () => {
+    expect(
+      parseLocalEnvFile(`
+        # local smoke only
+        export RUNTIME_PROVIDER=e2b
+        BRIDGE_CALLBACK_BASE_URL="https://bridge.example.test"
+        E2B_API_KEY='e2b-secret'
+        GITHUB_TOKEN=github-secret # local only
+      `),
+    ).toEqual({
+      RUNTIME_PROVIDER: "e2b",
+      BRIDGE_CALLBACK_BASE_URL: "https://bridge.example.test",
+      E2B_API_KEY: "e2b-secret",
+      GITHUB_TOKEN: "github-secret",
+    });
   });
 
   test("builds a bounded compose smoke plan without using the legacy TUI database", () => {
@@ -30,6 +52,7 @@ describe("compose smoke runner", () => {
       projectName: "agent-pool-test",
       apiUrl: "http://api.local/",
       orchestratorUrl: "http://orchestrator.local/",
+      edgeUrl: "http://edge.local/",
       prometheusUrl: "http://prometheus.local/",
       timeoutMs: 42_000,
     });
@@ -38,8 +61,10 @@ describe("compose smoke runner", () => {
     expect(plan.projectName).toBe("agent-pool-test");
     expect(plan.apiUrl).toBe("http://api.local");
     expect(plan.orchestratorUrl).toBe("http://orchestrator.local");
+    expect(plan.edgeUrl).toBe("http://edge.local");
     expect(plan.prometheusUrl).toBe("http://prometheus.local");
     expect(plan.timeoutMs).toBe(42_000);
+    expect(plan.bootOnly).toBe(false);
     expect(plan.commands.map((command) => command.command.join(" "))).toEqual([
       "docker compose -f /repo/deploy/compose/docker-compose.yml -p agent-pool-test up -d --wait",
       "docker compose -f /repo/deploy/compose/docker-compose.yml -p agent-pool-test down --timeout 15 -v --remove-orphans",
@@ -49,6 +74,10 @@ describe("compose smoke runner", () => {
     expect(plan.readiness.map((endpoint) => endpoint.label)).toEqual([
       "api health",
       "orchestrator health",
+      "egress gateway health",
+      "caddy edge health",
+      "api through caddy",
+      "web through caddy",
       "rabbitmq management",
       "minio readiness",
       "prometheus health",
@@ -85,6 +114,10 @@ describe("compose smoke runner", () => {
       readiness: [
         { label: "api health" },
         { label: "orchestrator health" },
+        { label: "egress gateway health" },
+        { label: "caddy edge health" },
+        { label: "api through caddy" },
+        { label: "web through caddy" },
         { label: "rabbitmq management" },
         { label: "minio readiness" },
         { label: "prometheus health" },
@@ -104,12 +137,15 @@ describe("compose smoke runner", () => {
         "http://127.0.0.1:3100",
       "--orchestrator-url",
       "http://127.0.0.1:3101",
+      "--edge-url",
+      "http://127.0.0.1:8181",
       "--prometheus-url",
       "http://127.0.0.1:9191",
       "--service-token",
         "token",
         "--timeout-ms",
         "5000",
+        "--boot-only",
         "--no-teardown",
       ]),
     ).toEqual({
@@ -118,11 +154,90 @@ describe("compose smoke runner", () => {
       projectName: "agent-pool-custom",
       apiUrl: "http://127.0.0.1:3100",
       orchestratorUrl: "http://127.0.0.1:3101",
+      edgeUrl: "http://127.0.0.1:8181",
       prometheusUrl: "http://127.0.0.1:9191",
       serviceToken: "token",
       timeoutMs: 5000,
       teardown: false,
+      bootOnly: true,
     });
+  });
+
+  test("supports boot-only local stack startup without seeding smoke tasks", async () => {
+    const writes: string[] = [];
+    const commands: string[] = [];
+    const fetches: string[] = [];
+    const code = await runComposeSmokeCli(["--boot-only", "--edge-url", "http://127.0.0.1:3180"], {
+      cwd: "/repo",
+      write: (text) => writes.push(text),
+      runCommand: async (command) => {
+        commands.push(command.join(" "));
+      },
+      fetch: async (input) => {
+        fetches.push(String(input));
+        return Response.json({ ok: true });
+      },
+    });
+    const payload = JSON.parse(writes.join(""));
+
+    expect(code).toBe(0);
+    expect(commands).toEqual([
+      "docker compose -f /repo/deploy/compose/docker-compose.yml -p agent-pool-compose-smoke up -d --wait",
+    ]);
+    expect(fetches).toEqual([
+      "http://127.0.0.1:3000/health",
+      "http://127.0.0.1:3001/health",
+      "http://127.0.0.1:3002/health",
+      "http://127.0.0.1:3180/healthz",
+      "http://127.0.0.1:3180/health",
+      "http://127.0.0.1:3180/",
+      "http://127.0.0.1:15672/api/overview",
+      "http://127.0.0.1:9000/minio/health/ready",
+      "http://127.0.0.1:9090/-/healthy",
+    ]);
+    expect(payload).toEqual({
+      ok: true,
+      booted: true,
+      edgeUrl: "http://127.0.0.1:3180",
+      apiUrl: "http://127.0.0.1:3000",
+      orchestratorUrl: "http://127.0.0.1:3001",
+    });
+  });
+
+  test("loads .env into docker compose commands without printing secrets", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "agent-pool-compose-env-"));
+    await writeFile(
+      join(cwd, ".env"),
+      [
+        "RUNTIME_PROVIDER=e2b",
+        "BRIDGE_CALLBACK_BASE_URL=https://bridge.example.test",
+        "E2B_API_KEY=e2b-secret",
+        "E2B_TEMPLATE_ID=template-1",
+        "GITHUB_TOKEN=github-secret",
+        "E2B_ALLOWED_SECRET_ENV_NAMES=GITHUB_TOKEN",
+      ].join("\n"),
+    );
+    const writes: string[] = [];
+    const commandEnvs: Array<EnvSource | undefined> = [];
+    const code = await runComposeSmokeCli(["--boot-only"], {
+      cwd,
+      write: (text) => writes.push(text),
+      runCommand: async (_command, options) => {
+        commandEnvs.push(options.env);
+      },
+      fetch: async () => Response.json({ ok: true }),
+    });
+
+    expect(code).toBe(0);
+    expect(commandEnvs).toHaveLength(1);
+    expect(commandEnvs[0]?.RUNTIME_PROVIDER).toBe("e2b");
+    expect(commandEnvs[0]?.BRIDGE_CALLBACK_BASE_URL).toBe("https://bridge.example.test");
+    expect(commandEnvs[0]?.E2B_TEMPLATE_ID).toBe("template-1");
+    expect(commandEnvs[0]?.E2B_ALLOWED_SECRET_ENV_NAMES).toBe("GITHUB_TOKEN");
+    expect(Boolean(commandEnvs[0]?.E2B_API_KEY?.trim())).toBe(true);
+    expect(Boolean(commandEnvs[0]?.GITHUB_TOKEN?.trim())).toBe(true);
+    expect(writes.join("")).not.toContain("e2b-secret");
+    expect(writes.join("")).not.toContain("github-secret");
   });
 
   test("uses API service-token smoke endpoints for seed and status instead of DB access", async () => {
@@ -360,6 +475,83 @@ describe("compose smoke runner", () => {
     expect(source).not.toMatch(/@agent-pool\/db|bun:sqlite|openApiDatabase|openWebSandboxDatabase|AGENT_POOL_WEB_SANDBOX_DB_PATH/);
   });
 
+  test("loads .env for E2B smoke planning without leaking secret values", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "agent-pool-e2b-env-"));
+    await writeFile(
+      join(cwd, ".env"),
+      [
+        "AUTH_MODE=test",
+        "BRIDGE_CALLBACK_BASE_URL=https://bridge.example.test",
+        "E2B_API_KEY=e2b-secret",
+        "E2B_TEMPLATE_ID=template-1",
+        "E2B_ALLOWED_SECRET_ENV_NAMES=GITHUB_TOKEN",
+        "GITHUB_TOKEN=github-secret",
+      ].join("\n"),
+    );
+    const writes: string[] = [];
+    let fetches = 0;
+    const code = await runE2BSmokeCli(["--dry-run"], {
+      cwd,
+      write: (text) => writes.push(text),
+      fetch: async () => {
+        fetches += 1;
+        return Response.json({ ok: true });
+      },
+    });
+    const plan = JSON.parse(writes.join(""));
+
+    expect(code).toBe(0);
+    expect(fetches).toBe(0);
+    expect(plan.missingCredentials).toEqual([]);
+    expect(plan.missingSettings).toEqual([]);
+    expect(plan.launchSpec.bridge.callbackBaseUrl).toBe("https://bridge.example.test");
+    expect(plan.launchSpec.environment.secrets).toEqual({ GITHUB_TOKEN: "[REDACTED]" });
+    expect(JSON.stringify(plan)).not.toContain("e2b-secret");
+    expect(JSON.stringify(plan)).not.toContain("github-secret");
+  });
+
+  test("builds a local real-agent E2B smoke plan with Codex runtime source metadata", async () => {
+    const writes: string[] = [];
+    const code = await runE2BSmokeCli(["--dry-run", "--agent-runner-mode", "codex"], {
+      env: {
+        AUTH_MODE: "test",
+        E2B_API_KEY: "e2b-secret",
+        E2B_TEMPLATE_ID: "template-1",
+        E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN,CODEX_API_KEY",
+        E2B_LOCAL_ALLOW_DIRECT_EGRESS: "true",
+        CODEX_API_KEY: "codex-secret",
+        GITHUB_APP_ID: "12345",
+        GITHUB_APP_PRIVATE_KEY: "github-app-private-key",
+        GITHUB_APP_INSTALLATION_ID: "67890",
+        AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+      },
+      write: (text) => writes.push(text),
+    });
+    const plan = JSON.parse(writes.join(""));
+
+    expect(code).toBe(0);
+    expect(plan.missingCredentials).toEqual([]);
+    expect(plan.missingSettings).toEqual([]);
+    expect(plan.runtimeSource).toMatchObject({
+      repositoryUrl: "https://github.com/example/tiny-fixture.git",
+      allowedEgressDomains: ["github.com", "api.github.com", "registry.npmjs.org", "api.openai.com"],
+      commandProfile: "agent-pool-bun-pr",
+    });
+    expect(plan.requests.seed.body.runtimeSource).toMatchObject({
+      allowedEgressDomains: ["github.com", "api.github.com", "registry.npmjs.org", "api.openai.com"],
+      commandProfile: "agent-pool-bun-pr",
+    });
+    expect(plan.launchSpec.runner.mode).toBe("codex");
+    expect(plan.launchSpec.network).toMatchObject({ allowInternetAccess: true, allowOut: [] });
+    expect(plan.launchSpec.environment.secrets).toEqual({
+      GITHUB_TOKEN: "[REDACTED]",
+      CODEX_API_KEY: "[REDACTED]",
+    });
+    expect(JSON.stringify(plan)).not.toContain("e2b-secret");
+    expect(JSON.stringify(plan)).not.toContain("codex-secret");
+    expect(JSON.stringify(plan)).not.toContain("github-app-private-key");
+  });
+
   test("reports missing E2B smoke credentials before touching the API", async () => {
     const writes: string[] = [];
     let fetches = 0;
@@ -457,6 +649,43 @@ describe("compose smoke runner", () => {
     expect(JSON.stringify(payload)).not.toContain("service-secret");
   });
 
+  test("defaults E2B smoke service-token auth to the compose stack token", async () => {
+    const requests: Array<{ readonly url: string; readonly serviceToken: string | null }> = [];
+    const code = await runE2BSmokeCli(["--api-url", "http://api.local", "--timeout-ms", "1000"], {
+      env: {
+        AUTH_MODE: "test",
+        E2B_API_KEY: "e2b-secret",
+        E2B_TEMPLATE_ID: "template-1",
+        E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN",
+        GITHUB_TOKEN: "github-secret",
+      },
+      write: () => {},
+      fetch: async (input, init) => {
+        requests.push({
+          url: String(input),
+          serviceToken: new Headers(init?.headers).get("x-agent-pool-service-token"),
+        });
+
+        if (String(input).endsWith("/internal/smoke/seed")) {
+          return Response.json({ ok: true });
+        }
+
+        return Response.json({
+          ok: true,
+          finalResponse: { recorded: true },
+          completion: { completed: true },
+          cleanup: { completed: true },
+        });
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(requests).toEqual([
+      { url: "http://api.local/internal/smoke/seed", serviceToken: "compose-internal-service-token" },
+      { url: "http://api.local/internal/smoke/status", serviceToken: "compose-internal-service-token" },
+    ]);
+  });
+
   test("parses E2B smoke flags for local execution", () => {
     expect(
       parseE2BSmokeArgs([
@@ -492,5 +721,15 @@ describe("compose smoke runner", () => {
         },
       }).cleanup,
     ).toMatchObject({ provider: "e2b", timeoutMs: 30_000 });
+  });
+
+  test("lets explicit process env override local .env values", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "agent-pool-env-override-"));
+    await writeFile(join(cwd, ".env"), "RUNTIME_PROVIDER=fake\nE2B_TEMPLATE_ID=from-file\n");
+
+    await expect(loadLocalEnv({ cwd, env: { RUNTIME_PROVIDER: "e2b" } })).resolves.toMatchObject({
+      RUNTIME_PROVIDER: "e2b",
+      E2B_TEMPLATE_ID: "from-file",
+    });
   });
 });

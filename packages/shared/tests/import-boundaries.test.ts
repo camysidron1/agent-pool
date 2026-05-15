@@ -25,6 +25,7 @@ const RULES: readonly BoundaryRule[] = [
     name: "non-api production source does not import backend-owned db package",
     roots: [
       "apps/orchestrator/src",
+      "apps/egress-gateway/src",
       "apps/web/src",
       "deploy/compose",
       "packages/auth/src",
@@ -87,6 +88,7 @@ const RULES: readonly BoundaryRule[] = [
     name: "E2B SDK stays out of non-orchestrator production source",
     roots: [
       "apps/api/src",
+      "apps/egress-gateway/src",
       "apps/web/src",
       "deploy/compose",
       "packages/auth/src",
@@ -113,6 +115,7 @@ describe("import boundaries", () => {
   test("non-api production source does not construct or open the backend database", async () => {
     const roots = [
       "apps/orchestrator/src",
+      "apps/egress-gateway/src",
       "apps/web/src",
       "deploy/compose",
       "packages/auth/src",
@@ -144,6 +147,7 @@ describe("import boundaries", () => {
     const allowedFiles = new Set(["apps/api/src/database.ts", "apps/api/src/index.ts"]);
     const roots = [
       "apps/api/src",
+      "apps/egress-gateway/src",
       "apps/orchestrator/src",
       "apps/web/src",
       "deploy/compose",

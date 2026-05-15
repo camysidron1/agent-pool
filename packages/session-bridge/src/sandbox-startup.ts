@@ -1,6 +1,6 @@
 import type { BridgeSessionOptions } from "./index";
 
-export const SANDBOX_BRIDGE_ENTRYPOINT = "packages/session-bridge/src/sandbox-entry.ts" as const;
+export const SANDBOX_BRIDGE_ENTRYPOINT = "/agent-pool/session-bridge/src/sandbox-entry.ts" as const;
 
 export type SandboxBridgeStartupEnv = {
   readonly AGENT_POOL_PROJECT_ID: string;

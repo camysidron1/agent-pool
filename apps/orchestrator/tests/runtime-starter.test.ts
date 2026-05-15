@@ -65,6 +65,43 @@ describe("orchestrator runtime starter", () => {
     ).resolves.toEqual({ ok: false, errorMessage: "fake startup failed" });
   });
 
+  test("mints short-lived GitHub tokens before required codex runtime startup", async () => {
+    const provider = createFakeRuntimeProvider({
+      sessionIdFactory: () => "runtime_fake_tokened",
+    });
+    const starter = createRuntimeStarter({
+      provider,
+      requiresGitHubTokenBroker: true,
+      githubTokenBroker: {
+        mintGitHubSessionToken: async (input) => ({
+          ok: true,
+          status: 200,
+          body: {
+            ok: true,
+            token: {
+              envName: "GITHUB_TOKEN",
+              value: `short-lived-${input.sessionId}`,
+              expiresAt: "2026-05-14T19:00:00.000Z",
+              repositoryUrl: "https://github.com/example/tiny-fixture.git",
+            },
+          },
+        }),
+      },
+    });
+
+    const result = await starter({
+      projectId: "project_a",
+      task: { id: "task_1", runtimeSource: runtimeSource() },
+      session: { id: "session_1", bridge: bridgeConfig() },
+      wakeup: { taskId: "task_1" },
+    });
+
+    expect(result).toEqual({ ok: true, runtimeSessionId: "runtime_fake_tokened" });
+    expect(provider.state.started[0]?.request.secretEnvironment).toEqual({
+      GITHUB_TOKEN: "short-lived-session_1",
+    });
+  });
+
   test("starts E2B runtime from claimed task source and bridge config", async () => {
     const { client, calls } = createE2BClient();
     const starter = createRuntimeStarter({
@@ -101,6 +138,40 @@ describe("orchestrator runtime starter", () => {
     expect(commandCalls).toHaveLength(4);
     expect(commandCalls[0]?.options.env).toMatchObject({ GITHUB_TOKEN: "github-secret" });
     expect(JSON.stringify(createCall?.input.redactedLaunchSpec)).not.toContain("github-secret");
+  });
+
+  test("passes claimed source snapshots into E2B startup", async () => {
+    const { client, calls } = createE2BClient();
+    const starter = createRuntimeStarter({
+      providerKind: "e2b",
+      e2b: {
+        client,
+        config: e2bConfig(),
+        env: { GITHUB_TOKEN: "github-secret" },
+        secretEnvNames: ["GITHUB_TOKEN"],
+      },
+    });
+
+    await starter({
+      projectId: "project_a",
+      task: { id: "task_1", runtimeSource: runtimeSource() },
+      session: {
+        id: "session_1",
+        bridge: bridgeConfig(),
+        sourceSnapshot: {
+          id: "snapshot_record_1",
+          provider: "e2b",
+          providerSnapshotId: "provider_snapshot_1",
+        },
+      },
+      wakeup: { taskId: "task_1", sourceSnapshotId: "snapshot_record_1" },
+    });
+
+    const createCall = calls.find((call) => call.kind === "create");
+    expect(createCall?.input.launchSpec.sourceSnapshot).toEqual({
+      id: "snapshot_record_1",
+      providerSnapshotId: "provider_snapshot_1",
+    });
   });
 
   test("task consumer reports fake runtime startup success through existing backend API path", async () => {
@@ -260,6 +331,8 @@ describe("orchestrator runtime starter", () => {
         name: "missing GitHub credentials",
         config: { ...e2bConfig(), githubTokenConfigured: false },
         client: createE2BClient().client,
+        env: {},
+        secretEnvNames: [],
         expected: "GITHUB_TOKEN is required for github bootstrap",
       },
       {
@@ -278,7 +351,7 @@ describe("orchestrator runtime starter", () => {
         client: createE2BClient({
           runCommand: async () => ({ ok: false, exitCode: 128, stderr: "clone failed with github-secret" }),
         }).client,
-        expected: "e2b command failed (clone repository, exit 128)",
+        expected: "e2b command failed (prepare repository, exit 128)",
       },
       {
         name: "bridge startup failure",
@@ -294,6 +367,8 @@ describe("orchestrator runtime starter", () => {
       const reports = await runE2BStartupFailureCase({
         client: testCase.client,
         config: testCase.config,
+        env: "env" in testCase ? testCase.env : undefined,
+        secretEnvNames: "secretEnvNames" in testCase ? testCase.secretEnvNames : undefined,
       });
 
       expect(reports).toEqual([
@@ -347,6 +422,8 @@ function e2bConfig() {
 async function runE2BStartupFailureCase(options: {
   readonly client: E2BRuntimeClient;
   readonly config: ReturnType<typeof e2bConfig>;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly secretEnvNames?: readonly string[];
 }): Promise<readonly unknown[]> {
   const queue = createRabbitMqAdapter(loadConfig({ AUTH_MODE: "test" }).rabbitmq);
   const reports: unknown[] = [];
@@ -394,8 +471,8 @@ async function runE2BStartupFailureCase(options: {
       e2b: {
         client: options.client,
         config: options.config,
-        env: { GITHUB_TOKEN: "github-secret" },
-        secretEnvNames: ["GITHUB_TOKEN"],
+        env: options.env ?? { GITHUB_TOKEN: "github-secret" },
+        secretEnvNames: options.secretEnvNames ?? ["GITHUB_TOKEN"],
       },
     }),
   });
@@ -431,6 +508,12 @@ function createE2BClient(overrides: {
       return overrides.runCommand?.(sandboxId, command, options) ?? { ok: true, exitCode: 0 };
     },
     async destroySandbox() {
+      return undefined;
+    },
+    async createSnapshot() {
+      return { snapshotId: "snapshot_1" };
+    },
+    async deleteSnapshot() {
       return undefined;
     },
   };

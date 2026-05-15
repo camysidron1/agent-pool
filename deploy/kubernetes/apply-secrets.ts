@@ -69,7 +69,7 @@ export type KubernetesSecretsCliOptions = {
 
 const DEFAULT_NAMESPACE = "agent-pool";
 const DEFAULT_SECRET_NAME = "agent-pool-secrets";
-const DEFAULT_ENV_FILE = ".agent-pool.secrets.env";
+const DEFAULT_ENV_FILE = ".env";
 const DEFAULT_OPERATOR_ID = "operator-local";
 const DEFAULT_OPERATOR_EMAIL = "operator@example.com";
 const DEFAULT_OPERATOR_DISPLAY_NAME = "Agent Pool Operator";
@@ -93,7 +93,11 @@ const SECRET_KEYS = [
   "MINIO_ROOT_USER",
   "MINIO_ROOT_PASSWORD",
   "E2B_API_KEY",
+  "CODEX_API_KEY",
   "GITHUB_TOKEN",
+  "GITHUB_APP_ID",
+  "GITHUB_APP_PRIVATE_KEY",
+  "GITHUB_APP_INSTALLATION_ID",
 ] as const;
 
 type AgentPoolSecretKey = (typeof SECRET_KEYS)[number];
@@ -113,7 +117,13 @@ const REQUIRED_BASE_KEYS = [
   "MINIO_ROOT_PASSWORD",
 ] as const satisfies readonly AgentPoolSecretKey[];
 
-const REQUIRED_E2B_KEYS = ["E2B_API_KEY", "GITHUB_TOKEN"] as const satisfies readonly AgentPoolSecretKey[];
+const REQUIRED_E2B_KEYS = [
+  "E2B_API_KEY",
+  "CODEX_API_KEY",
+  "GITHUB_APP_ID",
+  "GITHUB_APP_PRIVATE_KEY",
+  "GITHUB_APP_INSTALLATION_ID",
+] as const satisfies readonly AgentPoolSecretKey[];
 
 if (import.meta.main) {
   const code = await runKubernetesSecretsCli(Bun.argv.slice(2));
@@ -287,7 +297,11 @@ export function buildAgentPoolSecrets(input: {
   );
 
   setValue(values, sources, "E2B_API_KEY", readSecretValue("E2B_API_KEY", { existing, overrides }));
+  setValue(values, sources, "CODEX_API_KEY", readSecretValue("CODEX_API_KEY", { existing, overrides }));
   setValue(values, sources, "GITHUB_TOKEN", readSecretValue("GITHUB_TOKEN", { existing, overrides }));
+  setValue(values, sources, "GITHUB_APP_ID", readSecretValue("GITHUB_APP_ID", { existing, overrides }));
+  setValue(values, sources, "GITHUB_APP_PRIVATE_KEY", readSecretValue("GITHUB_APP_PRIVATE_KEY", { existing, overrides }));
+  setValue(values, sources, "GITHUB_APP_INSTALLATION_ID", readSecretValue("GITHUB_APP_INSTALLATION_ID", { existing, overrides }));
 
   validateSecrets(values, Boolean(input.requireE2B));
 

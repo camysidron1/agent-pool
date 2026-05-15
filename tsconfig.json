@@ -24,6 +24,7 @@
   },
   "include": [
     "apps/api/src/**/*.ts",
+    "apps/egress-gateway/src/**/*.ts",
     "apps/orchestrator/src/**/*.ts",
     "apps/web/src/**/*.ts",
     "apps/web/src/**/*.tsx",

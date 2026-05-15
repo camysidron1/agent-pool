@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { loadConfig } from "@agent-pool/config";
 import { createRabbitMqAdapter } from "@agent-pool/queue";
-import type { E2BCommandRunOptions, E2BRuntimeClient, E2BSandboxCreateInput } from "@agent-pool/runtime";
+import type { E2BCommandRunOptions, E2BRuntimeClient, E2BSandboxCreateInput, RuntimeLifecycleLogEvent } from "@agent-pool/runtime";
 
 import type { BackendInternalApiClient } from "../src/backend-client";
 import { createCapacityLimiter } from "../src/capacity";
@@ -144,7 +144,7 @@ describe("orchestrator worker loops", () => {
       commandClaimed: false,
     });
     expect(calls).toEqual([
-      { method: "claimNextTask", input: { projectId: "compose-smoke", sessionId: undefined, runtimeProvider: "fake" } },
+      { method: "claimNextTask", input: { projectId: "compose-smoke", sessionId: undefined, sourceSnapshotId: undefined, runtimeProvider: "fake" } },
       {
         method: "reportStartupSucceeded",
         input: { projectId: "compose-smoke", sessionId: "session_smoke", runtimeSessionId: "runtime_fake_loop" },
@@ -190,6 +190,7 @@ describe("orchestrator worker loops", () => {
     const queue = createRabbitMqAdapter(config.rabbitmq);
     const backendCalls: Array<{ readonly method: string; readonly input: unknown }> = [];
     const e2bCalls: E2BClientCall[] = [];
+    const runtimeEvents: RuntimeLifecycleLogEvent[] = [];
     const backend = createBackend({
       claimNextTask: async (input) => {
         backendCalls.push({ method: "claimNextTask", input });
@@ -241,6 +242,9 @@ describe("orchestrator worker loops", () => {
       backend,
       env,
       e2bRuntimeClient: createE2BClient(e2bCalls),
+      runtimeLogger: (event) => {
+        runtimeEvents.push(event);
+      },
     });
 
     queue.publishProjectTaskHint("compose-smoke", { taskId: "compose-smoke-task-1" });
@@ -257,7 +261,7 @@ describe("orchestrator worker loops", () => {
       startupsFailed: 0,
     });
     expect(backendCalls).toEqual([
-      { method: "claimNextTask", input: { projectId: "compose-smoke", sessionId: undefined, runtimeProvider: "e2b" } },
+      { method: "claimNextTask", input: { projectId: "compose-smoke", sessionId: undefined, sourceSnapshotId: undefined, runtimeProvider: "e2b" } },
       { method: "reportStartupSucceeded", input: { projectId: "compose-smoke", sessionId: "session_e2b", runtimeSessionId: "sandbox_loop" } },
     ]);
     expect(createCall?.input.launchSpec.sandbox).toMatchObject({
@@ -268,6 +272,10 @@ describe("orchestrator worker loops", () => {
     expect(JSON.stringify(createCall?.input.redactedLaunchSpec)).not.toContain("github-secret");
     expect(commandCalls).toHaveLength(4);
     expect(commandCalls[0]?.options.env).toMatchObject({ GITHUB_TOKEN: "github-secret" });
+    expect(runtimeEvents.map((event) => event.event)).toContain("runtime.command.started");
+    expect(runtimeEvents.map((event) => event.event)).toContain("runtime.sandbox.started");
+    expect(JSON.stringify(runtimeEvents)).not.toContain("github-secret");
+    expect(JSON.stringify(runtimeEvents)).not.toContain("bridge-token");
   });
 
   test("starts and stops all worker timers with configured cadence", () => {
@@ -301,7 +309,8 @@ describe("orchestrator worker loops", () => {
     expect(loops.state.task.running).toBe(true);
     expect(loops.state.control.running).toBe(true);
     expect(loops.state.reconcile.running).toBe(true);
-    expect(intervals).toEqual([25, 25, 50]);
+    expect(loops.state.finalizer.running).toBe(true);
+    expect(intervals).toEqual([25, 25, 50, 50]);
 
     loops.stop();
     loops.stop();
@@ -309,7 +318,8 @@ describe("orchestrator worker loops", () => {
     expect(loops.state.task.running).toBe(false);
     expect(loops.state.control.running).toBe(false);
     expect(loops.state.reconcile.running).toBe(false);
-    expect(cleared).toEqual(["timer-1", "timer-2", "timer-3"]);
+    expect(loops.state.finalizer.running).toBe(false);
+    expect(cleared).toEqual(["timer-1", "timer-2", "timer-3", "timer-4"]);
   });
 
   test("task loop retries capacity-full wakeups without claiming or hot-looping", async () => {
@@ -371,6 +381,12 @@ function createE2BClient(calls: E2BClientCall[]): E2BRuntimeClient {
     async destroySandbox() {
       return undefined;
     },
+    async createSnapshot() {
+      return { snapshotId: "snapshot_loop" };
+    },
+    async deleteSnapshot() {
+      return undefined;
+    },
   };
 }
 
@@ -410,6 +426,46 @@ function createBackend(overrides: Partial<BackendInternalApiClient> = {}): Backe
       body: { ok: true, session: { id: input.sessionId }, event: { id: "event_heartbeat", projectId: input.projectId, type: "session.heartbeat" }, outbox: { id: "outbox_heartbeat", projectId: input.projectId, eventId: "event_heartbeat", routingKey: "events" } },
     }),
     reconcile: async () => ({ ok: true, status: 200, body: { ok: true, stale: [], lost: [], events: [], outbox: [] } }),
+    claimRuntimeSandboxFinalization: async () => ({
+      ok: true,
+      status: 200,
+      body: { ok: true, claimed: false, reason: "no_runtime_sandbox_finalization" },
+    }),
+    reportRuntimeSandboxSnapshotCreated: async () => ({
+      ok: true,
+      status: 200,
+      body: { ok: true, idempotent: false, snapshot: null, event: null, outbox: null },
+    }),
+    reportRuntimeSandboxSnapshotFailed: async () => ({
+      ok: true,
+      status: 200,
+      body: { ok: true, idempotent: false, snapshot: null, event: null, outbox: null },
+    }),
+    reportRuntimeSandboxCleanupSucceeded: async (input) => ({
+      ok: true,
+      status: 200,
+      body: { ok: true, idempotent: false, runtimeSandbox: { id: input.runtimeSandboxId }, event: null, outbox: null },
+    }),
+    reportRuntimeSandboxCleanupFailed: async (input) => ({
+      ok: true,
+      status: 200,
+      body: { ok: true, idempotent: false, runtimeSandbox: { id: input.runtimeSandboxId }, event: null, outbox: null },
+    }),
+    claimExpiredSnapshotDeletion: async () => ({
+      ok: true,
+      status: 200,
+      body: { ok: true, claimed: false, reason: "no_expired_snapshot" },
+    }),
+    reportExpiredSnapshotDeleted: async (input) => ({
+      ok: true,
+      status: 200,
+      body: { ok: true, idempotent: false, snapshot: { id: input.snapshotId }, event: null, outbox: null },
+    }),
+    reportExpiredSnapshotDeleteFailed: async (input) => ({
+      ok: true,
+      status: 200,
+      body: { ok: true, idempotent: false, snapshot: { id: input.snapshotId }, event: null, outbox: null },
+    }),
     ...overrides,
   };
 }

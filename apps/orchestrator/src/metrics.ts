@@ -112,6 +112,7 @@ function renderWorkerLoopMetrics(workerLoops: OrchestratorWorkerLoops | undefine
     ["task", states?.task],
     ["control", states?.control],
     ["reconcile", states?.reconcile],
+    ["finalizer", states?.finalizer],
   ] as const).flatMap(([loop, state]) => [
     `agent_pool_orchestrator_worker_loop_running{loop="${loop}"} ${state?.running ? 1 : 0}`,
     `agent_pool_orchestrator_worker_loop_in_flight{loop="${loop}"} ${state?.inFlight ? 1 : 0}`,

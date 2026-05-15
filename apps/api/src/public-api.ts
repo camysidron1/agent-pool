@@ -180,12 +180,18 @@ export function registerPublicApiRoutes(app: Express, options: PublicApiOptions)
 
     try {
       const body = parsePublicBody(request.body);
+      const runtimeSource = readOptionalRuntimeSource(body.runtimeSource);
+      const runtimePolicyError = validateRuntimeSourcePolicy(options.config, runtimeSource);
+      if (runtimePolicyError) {
+        response.status(400).json(publicError("validation_error", runtimePolicyError));
+        return;
+      }
       const input: CreateTaskInput = {
         projectId,
         title: readRequiredBodyString(body, "title"),
         description: readOptionalBodyString(body.description),
         priority: readOptionalBodyInteger(body.priority),
-        runtimeSource: readOptionalRuntimeSource(body.runtimeSource),
+        runtimeSource,
       };
       if (!services.listProjects().some((project) => project.id === projectId)) {
         response.status(404).json(publicError("not_found", `project not found: ${projectId}`));
@@ -1150,7 +1156,62 @@ function readOptionalRuntimeSource(value: unknown): TaskRuntimeSourceMetadata | 
     repositoryUrl: readRequiredBodyString(body, "repositoryUrl"),
     baseRef: readRequiredBodyString(body, "baseRef"),
     taskBranchPrefix: readRequiredBodyString(body, "taskBranchPrefix"),
+    allowedEgressDomains: readOptionalStringArray(body.allowedEgressDomains),
+    commandProfile: readOptionalBodyString(body.commandProfile),
   };
+}
+
+function validateRuntimeSourcePolicy(config: AppConfig, runtimeSource: TaskRuntimeSourceMetadata | null): string | null {
+  if (config.controlPlane.runtimeProvider !== "e2b" || config.controlPlane.e2b.agentRunnerMode !== "codex") {
+    return null;
+  }
+
+  if (!runtimeSource) {
+    return "runtimeSource is required when RUNTIME_PROVIDER=e2b and AGENT_RUNNER_MODE=codex";
+  }
+  if (runtimeSource.commandProfile !== config.controlPlane.e2b.codexCommandProfile) {
+    return `runtimeSource.commandProfile must be ${config.controlPlane.e2b.codexCommandProfile}`;
+  }
+
+  const requested = (runtimeSource.allowedEgressDomains ?? []).map((domain) => normalizeRuntimeSourceDomain(domain));
+  if (requested.length === 0) {
+    return "runtimeSource.allowedEgressDomains is required when AGENT_RUNNER_MODE=codex";
+  }
+
+  const globalAllowed = new Set(config.controlPlane.e2b.allowedEgressDomains);
+  const rejected = requested.find((domain) => !globalAllowed.has(domain));
+  if (rejected) {
+    return `runtimeSource.allowedEgressDomains contains a domain outside the global allowlist: ${rejected}`;
+  }
+
+  let repositoryHost: string;
+  try {
+    repositoryHost = new URL(runtimeSource.repositoryUrl).hostname.toLowerCase();
+  } catch {
+    return "runtimeSource.repositoryUrl must be a valid URL";
+  }
+  if (!requested.includes(repositoryHost)) {
+    return "runtimeSource.allowedEgressDomains must include the repository host";
+  }
+
+  return null;
+}
+
+function normalizeRuntimeSourceDomain(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function readOptionalStringArray(value: unknown): readonly string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) {
+    throw new Error("string array value is required");
+  }
+  return value.map((entry) => {
+    if (typeof entry !== "string" || !entry.trim()) {
+      throw new Error("string array value is required");
+    }
+    return entry.trim();
+  });
 }
 
 function readSteeringAttachments(value: unknown): readonly SteeringAttachmentReference[] {
@@ -1195,6 +1256,9 @@ function readProviderCapabilities(config: AppConfig): readonly {
     readonly suspend: boolean;
     readonly resume: boolean;
     readonly fork: boolean;
+    readonly snapshot: boolean;
+    readonly deleteSnapshot: boolean;
+    readonly startFromSnapshot: boolean;
   };
   readonly requirements: Readonly<Record<string, boolean>>;
 }[] {
@@ -1210,7 +1274,7 @@ function readProviderCapabilities(config: AppConfig): readonly {
       kind: "e2b",
       available: true,
       configured: config.controlPlane.e2b.apiKeyConfigured && Boolean(config.controlPlane.e2b.templateId || config.controlPlane.e2b.sandboxImageId),
-      capabilities: startStopCapabilities(),
+      capabilities: e2bCapabilities(),
       requirements: {
         apiKeyConfigured: config.controlPlane.e2b.apiKeyConfigured,
         githubTokenConfigured: config.controlPlane.e2b.githubTokenConfigured,
@@ -1227,10 +1291,35 @@ function readProviderCapabilities(config: AppConfig): readonly {
         suspend: false,
         resume: false,
         fork: false,
+        snapshot: false,
+        deleteSnapshot: false,
+        startFromSnapshot: false,
       },
       requirements: {},
     },
   ];
+}
+
+function e2bCapabilities(): {
+  readonly start: true;
+  readonly stop: true;
+  readonly suspend: false;
+  readonly resume: false;
+  readonly fork: false;
+  readonly snapshot: true;
+  readonly deleteSnapshot: true;
+  readonly startFromSnapshot: true;
+} {
+  return {
+    start: true,
+    stop: true,
+    suspend: false,
+    resume: false,
+    fork: false,
+    snapshot: true,
+    deleteSnapshot: true,
+    startFromSnapshot: true,
+  };
 }
 
 function startStopCapabilities(): {
@@ -1239,6 +1328,9 @@ function startStopCapabilities(): {
   readonly suspend: false;
   readonly resume: false;
   readonly fork: false;
+  readonly snapshot: false;
+  readonly deleteSnapshot: false;
+  readonly startFromSnapshot: false;
 } {
   return {
     start: true,
@@ -1246,5 +1338,8 @@ function startStopCapabilities(): {
     suspend: false,
     resume: false,
     fork: false,
+    snapshot: false,
+    deleteSnapshot: false,
+    startFromSnapshot: false,
   };
 }

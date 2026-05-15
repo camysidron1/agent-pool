@@ -4,6 +4,10 @@ import {
   ConfigError,
   DEFAULT_BACKEND_INTERNAL_URL,
   DEFAULT_BRIDGE_SESSION_TOKEN_HEADER,
+  DEFAULT_AGENT_RUNNER_MODE,
+  DEFAULT_CODEX_API_KEY_ENV_NAME,
+  DEFAULT_CODEX_COMMAND,
+  DEFAULT_CODEX_COMMAND_PROFILE,
   DEFAULT_CONTROL_PLANE_OUTBOX_PUBLISH_INTERVAL_MS,
   DEFAULT_CONTROL_PLANE_RECONCILE_INTERVAL_MS,
   DEFAULT_CONTROL_PLANE_SMOKE_PROJECT_ID,
@@ -13,6 +17,10 @@ import {
   DEFAULT_E2B_GITHUB_TOKEN_ENV_NAME,
   DEFAULT_E2B_STARTUP_TIMEOUT_MS,
   DEFAULT_E2B_WORKING_DIRECTORY,
+  DEFAULT_EGRESS_GATEWAY_PORT,
+  DEFAULT_GITHUB_API_BASE_URL,
+  DEFAULT_GITHUB_APP_TOKEN_ENV_NAME,
+  DEFAULT_GITHUB_APP_TOKEN_TTL_SECONDS,
   DEFAULT_ORCHESTRATOR_URL,
   DEFAULT_PUBLIC_AUTH_COOKIE_NAME,
   DEFAULT_PUBLIC_AUTH_PASSWORD,
@@ -58,6 +66,12 @@ describe("loadConfig", () => {
         publicUrl: DEFAULT_ORCHESTRATOR_URL,
         backendInternalUrl: DEFAULT_BACKEND_INTERNAL_URL,
       },
+      egressGateway: {
+        port: DEFAULT_EGRESS_GATEWAY_PORT,
+        backendInternalUrl: DEFAULT_BACKEND_INTERNAL_URL,
+        proxyAuthScheme: "basic",
+        defaultDeny: true,
+      },
       rabbitmq: {
         url: DEFAULT_RABBITMQ_URL,
         managementUrl: DEFAULT_RABBITMQ_MANAGEMENT_URL,
@@ -87,7 +101,27 @@ describe("loadConfig", () => {
           githubTokenEnvName: DEFAULT_E2B_GITHUB_TOKEN_ENV_NAME,
           githubTokenConfigured: false,
           allowedSecretEnvNames: [],
+          agentRunnerMode: DEFAULT_AGENT_RUNNER_MODE,
+          codexCommand: DEFAULT_CODEX_COMMAND,
+          codexApiKeyEnvName: DEFAULT_CODEX_API_KEY_ENV_NAME,
+          codexApiKeyConfigured: false,
+          codexModel: null,
+          codexCommandProfile: DEFAULT_CODEX_COMMAND_PROFILE,
+          egressProxyUrl: null,
+          egressProxyAllowOut: [],
+          egressProxyNoProxy: null,
+          localAllowDirectEgress: false,
+          allowedEgressDomains: [],
         },
+      },
+      githubApp: {
+        appId: null,
+        privateKey: null,
+        installationId: null,
+        apiBaseUrl: DEFAULT_GITHUB_API_BASE_URL,
+        tokenEnvName: DEFAULT_GITHUB_APP_TOKEN_ENV_NAME,
+        tokenTtlSeconds: DEFAULT_GITHUB_APP_TOKEN_TTL_SECONDS,
+        configured: false,
       },
     });
   });
@@ -124,6 +158,9 @@ describe("loadConfig", () => {
         ORCHESTRATOR_PORT: "4101",
         ORCHESTRATOR_PUBLIC_URL: "http://orchestrator.local.test:4101/",
         ORCHESTRATOR_BACKEND_INTERNAL_URL: "http://api.internal.test:4100/",
+        EGRESS_GATEWAY_PORT: "4102",
+        EGRESS_GATEWAY_BACKEND_INTERNAL_URL: "http://api.internal.test:4100/",
+        EGRESS_GATEWAY_DEFAULT_DENY: "false",
         BRIDGE_CALLBACK_BASE_URL: "http://api.internal.test:4100/",
         BRIDGE_SESSION_TOKEN_HEADER: "X-Agent-Pool-Bridge-Session",
         RABBITMQ_URL: "amqp://rabbitmq.local.test:5672",
@@ -182,6 +219,12 @@ describe("loadConfig", () => {
         publicUrl: "http://orchestrator.local.test:4101",
         backendInternalUrl: "http://api.internal.test:4100",
       },
+      egressGateway: {
+        port: 4102,
+        backendInternalUrl: "http://api.internal.test:4100",
+        proxyAuthScheme: "basic",
+        defaultDeny: false,
+      },
       rabbitmq: {
         url: "amqp://rabbitmq.local.test:5672",
         managementUrl: "http://rabbitmq.local.test:15672",
@@ -211,7 +254,27 @@ describe("loadConfig", () => {
           githubTokenEnvName: "CUSTOM_GITHUB_TOKEN",
           githubTokenConfigured: true,
           allowedSecretEnvNames: ["CUSTOM_E2B_KEY", "CUSTOM_GITHUB_TOKEN"],
+          agentRunnerMode: DEFAULT_AGENT_RUNNER_MODE,
+          codexCommand: DEFAULT_CODEX_COMMAND,
+          codexApiKeyEnvName: DEFAULT_CODEX_API_KEY_ENV_NAME,
+          codexApiKeyConfigured: false,
+          codexModel: null,
+          codexCommandProfile: DEFAULT_CODEX_COMMAND_PROFILE,
+          egressProxyUrl: null,
+          egressProxyAllowOut: [],
+          egressProxyNoProxy: null,
+          localAllowDirectEgress: false,
+          allowedEgressDomains: [],
         },
+      },
+      githubApp: {
+        appId: null,
+        privateKey: null,
+        installationId: null,
+        apiBaseUrl: DEFAULT_GITHUB_API_BASE_URL,
+        tokenEnvName: DEFAULT_GITHUB_APP_TOKEN_ENV_NAME,
+        tokenTtlSeconds: DEFAULT_GITHUB_APP_TOKEN_TTL_SECONDS,
+        configured: false,
       },
     });
   });
@@ -246,6 +309,57 @@ describe("loadConfig", () => {
       templateId: "template-1",
       sandboxImageId: null,
     });
+
+    expect(() =>
+      loadConfig({
+        AUTH_MODE: "test",
+        RUNTIME_PROVIDER: "e2b",
+        AGENT_RUNNER_MODE: "codex",
+        E2B_API_KEY: "secret",
+        E2B_TEMPLATE_ID: "template-1",
+        CODEX_API_KEY: "codex-secret",
+        E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN,CODEX_API_KEY",
+        AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com",
+      }),
+    ).toThrow("EGRESS_PROXY_URL and EGRESS_PROXY_ALLOW_OUT are required");
+
+    expect(
+      loadConfig({
+        AUTH_MODE: "test",
+        RUNTIME_PROVIDER: "e2b",
+        AGENT_RUNNER_MODE: "codex",
+        E2B_API_KEY: "secret",
+        E2B_TEMPLATE_ID: "template-1",
+        CODEX_API_KEY: "codex-secret",
+        E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN,CODEX_API_KEY",
+        AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com",
+        E2B_LOCAL_ALLOW_DIRECT_EGRESS: "true",
+      }).controlPlane.e2b,
+    ).toMatchObject({
+      agentRunnerMode: "codex",
+      localAllowDirectEgress: true,
+      egressProxyUrl: null,
+      egressProxyAllowOut: [],
+    });
+
+    expect(() =>
+      loadConfig({
+        AUTH_MODE: "local",
+        OPERATOR_ID: "operator-1",
+        OPERATOR_EMAIL: "operator@example.com",
+        INTERNAL_SERVICE_TOKEN: "secret-token",
+        OPERATOR_PASSWORD: "operator-password",
+        PUBLIC_AUTH_SESSION_SECRET: "public-auth-session-secret-123456",
+        RUNTIME_PROVIDER: "e2b",
+        AGENT_RUNNER_MODE: "codex",
+        E2B_API_KEY: "secret",
+        E2B_TEMPLATE_ID: "template-1",
+        CODEX_API_KEY: "codex-secret",
+        E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN,CODEX_API_KEY",
+        AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com",
+        E2B_LOCAL_ALLOW_DIRECT_EGRESS: "true",
+      }),
+    ).toThrow("E2B_LOCAL_ALLOW_DIRECT_EGRESS is only allowed with AUTH_MODE=test");
   });
 
   test("rejects invalid ports, URLs, runtime config, and storage adapters", () => {

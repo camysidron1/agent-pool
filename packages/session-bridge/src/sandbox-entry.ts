@@ -1,5 +1,6 @@
 import { bridgeSessionFromSandboxEnv, redactSandboxBridgeStartupEnv, createSandboxBridgeStartupEnv } from "./sandbox-startup";
 import { createBridgeRunner, type BridgeRunnerRunOnceResult } from "./runner";
+import { runCodexBridgeSession, type CodexBridgeSessionResult } from "./codex-runner";
 
 export type SandboxBridgeEntryResult = {
   readonly ok: true;
@@ -7,6 +8,7 @@ export type SandboxBridgeEntryResult = {
   readonly session: ReturnType<typeof redactSandboxBridgeStartupEnv>;
   readonly firstPass?: BridgeRunnerRunOnceResult;
   readonly terminalPass?: BridgeRunnerRunOnceResult;
+  readonly codexRun?: CodexBridgeSessionResult;
 };
 
 export type SandboxBridgeEntryOptions = {
@@ -37,6 +39,26 @@ export async function runSandboxBridgeEntry(options: SandboxBridgeEntryOptions =
 
   if (args.includes("--dry-run")) {
     return { ok: true, dryRun: true, session: redactedSession };
+  }
+
+  if (env.AGENT_POOL_BRIDGE_RUNNER === "codex") {
+    const codexRun = await runCodexBridgeSession({
+      session,
+      workspaceRoot,
+      env,
+      fetch: options.fetch,
+    });
+    if (!codexRun.terminalPass.failurePosted && !codexRun.terminalPass.completionPosted) {
+      throw new Error("codex bridge terminal callbacks were not accepted");
+    }
+    return {
+      ok: true,
+      dryRun: false,
+      session: redactedSession,
+      firstPass: codexRun.firstPass,
+      terminalPass: codexRun.terminalPass,
+      codexRun,
+    };
   }
 
   const runner = createBridgeRunner({

@@ -48,6 +48,7 @@ export const SESSION_HEARTBEAT_SCHEMA_MIGRATION_ID = "0008_session_heartbeat_sch
 export const BRIDGE_SESSION_CALLBACK_SCHEMA_MIGRATION_ID = "0009_bridge_session_callback_schema" as const;
 export const TASK_RUNTIME_SOURCE_SCHEMA_MIGRATION_ID = "0010_task_runtime_source_schema" as const;
 export const TASK_PRIORITY_SCHEMA_MIGRATION_ID = "0011_task_priority_schema" as const;
+export const RUNTIME_SANDBOX_LIFECYCLE_SCHEMA_MIGRATION_ID = "0012_runtime_sandbox_lifecycle_schema" as const;
 
 export const WEB_SANDBOX_MIGRATIONS: readonly SqlMigration[] = [
   {
@@ -353,6 +354,53 @@ export const WEB_SANDBOX_MIGRATIONS: readonly SqlMigration[] = [
     sql: [
       "ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
       "CREATE INDEX IF NOT EXISTS tasks_project_priority_idx ON tasks (project_id, status, priority, display_id)",
+    ],
+  },
+  {
+    id: RUNTIME_SANDBOX_LIFECYCLE_SCHEMA_MIGRATION_ID,
+    description: "Add runtime sandbox cleanup and snapshot lifecycle schema",
+    sql: [
+      "ALTER TABLE sessions ADD COLUMN source_snapshot_id TEXT",
+      `CREATE TABLE IF NOT EXISTS runtime_sandboxes (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE ON UPDATE CASCADE,
+        task_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        provider_sandbox_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'terminal', 'cleanup_claimed', 'cleanup_succeeded', 'cleanup_failed')),
+        snapshot_status TEXT NOT NULL DEFAULT 'not_required' CHECK (snapshot_status IN ('not_required', 'pending', 'claimed', 'succeeded', 'failed', 'skipped')),
+        cleanup_attempts INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_attempts >= 0),
+        snapshot_attempts INTEGER NOT NULL DEFAULT 0 CHECK (snapshot_attempts >= 0),
+        cleanup_claimed_at TEXT,
+        cleanup_completed_at TEXT,
+        snapshot_claimed_at TEXT,
+        snapshot_completed_at TEXT,
+        terminal_at TEXT,
+        last_error_message TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        UNIQUE (project_id, session_id),
+        UNIQUE (provider, provider_sandbox_id),
+        FOREIGN KEY (project_id, task_id) REFERENCES tasks(project_id, id) ON DELETE CASCADE ON UPDATE CASCADE,
+        FOREIGN KEY (project_id, session_id) REFERENCES sessions(project_id, id) ON DELETE CASCADE ON UPDATE CASCADE
+      )`,
+      "CREATE INDEX IF NOT EXISTS runtime_sandboxes_project_status_idx ON runtime_sandboxes (project_id, status)",
+      "CREATE INDEX IF NOT EXISTS runtime_sandboxes_session_idx ON runtime_sandboxes (project_id, session_id)",
+      "ALTER TABLE session_snapshots ADD COLUMN provider TEXT",
+      "ALTER TABLE session_snapshots ADD COLUMN status TEXT NOT NULL DEFAULT 'ready' CHECK (status IN ('creating', 'ready', 'failed', 'expired', 'delete_claimed', 'deleted', 'delete_failed'))",
+      "ALTER TABLE session_snapshots ADD COLUMN source_runtime_sandbox_id TEXT",
+      "ALTER TABLE session_snapshots ADD COLUMN source_session_id TEXT",
+      "ALTER TABLE session_snapshots ADD COLUMN provider_sandbox_id TEXT",
+      "ALTER TABLE session_snapshots ADD COLUMN expires_at TEXT",
+      "ALTER TABLE session_snapshots ADD COLUMN delete_claimed_at TEXT",
+      "ALTER TABLE session_snapshots ADD COLUMN deleted_at TEXT",
+      "ALTER TABLE session_snapshots ADD COLUMN last_used_at TEXT",
+      "ALTER TABLE session_snapshots ADD COLUMN error_message TEXT",
+      "ALTER TABLE session_snapshots ADD COLUMN usage_count INTEGER NOT NULL DEFAULT 0 CHECK (usage_count >= 0)",
+      "CREATE INDEX IF NOT EXISTS session_snapshots_project_status_idx ON session_snapshots (project_id, status, expires_at)",
+      "CREATE INDEX IF NOT EXISTS session_snapshots_provider_snapshot_idx ON session_snapshots (provider, provider_snapshot_id)",
     ],
   },
 ] as const;

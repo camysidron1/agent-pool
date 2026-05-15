@@ -42,6 +42,8 @@ export type PublicRuntimeSource = {
   readonly repositoryUrl: string;
   readonly baseRef: string;
   readonly taskBranchPrefix: string;
+  readonly allowedEgressDomains?: readonly string[];
+  readonly commandProfile?: string | null;
 };
 
 export type PublicCommandSummary = {
@@ -67,6 +69,7 @@ export type PublicSessionSummary = {
   readonly status: string;
   readonly runtimeProvider: string | null;
   readonly runtimeSessionId: string | null;
+  readonly sourceSnapshotId: string | null;
   readonly createdAt: string;
   readonly startedAt: string | null;
   readonly endedAt: string | null;

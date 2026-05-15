@@ -148,7 +148,11 @@ describe("production Kubernetes manifest", () => {
       COMPOSE_SMOKE_ENABLED: "true",
     });
     expect(Object.keys(secret).sort()).toEqual([
+      "CODEX_API_KEY",
       "E2B_API_KEY",
+      "GITHUB_APP_ID",
+      "GITHUB_APP_INSTALLATION_ID",
+      "GITHUB_APP_PRIVATE_KEY",
       "GITHUB_TOKEN",
       "INTERNAL_SERVICE_TOKEN",
       "MINIO_ROOT_PASSWORD",

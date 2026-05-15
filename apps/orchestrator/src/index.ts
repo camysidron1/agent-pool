@@ -4,6 +4,7 @@ import { createRabbitMqManagementHttpAdapter } from "@agent-pool/queue";
 import { createBackendInternalApiClient } from "./backend-client";
 import { createCapacityLimiter } from "./capacity";
 import { createOrchestratorMetrics } from "./metrics";
+import { createConsoleRuntimeLogger } from "./runtime-logs";
 import { startOrchestratorService } from "./server";
 import { createOrchestratorWorkerLoops } from "./worker-loops";
 
@@ -25,6 +26,8 @@ export {
   type ClaimNextTaskResponse,
   type CommandReportInput,
   type CommandReportResponse,
+  type GitHubSessionTokenInput,
+  type GitHubSessionTokenResponse,
   type ReconcileInput,
   type ReconcileResponse,
   type SessionHeartbeatInput,
@@ -88,6 +91,17 @@ export {
   type RuntimeStarterOptions,
 } from "./runtime-starter";
 export {
+  createConsoleRuntimeLogger,
+  type ConsoleRuntimeLoggerOptions,
+} from "./runtime-logs";
+export {
+  runRuntimeSandboxFinalizerOnce,
+  type RuntimeSandboxFinalizerBackend,
+  type RuntimeSandboxFinalizerClock,
+  type RuntimeSandboxFinalizerOnceResult,
+  type RuntimeSandboxFinalizerOptions,
+} from "./runtime-sandbox-finalizer";
+export {
   runTaskQueueConsumerOnce,
   type TaskQueueConsumerBackend,
   type TaskQueueConsumerOptions,
@@ -112,7 +126,8 @@ if (isDirectRun()) {
   const backend = createBackendInternalApiClient({ config });
   const capacityLimiter = createCapacityLimiter({ maxConcurrent: 1 });
   const metrics = createOrchestratorMetrics();
-  const workerLoops = createOrchestratorWorkerLoops({ config, queue, backend, capacityLimiter, metrics, env });
+  const runtimeLogger = createConsoleRuntimeLogger();
+  const workerLoops = createOrchestratorWorkerLoops({ config, queue, backend, capacityLimiter, metrics, env, runtimeLogger });
 
   const server = startOrchestratorService({ config, port: config.orchestrator.port, queue, capacityLimiter, metrics, workerLoops });
   workerLoops.start();

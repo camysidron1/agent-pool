@@ -70,6 +70,7 @@ export async function runTaskQueueConsumerOnce(
       const claim = await options.backend.claimNextTask({
         projectId: options.projectId,
         sessionId: options.sessionIdFactory?.(),
+        sourceSnapshotId: readStringProperty(message.payload, "sourceSnapshotId"),
         runtimeProvider: options.runtimeProvider,
       });
 

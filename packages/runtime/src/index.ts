@@ -13,6 +13,27 @@ import {
 
 export type RuntimeProviderKind = "fake" | "e2b" | "docker";
 
+export type RuntimeLifecycleLogLevel = "debug" | "info" | "warn" | "error";
+
+export type RuntimeLifecycleLogEvent = {
+  readonly level?: RuntimeLifecycleLogLevel;
+  readonly event: string;
+  readonly provider: RuntimeProviderKind | string;
+  readonly projectId?: string;
+  readonly taskId?: string;
+  readonly sessionId?: string;
+  readonly sandboxId?: string;
+  readonly snapshotId?: string;
+  readonly sourceSnapshotId?: string | null;
+  readonly commandLabel?: string;
+  readonly command?: readonly string[];
+  readonly exitCode?: number | string;
+  readonly reason?: string;
+  readonly errorMessage?: string;
+};
+
+export type RuntimeLifecycleLogger = (event: RuntimeLifecycleLogEvent) => void;
+
 export type RuntimeClock = {
   readonly now: () => Date;
 };
@@ -35,8 +56,16 @@ export type RuntimeSessionRequest = {
   readonly sessionId?: string;
   readonly task?: Readonly<Record<string, unknown>>;
   readonly session?: Readonly<Record<string, unknown>>;
+  readonly sourceSnapshot?: RuntimeSourceSnapshot | null;
   readonly bridge?: RuntimeBridgeSessionOptions;
   readonly workspaceRoot?: string;
+  readonly secretEnvironment?: Readonly<Record<string, string>>;
+};
+
+export type RuntimeSourceSnapshot = {
+  readonly id: string;
+  readonly provider: RuntimeProviderKind | string;
+  readonly providerSnapshotId: string;
 };
 
 export type RuntimeSessionHandle = {
@@ -56,6 +85,9 @@ export type RuntimeProviderCapabilities = {
   readonly suspend: boolean;
   readonly resume: boolean;
   readonly fork: boolean;
+  readonly snapshot: boolean;
+  readonly deleteSnapshot: boolean;
+  readonly startFromSnapshot: boolean;
 };
 
 export type FakeRuntimeOutput = {
@@ -73,7 +105,16 @@ export interface RuntimeProvider {
   readonly capabilities: RuntimeProviderCapabilities;
   startSession(request: RuntimeSessionRequest): Promise<RuntimeSessionHandle>;
   stopSession(handle: RuntimeSessionHandle): Promise<void>;
+  createSnapshot(handle: RuntimeSessionHandle): Promise<RuntimeSnapshotHandle>;
+  deleteSnapshot(snapshot: RuntimeSnapshotHandle): Promise<void>;
 }
+
+export type RuntimeSnapshotHandle = {
+  readonly provider: RuntimeProviderKind;
+  readonly snapshotId: string;
+  readonly sourceSessionId?: string;
+  readonly metadata?: Readonly<Record<string, unknown>>;
+};
 
 export type E2BRuntimeProviderConfig = {
   readonly apiKeyEnvName: string;
@@ -86,6 +127,17 @@ export type E2BRuntimeProviderConfig = {
   readonly githubTokenEnvName?: string;
   readonly githubTokenConfigured?: boolean;
   readonly allowedSecretEnvNames?: readonly string[];
+  readonly agentRunnerMode?: "bridge-smoke" | "codex";
+  readonly codexCommand?: string;
+  readonly codexApiKeyEnvName?: string;
+  readonly codexApiKeyConfigured?: boolean;
+  readonly codexModel?: string | null;
+  readonly codexCommandProfile?: string;
+  readonly egressProxyUrl?: string | null;
+  readonly egressProxyAllowOut?: readonly string[];
+  readonly egressProxyNoProxy?: string | null;
+  readonly localAllowDirectEgress?: boolean;
+  readonly allowedEgressDomains?: readonly string[];
 };
 
 export type E2BSandboxCreateInput = {
@@ -113,10 +165,24 @@ export type E2BDestroySandboxOptions = {
   readonly timeoutMs?: number;
 };
 
+export type E2BCreateSnapshotOptions = {
+  readonly timeoutMs?: number;
+};
+
+export type E2BDeleteSnapshotOptions = {
+  readonly timeoutMs?: number;
+};
+
+export type E2BSnapshotHandle = {
+  readonly snapshotId: string;
+};
+
 export interface E2BRuntimeClient {
   createSandbox(input: E2BSandboxCreateInput): Promise<E2BSandboxHandle>;
   runCommand(sandboxId: string, command: readonly string[], options: E2BCommandRunOptions): Promise<E2BCommandResult>;
   destroySandbox(sandboxId: string, options?: E2BDestroySandboxOptions): Promise<void>;
+  createSnapshot(sandboxId: string, options?: E2BCreateSnapshotOptions): Promise<E2BSnapshotHandle>;
+  deleteSnapshot(snapshotId: string, options?: E2BDeleteSnapshotOptions): Promise<void>;
 }
 
 export type E2BRuntimeProviderOptions = {
@@ -124,6 +190,7 @@ export type E2BRuntimeProviderOptions = {
   readonly config?: E2BRuntimeProviderConfig;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly secretEnvNames?: readonly string[];
+  readonly logger?: RuntimeLifecycleLogger;
 };
 
 export type E2BLaunchSpec = {
@@ -141,9 +208,30 @@ export type E2BLaunchSpec = {
     readonly sessionId: string;
   };
   readonly bridge: RuntimeBridgeSessionOptions;
+  readonly sourceSnapshot: {
+    readonly id: string;
+    readonly providerSnapshotId: string;
+  } | null;
   readonly environment: {
     readonly variables: Readonly<Record<string, string>>;
     readonly secrets: Readonly<Record<string, string>>;
+  };
+  readonly runner: {
+    readonly mode: "bridge-smoke" | "codex";
+    readonly codex: {
+      readonly command: string;
+      readonly apiKeyEnvName: string;
+      readonly model: string | null;
+      readonly commandProfile: string;
+    } | null;
+  };
+  readonly network: {
+    readonly egressMode: "proxy" | "test-direct";
+    readonly allowInternetAccess: boolean;
+    readonly allowOut: readonly string[];
+    readonly allowPublicTraffic: boolean;
+    readonly proxyUrl: string | null;
+    readonly noProxy: string | null;
   };
 };
 
@@ -151,6 +239,8 @@ export type RuntimeTaskSourceMetadata = {
   readonly repositoryUrl: string;
   readonly baseRef: string;
   readonly taskBranchPrefix: string;
+  readonly allowedEgressDomains?: readonly string[];
+  readonly commandProfile?: string | null;
 };
 
 export type GitHubBootstrapCommand = {
@@ -214,6 +304,7 @@ export type FakeRuntimeProviderOptions = {
   readonly sessionIdFactory?: () => string;
   readonly workspaceRoot?: string;
   readonly scenario?: FakeRuntimeScenario;
+  readonly logger?: RuntimeLifecycleLogger;
 };
 
 export type FakeRuntimeBridgeRunRecord = {
@@ -232,6 +323,8 @@ export type FakeRuntimeProviderState = {
   readonly started: readonly FakeRuntimeSessionRecord[];
   readonly stopped: readonly RuntimeSessionHandle[];
   readonly active: readonly RuntimeSessionHandle[];
+  readonly snapshots: readonly RuntimeSnapshotHandle[];
+  readonly deletedSnapshots: readonly RuntimeSnapshotHandle[];
 };
 
 export type FakeRuntimeProvider = RuntimeProvider & {
@@ -279,6 +372,31 @@ const START_STOP_CAPABILITIES: RuntimeProviderCapabilities = {
   suspend: false,
   resume: false,
   fork: false,
+  snapshot: false,
+  deleteSnapshot: false,
+  startFromSnapshot: false,
+};
+
+const E2B_CAPABILITIES: RuntimeProviderCapabilities = {
+  start: true,
+  stop: true,
+  suspend: false,
+  resume: false,
+  fork: false,
+  snapshot: true,
+  deleteSnapshot: true,
+  startFromSnapshot: true,
+};
+
+const FAKE_CAPABILITIES: RuntimeProviderCapabilities = {
+  start: true,
+  stop: true,
+  suspend: false,
+  resume: false,
+  fork: false,
+  snapshot: true,
+  deleteSnapshot: true,
+  startFromSnapshot: true,
 };
 
 export function createFakeRuntimeProvider(options: FakeRuntimeProviderOptions = {}): FakeRuntimeProvider {
@@ -287,20 +405,41 @@ export function createFakeRuntimeProvider(options: FakeRuntimeProviderOptions = 
   let started: FakeRuntimeSessionRecord[] = [];
   let stopped: RuntimeSessionHandle[] = [];
   let active: RuntimeSessionHandle[] = [];
+  let snapshots: RuntimeSnapshotHandle[] = [];
+  let deletedSnapshots: RuntimeSnapshotHandle[] = [];
 
   return {
     kind: "fake",
-    capabilities: START_STOP_CAPABILITIES,
+    capabilities: FAKE_CAPABILITIES,
     get state(): FakeRuntimeProviderState {
       return {
         started: [...started],
         stopped: [...stopped],
         active: [...active],
+        snapshots: [...snapshots],
+        deletedSnapshots: [...deletedSnapshots],
       };
     },
     async startSession(request): Promise<RuntimeSessionHandle> {
       const scenario = options.scenario ?? {};
+      const logBase = {
+        provider: "fake",
+        projectId: request.projectId,
+        taskId: request.taskId,
+        sessionId: request.sessionId ?? request.bridge?.sessionId,
+        sourceSnapshotId: request.sourceSnapshot?.id ?? null,
+      } as const;
+      emitRuntimeLog(options.logger, {
+        ...logBase,
+        event: "runtime.sandbox.starting",
+      });
       if (scenario.startup === "failure") {
+        emitRuntimeLog(options.logger, {
+          ...logBase,
+          level: "error",
+          event: "runtime.sandbox.start_failed",
+          errorMessage: scenario.startupErrorMessage ?? "fake runtime startup failed",
+        });
         throw new Error(scenario.startupErrorMessage ?? "fake runtime startup failed");
       }
       const runtimeSessionId = scenario.runtimeSessionId ?? sessionIdFactory();
@@ -350,6 +489,11 @@ export function createFakeRuntimeProvider(options: FakeRuntimeProviderOptions = 
 
       started = [...started, { request, handle, bridgeRun }];
       active = [...active, handle];
+      emitRuntimeLog(options.logger, {
+        ...logBase,
+        event: "runtime.sandbox.started",
+        sandboxId: runtimeSessionId,
+      });
       return handle;
     },
     async stopSession(handle): Promise<void> {
@@ -357,10 +501,75 @@ export function createFakeRuntimeProvider(options: FakeRuntimeProviderOptions = 
         throw new Error(`fake runtime cannot stop ${handle.provider} session`);
       }
 
+      emitRuntimeLog(options.logger, {
+        event: "runtime.sandbox.cleanup.started",
+        provider: "fake",
+        projectId: handle.projectId,
+        taskId: handle.taskId,
+        sessionId: handle.sessionId,
+        sandboxId: handle.sessionId,
+      });
       active = active.filter((candidate) => candidate.sessionId !== handle.sessionId);
       if (!stopped.some((candidate) => candidate.sessionId === handle.sessionId)) {
         stopped = [...stopped, handle];
       }
+      emitRuntimeLog(options.logger, {
+        event: "runtime.sandbox.cleanup.succeeded",
+        provider: "fake",
+        projectId: handle.projectId,
+        taskId: handle.taskId,
+        sessionId: handle.sessionId,
+        sandboxId: handle.sessionId,
+      });
+    },
+    async createSnapshot(handle): Promise<RuntimeSnapshotHandle> {
+      if (handle.provider !== "fake") {
+        throw new Error(`fake runtime cannot snapshot ${handle.provider} session`);
+      }
+      emitRuntimeLog(options.logger, {
+        event: "runtime.snapshot.create.started",
+        provider: "fake",
+        projectId: handle.projectId,
+        taskId: handle.taskId,
+        sessionId: handle.sessionId,
+        sandboxId: handle.sessionId,
+      });
+      const snapshot = {
+        provider: "fake" as const,
+        snapshotId: `fake-snapshot-${handle.sessionId}`,
+        sourceSessionId: handle.sessionId,
+        metadata: {
+          sandboxId: handle.sessionId,
+        },
+      };
+      snapshots = [...snapshots.filter((candidate) => candidate.snapshotId !== snapshot.snapshotId), snapshot];
+      emitRuntimeLog(options.logger, {
+        event: "runtime.snapshot.create.succeeded",
+        provider: "fake",
+        projectId: handle.projectId,
+        taskId: handle.taskId,
+        sessionId: handle.sessionId,
+        sandboxId: handle.sessionId,
+        snapshotId: snapshot.snapshotId,
+      });
+      return snapshot;
+    },
+    async deleteSnapshot(snapshot): Promise<void> {
+      if (snapshot.provider !== "fake") {
+        throw new Error(`fake runtime cannot delete ${snapshot.provider} snapshot`);
+      }
+      emitRuntimeLog(options.logger, {
+        event: "runtime.snapshot.delete.started",
+        provider: "fake",
+        snapshotId: snapshot.snapshotId,
+      });
+      deletedSnapshots = [...deletedSnapshots, snapshot];
+      snapshots = snapshots.filter((candidate) => candidate.snapshotId !== snapshot.snapshotId);
+      emitRuntimeLog(options.logger, {
+        event: "runtime.snapshot.delete.succeeded",
+        provider: "fake",
+        snapshotId: snapshot.snapshotId,
+      });
     },
   };
 }
@@ -370,7 +579,7 @@ export function createE2BRuntimeProvider(options: E2BRuntimeProviderOptions = {}
 
   return {
     kind: "e2b",
-    capabilities: START_STOP_CAPABILITIES,
+    capabilities: E2B_CAPABILITIES,
     async startSession(request): Promise<RuntimeSessionHandle> {
       return startE2BSession(request, options);
     },
@@ -379,6 +588,18 @@ export function createE2BRuntimeProvider(options: E2BRuntimeProviderOptions = {}
         throw new Error(`e2b runtime cannot stop ${handle.provider} session`);
       }
       return stopE2BSession(handle, options, stoppedSandboxIds);
+    },
+    async createSnapshot(handle): Promise<RuntimeSnapshotHandle> {
+      if (handle.provider !== "e2b") {
+        throw new Error(`e2b runtime cannot snapshot ${handle.provider} session`);
+      }
+      return createE2BSnapshot(handle, options);
+    },
+    async deleteSnapshot(snapshot): Promise<void> {
+      if (snapshot.provider !== "e2b") {
+        throw new Error(`e2b runtime cannot delete ${snapshot.provider} snapshot`);
+      }
+      return deleteE2BSnapshot(snapshot, options);
     },
   };
 }
@@ -393,17 +614,64 @@ export function buildE2BLaunchSpec(request: RuntimeSessionRequest, options: E2BR
   }
 
   const workingDirectory = normalizeSandboxWorkingDirectory(config.workingDirectory ?? "/workspace/agent-pool");
+  const env = { ...(options.env ?? {}), ...(request.secretEnvironment ?? {}) };
+  const runnerMode = config.agentRunnerMode ?? "bridge-smoke";
+  const codexApiKeyEnvName = sanitizeEnvName(config.codexApiKeyEnvName ?? "CODEX_API_KEY");
+  const codexCommand = config.codexCommand?.trim() || "codex";
+  const codexCommandProfile = config.codexCommandProfile?.trim() || "agent-pool-bun-pr";
+  const egressProxyUrl = config.egressProxyUrl?.trim() || null;
+  const egressAllowOut = [...(config.egressProxyAllowOut ?? [])];
+  const egressNoProxy = config.egressProxyNoProxy?.trim() || null;
+  const localAllowDirectEgress = Boolean(config.localAllowDirectEgress);
+  const runtimeSource = readRuntimeTaskSource(request.task);
+  const branchName = runtimeSource ? createTaskBranchName(runtimeSource.taskBranchPrefix, request.taskId) : null;
+
+  if (runnerMode === "codex") {
+    if (!env[codexApiKeyEnvName]?.trim()) {
+      throw new Error(`${codexApiKeyEnvName} is required for codex e2b runner`);
+    }
+    if (!request.secretEnvironment?.[config.githubTokenEnvName ?? "GITHUB_TOKEN"]?.trim()) {
+      throw new Error(`${config.githubTokenEnvName ?? "GITHUB_TOKEN"} is required for codex e2b runner`);
+    }
+    if (!localAllowDirectEgress && (!egressProxyUrl || egressAllowOut.length === 0)) {
+      throw new Error("strict egress proxy configuration is required for codex e2b runner");
+    }
+    if (!runtimeSource?.allowedEgressDomains?.length || runtimeSource.commandProfile !== codexCommandProfile) {
+      throw new Error("codex e2b runner requires runtimeSource allowedEgressDomains and commandProfile");
+    }
+  }
+
   const allowedSecretEnvNames = new Set(config.allowedSecretEnvNames ?? []);
-  const requestedSecretEnvNames = options.secretEnvNames ?? config.allowedSecretEnvNames ?? [];
+  const requestedSecretEnvNames = [
+    ...(options.secretEnvNames ?? config.allowedSecretEnvNames ?? []),
+    ...(runnerMode === "codex" ? [codexApiKeyEnvName, config.githubTokenEnvName ?? "GITHUB_TOKEN"] : []),
+  ];
   const secrets: Record<string, string> = {};
 
-  for (const name of requestedSecretEnvNames) {
+  for (const name of new Set(requestedSecretEnvNames)) {
     if (!allowedSecretEnvNames.has(name)) {
       throw new Error(`e2b launch spec rejected unscoped secret env var: ${name}`);
     }
-    const value = options.env?.[name]?.trim();
+    const value = env[name]?.trim();
     if (value) secrets[name] = value;
   }
+
+  const sessionProxyUrl = runnerMode === "codex" && egressProxyUrl
+    ? createSessionProxyUrl({
+        proxyUrl: egressProxyUrl,
+        projectId: request.projectId,
+        sessionId: request.sessionId ?? request.bridge.sessionId,
+        proxyToken: request.bridge.sessionToken.token,
+      })
+    : null;
+  const proxyEnvironment = runnerMode === "codex" && sessionProxyUrl
+    ? {
+        HTTP_PROXY: sessionProxyUrl,
+        HTTPS_PROXY: sessionProxyUrl,
+        ALL_PROXY: sessionProxyUrl,
+        ...(egressNoProxy ? { NO_PROXY: egressNoProxy } : {}),
+      }
+    : {};
 
   return {
     provider: "e2b",
@@ -420,6 +688,7 @@ export function buildE2BLaunchSpec(request: RuntimeSessionRequest, options: E2BR
       sessionId: request.sessionId ?? request.bridge.sessionId,
     },
     bridge: request.bridge,
+    sourceSnapshot: normalizeE2BSourceSnapshot(request.sourceSnapshot),
     environment: {
       variables: {
         AGENT_POOL_PROJECT_ID: request.projectId,
@@ -427,8 +696,48 @@ export function buildE2BLaunchSpec(request: RuntimeSessionRequest, options: E2BR
         AGENT_POOL_SESSION_ID: request.sessionId ?? request.bridge.sessionId,
         AGENT_POOL_BRIDGE_CALLBACK_BASE_URL: request.bridge.callbackBaseUrl,
         AGENT_POOL_BRIDGE_SESSION_TOKEN_HEADER: request.bridge.sessionToken.headerName,
+        AGENT_POOL_BRIDGE_RUNNER: runnerMode,
+        AGENT_POOL_CODEX_COMMAND: codexCommand,
+        AGENT_POOL_CODEX_API_KEY_ENV_NAME: codexApiKeyEnvName,
+        AGENT_POOL_CODEX_COMMAND_PROFILE: codexCommandProfile,
+        ...(readStringField(request.task, "title") ? { AGENT_POOL_TASK_TITLE: readStringField(request.task, "title") ?? "" } : {}),
+        ...(readStringField(request.task, "description")
+          ? { AGENT_POOL_TASK_DESCRIPTION: readStringField(request.task, "description") ?? "" }
+          : {}),
+        ...(runtimeSource
+          ? {
+              AGENT_POOL_REPOSITORY_URL: runtimeSource.repositoryUrl,
+              AGENT_POOL_BASE_REF: runtimeSource.baseRef,
+              AGENT_POOL_TASK_BRANCH: branchName ?? "",
+            }
+          : {}),
+        ...(config.codexModel?.trim() ? { AGENT_POOL_CODEX_MODEL: config.codexModel.trim() } : {}),
+        ...(runtimeSource?.allowedEgressDomains?.length
+          ? { AGENT_POOL_ALLOWED_EGRESS_DOMAINS: runtimeSource.allowedEgressDomains.join(",") }
+          : {}),
+        ...proxyEnvironment,
       },
       secrets,
+    },
+    runner: {
+      mode: runnerMode,
+      codex:
+        runnerMode === "codex"
+          ? {
+              command: codexCommand,
+              apiKeyEnvName: codexApiKeyEnvName,
+              model: config.codexModel?.trim() || null,
+              commandProfile: codexCommandProfile,
+            }
+          : null,
+    },
+    network: {
+      egressMode: runnerMode === "codex" && !localAllowDirectEgress ? "proxy" : "test-direct",
+      allowInternetAccess: runnerMode !== "codex" || localAllowDirectEgress,
+      allowOut: runnerMode === "codex" && !localAllowDirectEgress ? egressAllowOut : [],
+      allowPublicTraffic: false,
+      proxyUrl: sessionProxyUrl,
+      noProxy: egressNoProxy,
     },
   };
 }
@@ -444,8 +753,12 @@ export function redactE2BLaunchSpec(spec: E2BLaunchSpec): RedactedE2BLaunchSpec 
       },
     },
     environment: {
-      variables: spec.environment.variables,
+      variables: redactE2BVariables(spec.environment.variables),
       secrets: Object.fromEntries(Object.keys(spec.environment.secrets).map((name) => [name, "[REDACTED]" as const])),
+    },
+    network: {
+      ...spec.network,
+      proxyUrl: spec.network.proxyUrl ? "[REDACTED]" : null,
     },
   };
 }
@@ -469,8 +782,19 @@ export function buildGitHubBootstrapPlan(input: {
   const branchName = createTaskBranchName(runtimeSource.taskBranchPrefix, input.taskId);
   const commands: GitHubBootstrapCommand[] = [
     {
-      label: "clone repository",
-      command: ["git", "clone", "--no-checkout", runtimeSource.repositoryUrl, workingDirectory],
+      label: "prepare repository",
+      command: [
+        "sh",
+        "-lc",
+        [
+          `if [ -e ${quoteShellArg(workingDirectory)} ] && [ ! -d ${quoteShellArg(`${workingDirectory}/.git`)} ]; then`,
+          `  echo ${quoteShellArg("working directory exists but is not a git repository")}; exit 1;`,
+          "fi;",
+          `if [ ! -d ${quoteShellArg(`${workingDirectory}/.git`)} ]; then`,
+          `  git clone --no-checkout ${quoteShellArg(runtimeSource.repositoryUrl)} ${quoteShellArg(workingDirectory)};`,
+          "fi",
+        ].join(" "),
+      ],
     },
     {
       label: "fetch base ref",
@@ -514,6 +838,38 @@ export function buildSandboxBridgeStartupPlan(spec: E2BLaunchSpec): SandboxBridg
   };
 }
 
+function quoteShellArg(value: string): string {
+  if (value.includes("\0")) {
+    throw new Error("shell argument must not contain NUL bytes");
+  }
+  if (value.length > 0 && /^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) {
+    return value;
+  }
+
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function createSessionProxyUrl(input: {
+  readonly proxyUrl: string;
+  readonly projectId: string;
+  readonly sessionId: string;
+  readonly proxyToken: string;
+}): string {
+  const url = new URL(input.proxyUrl);
+  url.username = Buffer.from(`${input.projectId}:${input.sessionId}`, "utf8").toString("base64url");
+  url.password = input.proxyToken;
+  return url.toString();
+}
+
+function redactE2BVariables(variables: Readonly<Record<string, string>>): Readonly<Record<string, string>> {
+  return Object.fromEntries(
+    Object.entries(variables).map(([key, value]) => [
+      key,
+      key === "HTTP_PROXY" || key === "HTTPS_PROXY" || key === "ALL_PROXY" ? "[REDACTED]" : value,
+    ]),
+  );
+}
+
 async function startE2BSession(
   request: RuntimeSessionRequest,
   options: E2BRuntimeProviderOptions,
@@ -527,39 +883,66 @@ async function startE2BSession(
   }
 
   let sandboxId: string | null = null;
-  let secretValues: readonly string[] = collectOptionSecretValues(options);
+  const sessionEnv = { ...(options.env ?? {}), ...(request.secretEnvironment ?? {}) };
+  let secretValues: readonly string[] = collectOptionSecretValues(options, request);
 
   try {
     const launchSpec = buildE2BLaunchSpec(request, options);
     const redactedLaunchSpec = redactE2BLaunchSpec(launchSpec);
+    const logBase = {
+      provider: "e2b",
+      projectId: request.projectId,
+      taskId: request.taskId,
+      sessionId: launchSpec.session.sessionId,
+      sourceSnapshotId: launchSpec.sourceSnapshot?.id ?? null,
+    } as const;
+    emitRuntimeLog(options.logger, {
+      ...logBase,
+      event: "runtime.sandbox.starting",
+    });
     const bridgeStartup = buildSandboxBridgeStartupPlan(launchSpec);
     const bootstrapPlan = buildGitHubBootstrapPlan({
       runtimeSource: readRuntimeTaskSource(request.task),
       taskId: request.taskId,
       workingDirectory: launchSpec.sandbox.workingDirectory,
       githubTokenEnvName: config.githubTokenEnvName,
-      githubTokenConfigured: config.githubTokenConfigured,
+      githubTokenConfigured: Boolean(sessionEnv[config.githubTokenEnvName ?? "GITHUB_TOKEN"]?.trim()),
     });
-    const bootstrapSecretEnv = pickSecretEnvironment(options.env ?? {}, bootstrapPlan.environment.secretEnvNames);
+    const bootstrapSecretEnv = pickSecretEnvironment(sessionEnv, bootstrapPlan.environment.secretEnvNames);
     const bootstrapEnv = {
+      ...launchSpec.environment.variables,
       ...bootstrapPlan.environment.variables,
       ...bootstrapSecretEnv,
     };
-    secretValues = collectE2BSecretValues(launchSpec, bridgeStartup.env, options, bootstrapSecretEnv);
+    secretValues = collectE2BSecretValues(launchSpec, bridgeStartup.env, options, request, bootstrapSecretEnv);
 
     const sandbox = await client.createSandbox({ launchSpec, redactedLaunchSpec });
     sandboxId = normalizeE2BSandboxId(sandbox.sandboxId);
+    emitRuntimeLog(options.logger, {
+      ...logBase,
+      event: "runtime.sandbox.created",
+      sandboxId,
+    });
 
     for (const command of bootstrapPlan.commands) {
       await runE2BCommand(client, sandboxId, command.label, command.command, {
         env: bootstrapEnv,
         timeoutMs: launchSpec.sandbox.startupTimeoutMs,
-      });
+      }, { logger: options.logger, base: logBase, secretValues });
     }
 
     await runE2BCommand(client, sandboxId, "start bridge", bridgeStartup.command, {
-      env: bridgeStartup.env,
+      env: {
+        ...launchSpec.environment.variables,
+        ...launchSpec.environment.secrets,
+        ...bridgeStartup.env,
+      },
       timeoutMs: launchSpec.sandbox.startupTimeoutMs,
+    }, { logger: options.logger, base: logBase, secretValues });
+    emitRuntimeLog(options.logger, {
+      ...logBase,
+      event: "runtime.sandbox.started",
+      sandboxId,
     });
 
     return {
@@ -570,18 +953,66 @@ async function startE2BSession(
       workspaceRoot: launchSpec.sandbox.workingDirectory,
       startedAt: new Date().toISOString(),
       metadata: {
+        agentPoolSessionId: launchSpec.session.sessionId,
         sandboxId,
         branchName: bootstrapPlan.branchName,
         bootstrapCommands: bootstrapPlan.commands.length,
         bridgeCommandAccepted: true,
+        runnerMode: launchSpec.runner.mode,
+        network: launchSpec.network,
         launchSpec: redactedLaunchSpec,
         bridgeStartupEnv: bridgeStartup.redactedEnv,
       },
     };
   } catch (error) {
     if (sandboxId) {
-      await client.destroySandbox(sandboxId, { timeoutMs: config.cleanupTimeoutMs ?? 30_000 }).catch(() => undefined);
+      const cleanupSandboxId = sandboxId;
+      emitRuntimeLog(options.logger, {
+        event: "runtime.sandbox.cleanup.started",
+        provider: "e2b",
+        projectId: request.projectId,
+        taskId: request.taskId,
+        sessionId: request.sessionId ?? request.bridge?.sessionId,
+        sandboxId: cleanupSandboxId,
+        reason: "startup_failed",
+      });
+      await client
+        .destroySandbox(cleanupSandboxId, { timeoutMs: config.cleanupTimeoutMs ?? 30_000 })
+        .then(() => {
+          emitRuntimeLog(options.logger, {
+            event: "runtime.sandbox.cleanup.succeeded",
+            provider: "e2b",
+            projectId: request.projectId,
+            taskId: request.taskId,
+            sessionId: request.sessionId ?? request.bridge?.sessionId,
+            sandboxId: cleanupSandboxId,
+            reason: "startup_failed",
+          });
+        })
+        .catch((cleanupError) => {
+          emitRuntimeLog(options.logger, {
+            level: "error",
+            event: "runtime.sandbox.cleanup.failed",
+            provider: "e2b",
+            projectId: request.projectId,
+            taskId: request.taskId,
+            sessionId: request.sessionId ?? request.bridge?.sessionId,
+            sandboxId: cleanupSandboxId,
+            reason: "startup_failed",
+            errorMessage: redactSecretValues(errorMessage(cleanupError), secretValues),
+          });
+        });
     }
+    emitRuntimeLog(options.logger, {
+      level: "error",
+      event: "runtime.sandbox.start_failed",
+      provider: "e2b",
+      projectId: request.projectId,
+      taskId: request.taskId,
+      sessionId: request.sessionId ?? request.bridge?.sessionId,
+      sandboxId: sandboxId ?? undefined,
+      errorMessage: redactSecretValues(errorMessage(error), secretValues),
+    });
     throw new Error(redactSecretValues(errorMessage(error), secretValues));
   }
 }
@@ -600,12 +1031,139 @@ async function stopE2BSession(
   }
 
   const sandboxId = readE2BSandboxId(handle);
-  if (stoppedSandboxIds.has(sandboxId)) return;
+  const sessionId = readRuntimeLogSessionId(handle);
+  if (stoppedSandboxIds.has(sandboxId)) {
+    emitRuntimeLog(options.logger, {
+      event: "runtime.sandbox.cleanup.skipped",
+      provider: "e2b",
+      projectId: handle.projectId,
+      taskId: handle.taskId,
+      sessionId,
+      sandboxId,
+      reason: "already_stopped",
+    });
+    return;
+  }
 
   try {
+    emitRuntimeLog(options.logger, {
+      event: "runtime.sandbox.cleanup.started",
+      provider: "e2b",
+      projectId: handle.projectId,
+      taskId: handle.taskId,
+      sessionId,
+      sandboxId,
+    });
     await client.destroySandbox(sandboxId, { timeoutMs: config.cleanupTimeoutMs ?? 30_000 });
     stoppedSandboxIds.add(sandboxId);
+    emitRuntimeLog(options.logger, {
+      event: "runtime.sandbox.cleanup.succeeded",
+      provider: "e2b",
+      projectId: handle.projectId,
+      taskId: handle.taskId,
+      sessionId,
+      sandboxId,
+    });
   } catch (error) {
+    emitRuntimeLog(options.logger, {
+      level: "error",
+      event: "runtime.sandbox.cleanup.failed",
+      provider: "e2b",
+      projectId: handle.projectId,
+      taskId: handle.taskId,
+      sessionId,
+      sandboxId,
+      errorMessage: redactSecretValues(errorMessage(error), collectOptionSecretValues(options)),
+    });
+    throw new Error(redactSecretValues(errorMessage(error), collectOptionSecretValues(options)));
+  }
+}
+
+async function createE2BSnapshot(
+  handle: RuntimeSessionHandle,
+  options: E2BRuntimeProviderOptions,
+): Promise<RuntimeSnapshotHandle> {
+  assertE2BProviderReady(options);
+
+  const config = options.config;
+  const client = options.client;
+  if (!config || !client) {
+    throw new Error("e2b runtime provider requires runtime config and an injected E2B client");
+  }
+
+  const sandboxId = readE2BSandboxId(handle);
+  const sessionId = readRuntimeLogSessionId(handle);
+  try {
+    emitRuntimeLog(options.logger, {
+      event: "runtime.snapshot.create.started",
+      provider: "e2b",
+      projectId: handle.projectId,
+      taskId: handle.taskId,
+      sessionId,
+      sandboxId,
+    });
+    const snapshot = await client.createSnapshot(sandboxId, { timeoutMs: config.cleanupTimeoutMs ?? 30_000 });
+    emitRuntimeLog(options.logger, {
+      event: "runtime.snapshot.create.succeeded",
+      provider: "e2b",
+      projectId: handle.projectId,
+      taskId: handle.taskId,
+      sessionId,
+      sandboxId,
+      snapshotId: snapshot.snapshotId,
+    });
+    return {
+      provider: "e2b",
+      snapshotId: snapshot.snapshotId,
+      sourceSessionId: handle.sessionId,
+      metadata: {
+        sandboxId,
+      },
+    };
+  } catch (error) {
+    emitRuntimeLog(options.logger, {
+      level: "error",
+      event: "runtime.snapshot.create.failed",
+      provider: "e2b",
+      projectId: handle.projectId,
+      taskId: handle.taskId,
+      sessionId,
+      sandboxId,
+      errorMessage: redactSecretValues(errorMessage(error), collectOptionSecretValues(options)),
+    });
+    throw new Error(redactSecretValues(errorMessage(error), collectOptionSecretValues(options)));
+  }
+}
+
+async function deleteE2BSnapshot(snapshot: RuntimeSnapshotHandle, options: E2BRuntimeProviderOptions): Promise<void> {
+  assertE2BProviderReady(options);
+
+  const config = options.config;
+  const client = options.client;
+  if (!config || !client) {
+    throw new Error("e2b runtime provider requires runtime config and an injected E2B client");
+  }
+
+  try {
+    emitRuntimeLog(options.logger, {
+      event: "runtime.snapshot.delete.started",
+      provider: "e2b",
+      snapshotId: snapshot.snapshotId,
+    });
+    await client.deleteSnapshot(snapshot.snapshotId, { timeoutMs: config.cleanupTimeoutMs ?? 30_000 });
+    emitRuntimeLog(options.logger, {
+      event: "runtime.snapshot.delete.succeeded",
+      provider: "e2b",
+      snapshotId: snapshot.snapshotId,
+    });
+  } catch (error) {
+    emitRuntimeLog(options.logger, {
+      level: "error",
+      event: "runtime.snapshot.delete.failed",
+      provider: "e2b",
+      snapshotId: snapshot.snapshotId,
+      errorMessage: redactSecretValues(errorMessage(error), collectOptionSecretValues(options)),
+    });
     throw new Error(redactSecretValues(errorMessage(error), collectOptionSecretValues(options)));
   }
 }
@@ -616,12 +1174,66 @@ async function runE2BCommand(
   label: string,
   command: readonly string[],
   options: E2BCommandRunOptions,
+  log?: {
+    readonly logger?: RuntimeLifecycleLogger;
+    readonly base: Omit<RuntimeLifecycleLogEvent, "event" | "command" | "commandLabel" | "exitCode" | "level" | "errorMessage">;
+    readonly secretValues: readonly string[];
+  },
 ): Promise<void> {
-  const result = await client.runCommand(sandboxId, command, options);
-  if (result.ok) return;
+  const base = log?.base;
+  if (base) {
+    emitRuntimeLog(log?.logger, {
+      ...base,
+      event: "runtime.command.started",
+      sandboxId,
+      commandLabel: label,
+      command: redactCommand(command, log.secretValues),
+    });
+  }
+  let result: E2BCommandResult;
+  try {
+    result = await client.runCommand(sandboxId, command, options);
+  } catch (error) {
+    if (base) {
+      emitRuntimeLog(log?.logger, {
+        ...base,
+        level: "error",
+        event: "runtime.command.failed",
+        sandboxId,
+        commandLabel: label,
+        command: redactCommand(command, log.secretValues),
+        errorMessage: redactSecretValues(errorMessage(error), log.secretValues),
+      });
+    }
+    throw error;
+  }
+  if (result.ok) {
+    if (base) {
+      emitRuntimeLog(log?.logger, {
+        ...base,
+        event: "runtime.command.succeeded",
+        sandboxId,
+        commandLabel: label,
+        exitCode: typeof result.exitCode === "number" ? result.exitCode : 0,
+      });
+    }
+    return;
+  }
 
   const exitCode = typeof result.exitCode === "number" ? result.exitCode : "unknown";
   const output = firstNonEmptyString(result.stderr, result.stdout, "no command output");
+  if (base) {
+    emitRuntimeLog(log?.logger, {
+      ...base,
+      level: "error",
+      event: "runtime.command.failed",
+      sandboxId,
+      commandLabel: label,
+      command: redactCommand(command, log.secretValues),
+      exitCode,
+      errorMessage: redactSecretValues(output, log.secretValues),
+    });
+  }
   throw new Error(`e2b command failed (${label}, exit ${exitCode}): ${output}`);
 }
 
@@ -633,17 +1245,32 @@ function readRuntimeTaskSource(task: Readonly<Record<string, unknown>> | undefin
   const repositoryUrl = readStringField(source, "repositoryUrl");
   const baseRef = readStringField(source, "baseRef");
   const taskBranchPrefix = readStringField(source, "taskBranchPrefix");
+  const commandProfile = readStringField(source, "commandProfile");
+  const allowedEgressDomains = readStringArrayField(source, "allowedEgressDomains");
 
   if (!repositoryUrl || !baseRef || !taskBranchPrefix) {
     throw new Error("github bootstrap runtime source metadata is incomplete");
   }
 
-  return { repositoryUrl, baseRef, taskBranchPrefix };
+  return {
+    repositoryUrl,
+    baseRef,
+    taskBranchPrefix,
+    ...(allowedEgressDomains.length > 0 ? { allowedEgressDomains } : {}),
+    ...(commandProfile ? { commandProfile } : {}),
+  };
 }
 
-function readStringField(source: Readonly<Record<string, unknown>>, name: string): string | null {
+function readStringField(source: Readonly<Record<string, unknown>> | undefined, name: string): string | null {
+  if (!source) return null;
   const value = source[name];
   return typeof value === "string" ? value : null;
+}
+
+function readStringArrayField(source: Readonly<Record<string, unknown>>, name: string): readonly string[] {
+  const value = source[name];
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim());
 }
 
 function normalizeE2BSandboxId(sandboxId: string): string {
@@ -664,6 +1291,39 @@ function readE2BSandboxId(handle: RuntimeSessionHandle): string {
   return trimmed;
 }
 
+function readRuntimeLogSessionId(handle: RuntimeSessionHandle): string {
+  const direct = handle.metadata?.agentPoolSessionId;
+  if (typeof direct === "string" && direct.trim()) {
+    return direct.trim();
+  }
+
+  const launchSpec = handle.metadata?.launchSpec;
+  if (launchSpec && typeof launchSpec === "object" && "session" in launchSpec) {
+    const session = (launchSpec as Readonly<Record<string, unknown>>).session;
+    if (session && typeof session === "object" && "sessionId" in session) {
+      const sessionId = (session as Readonly<Record<string, unknown>>).sessionId;
+      if (typeof sessionId === "string" && sessionId.trim()) {
+        return sessionId.trim();
+      }
+    }
+  }
+
+  return handle.sessionId;
+}
+
+function normalizeE2BSourceSnapshot(input: RuntimeSourceSnapshot | null | undefined): E2BLaunchSpec["sourceSnapshot"] {
+  if (!input) return null;
+  if (input.provider !== "e2b") {
+    throw new Error(`e2b launch spec cannot use ${input.provider} source snapshot`);
+  }
+  const id = input.id.trim();
+  const providerSnapshotId = input.providerSnapshotId.trim();
+  if (!id || !providerSnapshotId) {
+    throw new Error("e2b source snapshot requires snapshot ids");
+  }
+  return { id, providerSnapshotId };
+}
+
 function pickSecretEnvironment(
   env: Readonly<Record<string, string | undefined>>,
   names: readonly string[],
@@ -676,11 +1336,18 @@ function pickSecretEnvironment(
   return picked;
 }
 
-function collectOptionSecretValues(options: E2BRuntimeProviderOptions): readonly string[] {
+function collectOptionSecretValues(
+  options: E2BRuntimeProviderOptions,
+  request?: RuntimeSessionRequest,
+): readonly string[] {
   const values: string[] = [];
   for (const name of options.secretEnvNames ?? options.config?.allowedSecretEnvNames ?? []) {
     const value = options.env?.[name]?.trim();
     if (value) values.push(value);
+  }
+  for (const value of Object.values(request?.secretEnvironment ?? {})) {
+    const trimmed = value.trim();
+    if (trimmed) values.push(trimmed);
   }
   return values;
 }
@@ -689,10 +1356,11 @@ function collectE2BSecretValues(
   spec: E2BLaunchSpec,
   bridgeEnv: SandboxBridgeStartupCommand["env"],
   options: E2BRuntimeProviderOptions,
+  request: RuntimeSessionRequest,
   bootstrapSecretEnv: Readonly<Record<string, string>>,
 ): readonly string[] {
   return [
-    ...collectOptionSecretValues(options),
+    ...collectOptionSecretValues(options, request),
     ...Object.values(bootstrapSecretEnv),
     ...Object.values(spec.environment.secrets),
     spec.bridge.sessionToken.token,
@@ -708,6 +1376,19 @@ function redactSecretValues(message: string, secretValues: readonly string[]): s
   return redacted;
 }
 
+function redactCommand(command: readonly string[], secretValues: readonly string[]): readonly string[] {
+  return command.map((part) => redactSecretValues(part, secretValues));
+}
+
+function emitRuntimeLog(logger: RuntimeLifecycleLogger | undefined, event: RuntimeLifecycleLogEvent): void {
+  if (!logger) return;
+  try {
+    logger(event);
+  } catch {
+    // Runtime progress should not fail because an observer failed to write a log line.
+  }
+}
+
 function firstNonEmptyString(...values: readonly (string | undefined)[]): string {
   return values.find((value) => value !== undefined && value.trim().length > 0)?.trim() ?? "";
 }
@@ -721,7 +1402,9 @@ function sanitizeRuntimeTaskSource(input: RuntimeTaskSourceMetadata | null | und
   const repositoryUrl = input.repositoryUrl.trim();
   const baseRef = input.baseRef.trim();
   const taskBranchPrefix = input.taskBranchPrefix.trim();
-  const serialized = JSON.stringify({ repositoryUrl, baseRef, taskBranchPrefix });
+  const allowedEgressDomains = [...(input.allowedEgressDomains ?? [])].map((domain) => domain.trim().toLowerCase()).filter(Boolean);
+  const commandProfile = input.commandProfile?.trim() || null;
+  const serialized = JSON.stringify({ repositoryUrl, baseRef, taskBranchPrefix, allowedEgressDomains, commandProfile });
 
   if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(repositoryUrl)) {
     throw new Error("github bootstrap repositoryUrl must be an https GitHub repository URL");
@@ -735,8 +1418,22 @@ function sanitizeRuntimeTaskSource(input: RuntimeTaskSourceMetadata | null | und
   if (/token|secret|password|github_pat_|ghp_/i.test(serialized)) {
     throw new Error("github bootstrap runtime source must not contain secret values");
   }
+  for (const domain of allowedEgressDomains) {
+    if (!/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/.test(domain) || domain.includes("*") || domain.includes("/") || domain.includes(":")) {
+      throw new Error("github bootstrap allowedEgressDomains contains an invalid domain");
+    }
+  }
+  if (commandProfile !== null && commandProfile !== "agent-pool-bun-pr") {
+    throw new Error("github bootstrap commandProfile is unsupported");
+  }
 
-  return { repositoryUrl, baseRef, taskBranchPrefix };
+  return {
+    repositoryUrl,
+    baseRef,
+    taskBranchPrefix,
+    ...(allowedEgressDomains.length > 0 ? { allowedEgressDomains } : {}),
+    ...(commandProfile ? { commandProfile } : {}),
+  };
 }
 
 function createTaskBranchName(prefix: string, taskId: string): string {
@@ -791,12 +1488,21 @@ function createUnavailableRuntimeProvider(kind: "docker"): RuntimeProvider {
       suspend: false,
       resume: false,
       fork: false,
+      snapshot: false,
+      deleteSnapshot: false,
+      startFromSnapshot: false,
     },
     async startSession(): Promise<RuntimeSessionHandle> {
       throw new Error(`${kind} runtime provider is not implemented in default CI`);
     },
     async stopSession(): Promise<void> {
       return undefined;
+    },
+    async createSnapshot(): Promise<RuntimeSnapshotHandle> {
+      throw new Error(`${kind} runtime provider cannot create snapshots`);
+    },
+    async deleteSnapshot(): Promise<void> {
+      throw new Error(`${kind} runtime provider cannot delete snapshots`);
     },
   };
 }

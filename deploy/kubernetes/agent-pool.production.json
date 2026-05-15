@@ -39,7 +39,11 @@
         "MINIO_ROOT_USER": "agent-pool",
         "MINIO_ROOT_PASSWORD": "<replace-with-minio-password>",
         "E2B_API_KEY": "<optional-e2b-api-key>",
-        "GITHUB_TOKEN": "<optional-github-token>"
+        "CODEX_API_KEY": "<optional-codex-api-key>",
+        "GITHUB_TOKEN": "<optional-github-token>",
+        "GITHUB_APP_ID": "<optional-github-app-id>",
+        "GITHUB_APP_PRIVATE_KEY": "<optional-github-app-private-key>",
+        "GITHUB_APP_INSTALLATION_ID": "<optional-github-app-installation-id>"
       }
     },
     {
@@ -70,6 +74,7 @@
         "BLOB_ENDPOINT_URL": "http://agent-pool-blob.agent-pool.svc.cluster.local:9000",
         "BLOB_FORCE_PATH_STYLE": "true",
         "RUNTIME_PROVIDER": "fake",
+        "AGENT_RUNNER_MODE": "bridge-smoke",
         "COMPOSE_SMOKE_ENABLED": "true",
         "COMPOSE_SMOKE_PROJECT_ID": "deployed-smoke",
         "CONTROL_PLANE_WORKER_POLL_INTERVAL_MS": "1000",
@@ -77,11 +82,21 @@
         "CONTROL_PLANE_RECONCILE_INTERVAL_MS": "5000",
         "E2B_API_KEY_ENV_NAME": "E2B_API_KEY",
         "E2B_GITHUB_TOKEN_ENV_NAME": "GITHUB_TOKEN",
-        "E2B_ALLOWED_SECRET_ENV_NAMES": "GITHUB_TOKEN",
+        "E2B_ALLOWED_SECRET_ENV_NAMES": "GITHUB_TOKEN,CODEX_API_KEY",
         "E2B_TEMPLATE_ID": "",
+        "E2B_SANDBOX_IMAGE_ID": "",
         "E2B_WORKING_DIRECTORY": "/workspace/agent-pool",
         "E2B_STARTUP_TIMEOUT_MS": "120000",
-        "E2B_CLEANUP_TIMEOUT_MS": "30000"
+        "E2B_CLEANUP_TIMEOUT_MS": "30000",
+        "CODEX_COMMAND": "codex",
+        "CODEX_API_KEY_ENV_NAME": "CODEX_API_KEY",
+        "CODEX_MODEL": "",
+        "CODEX_COMMAND_PROFILE": "agent-pool-bun-pr",
+        "EGRESS_PROXY_URL": "",
+        "EGRESS_PROXY_ALLOW_OUT": "",
+        "EGRESS_PROXY_NO_PROXY": "",
+        "AGENT_POOL_ALLOWED_EGRESS_DOMAINS": "",
+        "GITHUB_APP_TOKEN_ENV_NAME": "GITHUB_TOKEN"
       }
     },
     {
@@ -478,6 +493,175 @@
                         "key": "CONTROL_PLANE_OUTBOX_PUBLISH_INTERVAL_MS"
                       }
                     }
+                  },
+                  {
+                    "name": "RUNTIME_PROVIDER",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "RUNTIME_PROVIDER"
+                      }
+                    }
+                  },
+                  {
+                    "name": "AGENT_RUNNER_MODE",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "AGENT_RUNNER_MODE"
+                      }
+                    }
+                  },
+                  {
+                    "name": "E2B_API_KEY_ENV_NAME",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "E2B_API_KEY_ENV_NAME"
+                      }
+                    }
+                  },
+                  {
+                    "name": "E2B_API_KEY",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "E2B_API_KEY",
+                        "optional": true
+                      }
+                    }
+                  },
+                  {
+                    "name": "E2B_TEMPLATE_ID",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "E2B_TEMPLATE_ID",
+                        "optional": true
+                      }
+                    }
+                  },
+                  {
+                    "name": "E2B_SANDBOX_IMAGE_ID",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "E2B_SANDBOX_IMAGE_ID",
+                        "optional": true
+                      }
+                    }
+                  },
+                  {
+                    "name": "E2B_GITHUB_TOKEN_ENV_NAME",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "E2B_GITHUB_TOKEN_ENV_NAME"
+                      }
+                    }
+                  },
+                  {
+                    "name": "E2B_ALLOWED_SECRET_ENV_NAMES",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "E2B_ALLOWED_SECRET_ENV_NAMES"
+                      }
+                    }
+                  },
+                  {
+                    "name": "CODEX_API_KEY_ENV_NAME",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "CODEX_API_KEY_ENV_NAME"
+                      }
+                    }
+                  },
+                  {
+                    "name": "CODEX_API_KEY",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "CODEX_API_KEY",
+                        "optional": true
+                      }
+                    }
+                  },
+                  {
+                    "name": "CODEX_COMMAND_PROFILE",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "CODEX_COMMAND_PROFILE"
+                      }
+                    }
+                  },
+                  {
+                    "name": "EGRESS_PROXY_URL",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "EGRESS_PROXY_URL"
+                      }
+                    }
+                  },
+                  {
+                    "name": "EGRESS_PROXY_ALLOW_OUT",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "EGRESS_PROXY_ALLOW_OUT"
+                      }
+                    }
+                  },
+                  {
+                    "name": "AGENT_POOL_ALLOWED_EGRESS_DOMAINS",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "AGENT_POOL_ALLOWED_EGRESS_DOMAINS"
+                      }
+                    }
+                  },
+                  {
+                    "name": "GITHUB_APP_ID",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "GITHUB_APP_ID",
+                        "optional": true
+                      }
+                    }
+                  },
+                  {
+                    "name": "GITHUB_APP_PRIVATE_KEY",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "GITHUB_APP_PRIVATE_KEY",
+                        "optional": true
+                      }
+                    }
+                  },
+                  {
+                    "name": "GITHUB_APP_INSTALLATION_ID",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "GITHUB_APP_INSTALLATION_ID",
+                        "optional": true
+                      }
+                    }
+                  },
+                  {
+                    "name": "GITHUB_APP_TOKEN_ENV_NAME",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "GITHUB_APP_TOKEN_ENV_NAME"
+                      }
+                    }
                   }
                 ],
                 "volumeMounts": [
@@ -789,6 +973,16 @@
                     }
                   },
                   {
+                    "name": "E2B_SANDBOX_IMAGE_ID",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "E2B_SANDBOX_IMAGE_ID",
+                        "optional": true
+                      }
+                    }
+                  },
+                  {
                     "name": "E2B_GITHUB_TOKEN_ENV_NAME",
                     "valueFrom": {
                       "configMapKeyRef": {
@@ -813,6 +1007,97 @@
                       "configMapKeyRef": {
                         "name": "agent-pool-config",
                         "key": "E2B_ALLOWED_SECRET_ENV_NAMES"
+                      }
+                    }
+                  },
+                  {
+                    "name": "AGENT_RUNNER_MODE",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "AGENT_RUNNER_MODE"
+                      }
+                    }
+                  },
+                  {
+                    "name": "CODEX_COMMAND",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "CODEX_COMMAND"
+                      }
+                    }
+                  },
+                  {
+                    "name": "CODEX_API_KEY_ENV_NAME",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "CODEX_API_KEY_ENV_NAME"
+                      }
+                    }
+                  },
+                  {
+                    "name": "CODEX_API_KEY",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agent-pool-secrets",
+                        "key": "CODEX_API_KEY",
+                        "optional": true
+                      }
+                    }
+                  },
+                  {
+                    "name": "CODEX_MODEL",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "CODEX_MODEL"
+                      }
+                    }
+                  },
+                  {
+                    "name": "CODEX_COMMAND_PROFILE",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "CODEX_COMMAND_PROFILE"
+                      }
+                    }
+                  },
+                  {
+                    "name": "EGRESS_PROXY_URL",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "EGRESS_PROXY_URL"
+                      }
+                    }
+                  },
+                  {
+                    "name": "EGRESS_PROXY_ALLOW_OUT",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "EGRESS_PROXY_ALLOW_OUT"
+                      }
+                    }
+                  },
+                  {
+                    "name": "EGRESS_PROXY_NO_PROXY",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "EGRESS_PROXY_NO_PROXY"
+                      }
+                    }
+                  },
+                  {
+                    "name": "AGENT_POOL_ALLOWED_EGRESS_DOMAINS",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "agent-pool-config",
+                        "key": "AGENT_POOL_ALLOWED_EGRESS_DOMAINS"
                       }
                     }
                   }

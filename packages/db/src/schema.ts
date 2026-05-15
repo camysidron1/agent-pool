@@ -16,6 +16,15 @@ export type HeartbeatStatus = (typeof heartbeatStatusValues)[number];
 export const sessionSnapshotKindValues = ["manual", "retry_base", "system"] as const;
 export type SessionSnapshotKind = (typeof sessionSnapshotKindValues)[number];
 
+export const runtimeSandboxStatusValues = ["active", "terminal", "cleanup_claimed", "cleanup_succeeded", "cleanup_failed"] as const;
+export type RuntimeSandboxStatus = (typeof runtimeSandboxStatusValues)[number];
+
+export const runtimeSandboxSnapshotStatusValues = ["not_required", "pending", "claimed", "succeeded", "failed", "skipped"] as const;
+export type RuntimeSandboxSnapshotStatus = (typeof runtimeSandboxSnapshotStatusValues)[number];
+
+export const sessionSnapshotStatusValues = ["creating", "ready", "failed", "expired", "delete_claimed", "deleted", "delete_failed"] as const;
+export type SessionSnapshotStatus = (typeof sessionSnapshotStatusValues)[number];
+
 export const orchestratorCommandTypeValues = [
   "start",
   "stop",
@@ -127,6 +136,7 @@ export const sessions = sqliteTable(
     status: text("status", { enum: sessionStatusValues }).notNull().default("queued"),
     runtimeProvider: text("runtime_provider"),
     runtimeSessionId: text("runtime_session_id"),
+    sourceSnapshotId: text("source_snapshot_id"),
     bridgeCallbackBaseUrl: text("bridge_callback_base_url"),
     bridgeSessionTokenHeader: text("bridge_session_token_header"),
     bridgeSessionToken: text("bridge_session_token"),
@@ -154,6 +164,49 @@ export const sessions = sqliteTable(
   ],
 );
 
+export const runtimeSandboxes = sqliteTable(
+  "runtime_sandboxes",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    taskId: text("task_id").notNull(),
+    sessionId: text("session_id").notNull(),
+    provider: text("provider").notNull(),
+    providerSandboxId: text("provider_sandbox_id").notNull(),
+    status: text("status", { enum: runtimeSandboxStatusValues }).notNull().default("active"),
+    snapshotStatus: text("snapshot_status", { enum: runtimeSandboxSnapshotStatusValues }).notNull().default("not_required"),
+    cleanupAttempts: integer("cleanup_attempts").notNull().default(0),
+    snapshotAttempts: integer("snapshot_attempts").notNull().default(0),
+    cleanupClaimedAt: text("cleanup_claimed_at"),
+    cleanupCompletedAt: text("cleanup_completed_at"),
+    snapshotClaimedAt: text("snapshot_claimed_at"),
+    snapshotCompletedAt: text("snapshot_completed_at"),
+    terminalAt: text("terminal_at"),
+    lastErrorMessage: text("last_error_message"),
+    metadataJson: text("metadata_json").notNull().default("{}"),
+    createdAt: text("created_at").notNull().default(timestampNow),
+    updatedAt: text("updated_at").notNull().default(timestampNow),
+  },
+  (table) => [
+    uniqueIndex("runtime_sandboxes_project_session_unique").on(table.projectId, table.sessionId),
+    uniqueIndex("runtime_sandboxes_provider_sandbox_unique").on(table.provider, table.providerSandboxId),
+    index("runtime_sandboxes_project_status_idx").on(table.projectId, table.status),
+    index("runtime_sandboxes_session_idx").on(table.projectId, table.sessionId),
+    foreignKey({
+      name: "runtime_sandboxes_task_fk",
+      columns: [table.projectId, table.taskId],
+      foreignColumns: [tasks.projectId, tasks.id],
+    }).onDelete("cascade").onUpdate("cascade"),
+    foreignKey({
+      name: "runtime_sandboxes_session_fk",
+      columns: [table.projectId, table.sessionId],
+      foreignColumns: [sessions.projectId, sessions.id],
+    }).onDelete("cascade").onUpdate("cascade"),
+  ],
+);
+
 export const sessionSnapshots = sqliteTable(
   "session_snapshots",
   {
@@ -163,13 +216,26 @@ export const sessionSnapshots = sqliteTable(
       .references(() => projects.id, { onDelete: "cascade", onUpdate: "cascade" }),
     sessionId: text("session_id").notNull(),
     kind: text("kind", { enum: sessionSnapshotKindValues }).notNull().default("system"),
+    provider: text("provider"),
+    status: text("status", { enum: sessionSnapshotStatusValues }).notNull().default("ready"),
     providerSnapshotId: text("provider_snapshot_id"),
+    sourceRuntimeSandboxId: text("source_runtime_sandbox_id"),
+    sourceSessionId: text("source_session_id"),
+    providerSandboxId: text("provider_sandbox_id"),
     label: text("label"),
+    expiresAt: text("expires_at"),
+    deleteClaimedAt: text("delete_claimed_at"),
+    deletedAt: text("deleted_at"),
+    lastUsedAt: text("last_used_at"),
+    errorMessage: text("error_message"),
+    usageCount: integer("usage_count").notNull().default(0),
     metadataJson: text("metadata_json").notNull().default("{}"),
     createdAt: text("created_at").notNull().default(timestampNow),
   },
   (table) => [
     index("session_snapshots_session_idx").on(table.projectId, table.sessionId),
+    index("session_snapshots_project_status_idx").on(table.projectId, table.status, table.expiresAt),
+    index("session_snapshots_provider_snapshot_idx").on(table.provider, table.providerSnapshotId),
     foreignKey({
       name: "session_snapshots_session_fk",
       columns: [table.projectId, table.sessionId],
@@ -487,6 +553,8 @@ export type TaskDependencyRow = typeof taskDependencies.$inferSelect;
 export type NewTaskDependencyRow = typeof taskDependencies.$inferInsert;
 export type SessionRow = typeof sessions.$inferSelect;
 export type NewSessionRow = typeof sessions.$inferInsert;
+export type RuntimeSandboxRow = typeof runtimeSandboxes.$inferSelect;
+export type NewRuntimeSandboxRow = typeof runtimeSandboxes.$inferInsert;
 export type SessionSnapshotRow = typeof sessionSnapshots.$inferSelect;
 export type NewSessionSnapshotRow = typeof sessionSnapshots.$inferInsert;
 export type OrchestratorCommandRow = typeof orchestratorCommands.$inferSelect;

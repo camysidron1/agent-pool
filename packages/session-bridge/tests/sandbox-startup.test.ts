@@ -26,7 +26,7 @@ describe("sandbox bridge startup contract", () => {
     expect(command.command).toEqual([
       "sh",
       "-lc",
-      "nohup bun run '/workspace/agent-pool/packages/session-bridge/src/sandbox-entry.ts' > /tmp/agent-pool-session-bridge.log 2>&1 &",
+      "nohup bun run '/agent-pool/session-bridge/src/sandbox-entry.ts' > /tmp/agent-pool-session-bridge.log 2>&1 &",
     ]);
     expect(command.env).toEqual({
       AGENT_POOL_PROJECT_ID: "project_a",

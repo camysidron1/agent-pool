@@ -23,8 +23,12 @@ describe("GitHub bootstrap plan", () => {
       workingDirectory: "/workspace/agent-pool",
       commands: [
         {
-          label: "clone repository",
-          command: ["git", "clone", "--no-checkout", "https://github.com/example/tiny-fixture.git", "/workspace/agent-pool"],
+          label: "prepare repository",
+          command: [
+            "sh",
+            "-lc",
+            "if [ -e /workspace/agent-pool ] && [ ! -d /workspace/agent-pool/.git ]; then   echo 'working directory exists but is not a git repository'; exit 1; fi; if [ ! -d /workspace/agent-pool/.git ]; then   git clone --no-checkout https://github.com/example/tiny-fixture.git /workspace/agent-pool; fi",
+          ],
         },
         {
           label: "fetch base ref",

@@ -32,6 +32,19 @@ export type AttemptTimelineItem = {
   readonly heartbeat: string;
 };
 
+export type SessionInitializationMilestone = {
+  readonly id: "sandbox" | "repository" | "setup" | "agent";
+  readonly label: string;
+  readonly status: "pending" | "running" | "done" | "skipped" | "failed";
+  readonly detail: string | null;
+};
+
+export type SecurityLifecycleBadge = {
+  readonly id: string;
+  readonly label: string;
+  readonly tone: "neutral" | "good" | "warning" | "danger";
+};
+
 export type FinalResultDetail = {
   readonly recorded: boolean;
   readonly sessionId: string | null;
@@ -40,6 +53,51 @@ export type FinalResultDetail = {
   readonly metadata: JsonRecord;
   readonly urls: readonly string[];
 };
+
+export function getSessionInitializationMilestones(
+  task: PublicTaskDetail,
+  session: PublicSessionSummary | null,
+): readonly SessionInitializationMilestone[] {
+  if (!session) {
+    return [
+      { id: "sandbox", label: "Set up cloud container", status: "pending", detail: null },
+      { id: "repository", label: "Cloned repository", status: task.runtimeSource ? "pending" : "skipped", detail: task.runtimeSource?.repositoryUrl ?? null },
+      { id: "setup", label: "Run setup script", status: "skipped", detail: "No setup script configured." },
+      { id: "agent", label: "Started Codex", status: "pending", detail: null },
+    ];
+  }
+
+  const terminalFailed = session.status === "failed" || session.status === "canceled";
+  const sandboxReady = Boolean(session.runtimeSessionId) || ["running", "succeeded", "failed", "canceled"].includes(session.status);
+  const codexStarted = hasCodexStartEvent(task, session);
+
+  return [
+    {
+      id: "sandbox",
+      label: "Set up cloud container",
+      status: sandboxReady ? "done" : session.status === "starting" ? "running" : terminalFailed ? "failed" : "pending",
+      detail: session.runtimeSessionId ? `Sandbox ${session.runtimeSessionId}` : null,
+    },
+    {
+      id: "repository",
+      label: "Cloned repository",
+      status: task.runtimeSource ? (sandboxReady ? "done" : terminalFailed ? "failed" : "pending") : "skipped",
+      detail: task.runtimeSource ? `${task.runtimeSource.repositoryUrl} @ ${task.runtimeSource.baseRef}` : "No GitHub source configured.",
+    },
+    {
+      id: "setup",
+      label: "Run setup script",
+      status: "skipped",
+      detail: "No setup script configured.",
+    },
+    {
+      id: "agent",
+      label: "Started Codex",
+      status: codexStarted ? "done" : session.status === "running" ? "running" : terminalFailed ? "failed" : "pending",
+      detail: readSessionRunner(task, session) ?? null,
+    },
+  ];
+}
 
 export function getRawLogEntries(task: PublicTaskDetail): readonly RawLogEntry[] {
   return task.events
@@ -52,6 +110,34 @@ export function getRawLogEntries(task: PublicTaskDetail): readonly RawLogEntry[]
 
       return Date.parse(left.createdAt) - Date.parse(right.createdAt);
     });
+}
+
+export function getSecurityLifecycleBadges(task: PublicTaskDetail): readonly SecurityLifecycleBadge[] {
+  const securityEvents = getRawLogEntries(task)
+    .map((entry) => parseSecurityLog(entry.text))
+    .filter((entry): entry is JsonRecord => entry !== null);
+  const hasProxy = securityEvents.some((event) => event.securityKind === "egress" && event.allowed === true);
+  const hasDenied = securityEvents.some((event) => event.securityKind === "egress" && event.allowed === false);
+  const hasScrub = securityEvents.some((event) => event.securityKind === "credentials-scrubbed");
+  const hasPolicy = securityEvents.some((event) => event.securityKind === "postflight" || event.securityKind === "package-install");
+
+  return [
+    {
+      id: "egress",
+      label: hasDenied ? "Egress denied" : hasProxy ? "Proxy egress" : "Egress pending",
+      tone: hasDenied ? "danger" : hasProxy ? "good" : "neutral",
+    },
+    {
+      id: "policy",
+      label: hasPolicy ? "Policy logged" : "Policy pending",
+      tone: hasPolicy ? "good" : "neutral",
+    },
+    {
+      id: "scrub",
+      label: hasScrub ? "Credentials scrubbed" : "Scrub pending",
+      tone: hasScrub ? "good" : "warning",
+    },
+  ];
 }
 
 export function formatRawLogEntries(entries: readonly RawLogEntry[]): string {
@@ -147,6 +233,42 @@ function readRawLogEntry(event: PublicEventSummary): RawLogEntry | null {
     observedAt: readPayloadString(event, "observedAt"),
     createdAt: event.createdAt,
   };
+}
+
+function parseSecurityLog(text: string): JsonRecord | null {
+  const firstLine = text.split("\n").find((line) => line.trim().startsWith("{"));
+  if (!firstLine) return null;
+  try {
+    const parsed = JSON.parse(firstLine) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const record = parsed as JsonRecord;
+    return record.type === "security" || record.type === "security.egress" ? record : null;
+  } catch {
+    return null;
+  }
+}
+
+function hasCodexStartEvent(task: PublicTaskDetail, session: PublicSessionSummary): boolean {
+  return task.events.some(
+    (event) =>
+      event.sessionId === session.id &&
+      event.type === "session.output" &&
+      typeof event.payload.text === "string" &&
+      /codex runner starting|AGENT_POOL_BRIDGE_RUNNER.+codex|command\.started/i.test(event.payload.text),
+  ) || readSessionRunner(task, session) === "codex";
+}
+
+function readSessionRunner(task: PublicTaskDetail, session: PublicSessionSummary): string | null {
+  const metadataRunner = session.finalResponseMetadata.runner;
+  if (typeof metadataRunner === "string" && metadataRunner.trim()) return metadataRunner.trim();
+  const output = task.events.find(
+    (event) =>
+      event.sessionId === session.id &&
+      event.type === "session.output" &&
+      typeof event.payload.text === "string" &&
+      event.payload.text.includes("codex runner starting"),
+  );
+  return output ? "codex" : null;
 }
 
 function readPayloadString(event: PublicEventSummary, key: string): string | null {

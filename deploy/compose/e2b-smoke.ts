@@ -8,6 +8,8 @@ import {
   type RuntimeTaskSourceMetadata,
 } from "@agent-pool/runtime";
 
+import { loadLocalEnv, readProcessEnv } from "../local-env";
+
 export type E2BSmokeRequest = {
   readonly method: "GET" | "POST";
   readonly url: string;
@@ -39,6 +41,7 @@ export type E2BSmokePlan = {
 };
 
 export type E2BSmokeCliOptions = {
+  readonly cwd?: string;
   readonly env?: EnvSource;
   readonly write?: (text: string) => void;
   readonly fetch?: typeof fetch;
@@ -54,6 +57,8 @@ type ParsedE2BSmokeArgs = {
   readonly repositoryUrl: string;
   readonly baseRef: string;
   readonly taskBranchPrefix: string;
+  readonly agentRunnerMode?: "bridge-smoke" | "codex";
+  readonly allowedEgressDomains?: readonly string[];
 };
 
 const DEFAULT_API_URL = "http://127.0.0.1:3000";
@@ -61,28 +66,56 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_REPOSITORY_URL = "https://github.com/example/tiny-fixture.git";
 const DEFAULT_BASE_REF = "main";
 const DEFAULT_TASK_BRANCH_PREFIX = "agent-pool/e2b-smoke";
+const DEFAULT_ALLOWED_EGRESS_DOMAINS = ["github.com", "api.github.com", "registry.npmjs.org", "api.openai.com"] as const;
 const DRY_RUN_TEMPLATE_ID = "dry-run-template";
 const DRY_RUN_GITHUB_TOKEN = "dry-run-github-token";
+const DRY_RUN_CODEX_API_KEY = "dry-run-codex-api-key";
+const DRY_RUN_EGRESS_PROXY_URL = "http://dry-run-egress-proxy.invalid:8080";
+const DRY_RUN_EGRESS_ALLOW_OUT = ["127.0.0.1/32"] as const;
 const DRY_RUN_SESSION_TOKEN = "dry-run-session-token";
+const DEFAULT_COMPOSE_SERVICE_TOKEN = "compose-internal-service-token";
 
 export function createE2BSmokePlan(input: Partial<ParsedE2BSmokeArgs> & { readonly env?: EnvSource } = {}): E2BSmokePlan {
   const env = input.env ?? readProcessEnv();
-  const config = loadConfig({
-    ...env,
-    AUTH_MODE: env.AUTH_MODE ?? "test",
-    RUNTIME_PROVIDER: "fake",
-  });
+  const agentRunnerMode = readAgentRunnerMode(input.agentRunnerMode ?? env.AGENT_RUNNER_MODE);
+  const config = loadConfig(buildE2BSmokeConfigEnv(env, agentRunnerMode));
   const e2b = config.controlPlane.e2b;
+  const allowedEgressDomains = input.allowedEgressDomains ?? readAllowedEgressDomains(env.AGENT_POOL_ALLOWED_EGRESS_DOMAINS);
   const runtimeSource = {
     repositoryUrl: input.repositoryUrl ?? DEFAULT_REPOSITORY_URL,
     baseRef: input.baseRef ?? DEFAULT_BASE_REF,
     taskBranchPrefix: input.taskBranchPrefix ?? DEFAULT_TASK_BRANCH_PREFIX,
+    ...(agentRunnerMode === "codex"
+      ? {
+          allowedEgressDomains,
+          commandProfile: e2b.codexCommandProfile,
+        }
+      : {}),
   };
   const apiUrl = trimTrailingSlash(input.apiUrl ?? DEFAULT_API_URL);
   const serviceToken = input.serviceToken ?? config.serviceToken.token;
-  const missingCredentials = readMissingCredentials(env, e2b.apiKeyEnvName, e2b.githubTokenEnvName);
-  const missingSettings = e2b.templateId || e2b.sandboxImageId ? [] : ["E2B_TEMPLATE_ID or E2B_SANDBOX_IMAGE_ID"];
-  const allowedSecretEnvNames = [...new Set([...e2b.allowedSecretEnvNames, e2b.githubTokenEnvName])];
+  const missingCredentials = readMissingCredentials(env, e2b, agentRunnerMode);
+  const missingSettings = readMissingSettings(e2b, agentRunnerMode, allowedEgressDomains);
+  const allowedSecretEnvNames = [
+    ...new Set([
+      ...e2b.allowedSecretEnvNames,
+      e2b.githubTokenEnvName,
+      ...(agentRunnerMode === "codex" ? [e2b.codexApiKeyEnvName] : []),
+    ]),
+  ];
+  const launchConfig = {
+    ...e2b,
+    apiKeyConfigured: true,
+    githubTokenConfigured: true,
+    templateId: e2b.templateId ?? DRY_RUN_TEMPLATE_ID,
+    allowedSecretEnvNames,
+    ...(agentRunnerMode === "codex" && !e2b.localAllowDirectEgress && (!e2b.egressProxyUrl || e2b.egressProxyAllowOut.length === 0)
+      ? {
+          egressProxyUrl: e2b.egressProxyUrl ?? DRY_RUN_EGRESS_PROXY_URL,
+          egressProxyAllowOut: e2b.egressProxyAllowOut.length > 0 ? e2b.egressProxyAllowOut : DRY_RUN_EGRESS_ALLOW_OUT,
+        }
+      : {}),
+  };
   const launchSpec = buildE2BLaunchSpec(
     {
       projectId: config.controlPlane.smokeProjectId,
@@ -102,20 +135,23 @@ export function createE2BSmokePlan(input: Partial<ParsedE2BSmokeArgs> & { readon
         },
         workspaceRoot: e2b.workingDirectory,
       },
+      secretEnvironment: {
+        [e2b.githubTokenEnvName]: env[e2b.githubTokenEnvName]?.trim() || DRY_RUN_GITHUB_TOKEN,
+        ...(agentRunnerMode === "codex"
+          ? { [e2b.codexApiKeyEnvName]: env[e2b.codexApiKeyEnvName]?.trim() || DRY_RUN_CODEX_API_KEY }
+          : {}),
+      },
     },
     {
-      config: {
-        ...e2b,
-        apiKeyConfigured: true,
-        githubTokenConfigured: true,
-        templateId: e2b.templateId ?? DRY_RUN_TEMPLATE_ID,
-        allowedSecretEnvNames,
-      },
+      config: launchConfig,
       env: {
         ...env,
         [e2b.githubTokenEnvName]: env[e2b.githubTokenEnvName]?.trim() || DRY_RUN_GITHUB_TOKEN,
+        ...(agentRunnerMode === "codex"
+          ? { [e2b.codexApiKeyEnvName]: env[e2b.codexApiKeyEnvName]?.trim() || DRY_RUN_CODEX_API_KEY }
+          : {}),
       },
-      secretEnvNames: [e2b.githubTokenEnvName],
+      secretEnvNames: agentRunnerMode === "codex" ? [e2b.githubTokenEnvName, e2b.codexApiKeyEnvName] : [e2b.githubTokenEnvName],
     },
   );
   const bootstrap = buildGitHubBootstrapPlan({
@@ -163,7 +199,7 @@ export function createE2BSmokePlan(input: Partial<ParsedE2BSmokeArgs> & { readon
 
 export async function runE2BSmokeCli(args: readonly string[] = process.argv.slice(2), options: E2BSmokeCliOptions = {}): Promise<number> {
   const parsed = parseE2BSmokeArgs(args);
-  const env = options.env ?? readProcessEnv();
+  const env = options.env ?? await loadLocalEnv({ cwd: options.cwd });
   const plan = createE2BSmokePlan({ ...parsed, env });
   const write = options.write ?? ((text: string) => process.stdout.write(text));
 
@@ -189,7 +225,7 @@ export async function runE2BSmokeCli(args: readonly string[] = process.argv.slic
   }
 
   const fetchImpl = options.fetch ?? fetch;
-  const serviceToken = parsed.serviceToken ?? loadConfig({ ...env, AUTH_MODE: env.AUTH_MODE ?? "test", RUNTIME_PROVIDER: "fake" }).serviceToken.token;
+  const serviceToken = parsed.serviceToken ?? loadConfig(buildE2BSmokeConfigEnv(env, readAgentRunnerMode(parsed.agentRunnerMode ?? env.AGENT_RUNNER_MODE))).serviceToken.token;
 
   try {
     const seed = await seedE2BSmokeFixture(plan, serviceToken, fetchImpl);
@@ -210,6 +246,8 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
   let repositoryUrl = DEFAULT_REPOSITORY_URL;
   let baseRef = DEFAULT_BASE_REF;
   let taskBranchPrefix = DEFAULT_TASK_BRANCH_PREFIX;
+  let agentRunnerMode: "bridge-smoke" | "codex" | undefined;
+  let allowedEgressDomains: readonly string[] | undefined;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -236,6 +274,12 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
       case "--task-branch-prefix":
         taskBranchPrefix = readFlagValue(args, (index += 1), arg);
         break;
+      case "--agent-runner-mode":
+        agentRunnerMode = readAgentRunnerMode(readFlagValue(args, (index += 1), arg));
+        break;
+      case "--allowed-egress-domains":
+        allowedEgressDomains = readAllowedEgressDomains(readFlagValue(args, (index += 1), arg));
+        break;
       default:
         throw new Error(`unknown smoke:e2b argument: ${arg}`);
     }
@@ -249,6 +293,8 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
     repositoryUrl,
     baseRef,
     taskBranchPrefix,
+    ...(agentRunnerMode ? { agentRunnerMode } : {}),
+    ...(allowedEgressDomains ? { allowedEgressDomains } : {}),
   };
 }
 
@@ -315,8 +361,68 @@ function formatMissingE2BSmokeRequirements(plan: E2BSmokePlan): string {
   return `missing required E2B smoke settings: ${missing.join(", ")}`;
 }
 
-function readMissingCredentials(env: EnvSource, e2bApiKeyEnvName: string, githubTokenEnvName: string): readonly string[] {
-  return [e2bApiKeyEnvName, githubTokenEnvName].filter((name) => !env[name]?.trim());
+function readMissingCredentials(
+  env: EnvSource,
+  e2b: ReturnType<typeof loadConfig>["controlPlane"]["e2b"],
+  agentRunnerMode: "bridge-smoke" | "codex",
+): readonly string[] {
+  const required =
+    agentRunnerMode === "codex"
+      ? [
+          e2b.apiKeyEnvName,
+          e2b.codexApiKeyEnvName,
+          "GITHUB_APP_ID",
+          "GITHUB_APP_PRIVATE_KEY",
+          "GITHUB_APP_INSTALLATION_ID",
+        ]
+      : [e2b.apiKeyEnvName, e2b.githubTokenEnvName];
+  return required.filter((name) => !env[name]?.trim());
+}
+
+function readMissingSettings(
+  e2b: ReturnType<typeof loadConfig>["controlPlane"]["e2b"],
+  agentRunnerMode: "bridge-smoke" | "codex",
+  allowedEgressDomains: readonly string[],
+): readonly string[] {
+  const missing = [...(e2b.templateId || e2b.sandboxImageId ? [] : ["E2B_TEMPLATE_ID or E2B_SANDBOX_IMAGE_ID"])];
+  if (agentRunnerMode === "codex") {
+    if (!e2b.localAllowDirectEgress && (!e2b.egressProxyUrl || e2b.egressProxyAllowOut.length === 0)) {
+      missing.push("EGRESS_PROXY_URL and EGRESS_PROXY_ALLOW_OUT or E2B_LOCAL_ALLOW_DIRECT_EGRESS=true");
+    }
+    if (allowedEgressDomains.length === 0) {
+      missing.push("AGENT_POOL_ALLOWED_EGRESS_DOMAINS");
+    }
+  }
+  return missing;
+}
+
+function buildE2BSmokeConfigEnv(env: EnvSource, agentRunnerMode: "bridge-smoke" | "codex"): EnvSource {
+  return {
+    ...env,
+    AUTH_MODE: env.AUTH_MODE ?? "test",
+    INTERNAL_SERVICE_TOKEN: env.INTERNAL_SERVICE_TOKEN ?? DEFAULT_COMPOSE_SERVICE_TOKEN,
+    AGENT_RUNNER_MODE: agentRunnerMode,
+    RUNTIME_PROVIDER: "fake",
+  };
+}
+
+function readAgentRunnerMode(value: string | undefined): "bridge-smoke" | "codex" {
+  const mode = value?.trim() || "bridge-smoke";
+  if (mode === "bridge-smoke" || mode === "codex") return mode;
+  throw new Error("agent runner mode must be bridge-smoke or codex");
+}
+
+function readAllowedEgressDomains(value: string | undefined): readonly string[] {
+  const raw = value?.trim();
+  if (!raw) return DEFAULT_ALLOWED_EGRESS_DOMAINS;
+  return [
+    ...new Set(
+      raw
+        .split(",")
+        .map((part) => part.trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ];
 }
 
 function readFlagValue(args: readonly string[], index: number, flag: string): string {
@@ -343,16 +449,6 @@ function readRecord(value: unknown): Readonly<Record<string, unknown>> | null {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function readProcessEnv(): EnvSource {
-  const processLike = globalThis as typeof globalThis & {
-    process?: {
-      env?: EnvSource;
-    };
-  };
-
-  return processLike.process?.env ?? {};
 }
 
 if (import.meta.main) {
