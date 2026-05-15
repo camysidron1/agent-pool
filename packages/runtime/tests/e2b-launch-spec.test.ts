@@ -214,6 +214,45 @@ describe("E2B launch spec", () => {
     expect(redactE2BLaunchSpec(spec).environment.variables.BUN_CONFIG_REGISTRY).toBe("[REDACTED]");
   });
 
+  test("rejects static GitHub token fallback for strict codex runner launch specs", () => {
+    expect(() =>
+      buildE2BLaunchSpec(
+        {
+          projectId: "project_a",
+          taskId: "task_1",
+          sessionId: "session_1",
+          task: {
+            id: "task_1",
+            title: "Make a PR",
+            runtimeSource: {
+              repositoryUrl: "https://github.com/example/tiny-fixture.git",
+              baseRef: "main",
+              taskBranchPrefix: "agent-pool/task",
+              allowedEgressDomains: ["github.com", "api.github.com", "registry.npmjs.org", "api.openai.com"],
+              commandProfile: "agent-pool-bun-pr",
+            },
+          },
+          bridge,
+        },
+        {
+          config: {
+            ...config,
+            agentRunnerMode: "codex",
+            allowedSecretEnvNames: ["GITHUB_TOKEN", "CODEX_API_KEY"],
+            codexApiKeyEnvName: "CODEX_API_KEY",
+            egressProxyUrl: "http://egress-gateway.internal:8080",
+            egressProxyAllowOut: ["10.0.10.25/32"],
+            allowedEgressDomains: ["github.com", "api.github.com", "registry.npmjs.org", "api.openai.com"],
+          },
+          env: {
+            GITHUB_TOKEN: "static-github-token",
+            CODEX_API_KEY: "codex-secret",
+          },
+        },
+      ),
+    ).toThrow("brokered GitHub App installation token is required for codex e2b runner as GITHUB_TOKEN");
+  });
+
   test("supports explicit local direct egress for Codex E2B smoke runs", () => {
     const spec = buildE2BLaunchSpec(
       {

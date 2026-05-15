@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { createBridgeRunner, type BridgeRunnerRunOnceResult } from "./runner";
@@ -41,6 +41,7 @@ export type CodexBridgeSessionOptions = {
   readonly env?: CodexRunnerEnvironment;
   readonly fetch?: typeof fetch;
   readonly executeProcess?: CodexProcessExecutor;
+  readonly credentialScrubVerificationPaths?: readonly string[];
 };
 
 export type CodexBridgeSessionResult = {
@@ -64,6 +65,14 @@ type CodexRunnerConfig = {
   readonly repositoryUrl: string | null;
   readonly baseRef: string | null;
   readonly branchName: string | null;
+};
+
+export type CodexCredentialScrubResult = {
+  readonly ok: boolean;
+  readonly removedPaths: readonly string[];
+  readonly verifiedAbsentPaths: readonly string[];
+  readonly remainingPaths: readonly string[];
+  readonly errorMessage?: string;
 };
 
 type DependencyInstallPhaseResult = {
@@ -129,13 +138,18 @@ export async function runCodexBridgeSession(options: CodexBridgeSessionOptions):
       bridge,
     });
     if (!installPhase.ok) {
-      await scrubCodexSandboxSecrets({ env, config });
+      const scrubResult = await scrubAndReport({
+        bridge,
+        env,
+        config,
+        verifyPaths: options.credentialScrubVerificationPaths,
+      });
       terminalPass = await bridge.runOnce({
         failure: {
           errorMessage: "dependency install phase failed before codex execution",
           metadata: { runner: "codex", commandProfile: config.commandProfile, installPhase },
         },
-        cleanup: cleanupMetadata("dependency install failed", config, { exitCode, pullRequestUrl, installPhase }),
+        cleanup: cleanupMetadata("dependency install failed", config, { exitCode, pullRequestUrl, installPhase }, scrubResult),
       });
       return { ok: false, pullRequestUrl, exitCode, firstPass, terminalPass };
     }
@@ -183,8 +197,12 @@ export async function runCodexBridgeSession(options: CodexBridgeSessionOptions):
     pullRequestUrl ??= await readPullRequestUrlFromGh({ executeProcess, env, config, workspaceRoot: options.workspaceRoot });
     const postflight = await runCodexPostflight({ executeProcess, env, config, workspaceRoot: options.workspaceRoot, pullRequestUrl });
     await bridge.runOnce({ output: [securityOutput("postflight", { ...postflight, installPhase })] });
-    await scrubCodexSandboxSecrets({ env, config });
-    await bridge.runOnce({ output: [securityOutput("credentials-scrubbed", { allowed: true })] });
+    const scrubResult = await scrubAndReport({
+      bridge,
+      env,
+      config,
+      verifyPaths: options.credentialScrubVerificationPaths,
+    });
 
     if (exitCode !== 0) {
       terminalPass = await bridge.runOnce({
@@ -192,7 +210,7 @@ export async function runCodexBridgeSession(options: CodexBridgeSessionOptions):
           errorMessage: `codex exec exited ${exitCode}`,
           metadata: { runner: "codex", commandProfile: config.commandProfile, stderr: truncate(stderr), installPhase },
         },
-        cleanup: cleanupMetadata("codex failed", config, { exitCode, pullRequestUrl, postflight }),
+        cleanup: cleanupMetadata("codex failed", config, { exitCode, pullRequestUrl, postflight }, scrubResult),
       });
       return { ok: false, pullRequestUrl, exitCode, firstPass, terminalPass };
     }
@@ -203,7 +221,7 @@ export async function runCodexBridgeSession(options: CodexBridgeSessionOptions):
           errorMessage: "codex runner completed without a pull request URL",
           metadata: { runner: "codex", commandProfile: config.commandProfile, postflight, installPhase },
         },
-        cleanup: cleanupMetadata("codex missing pull request", config, { exitCode, pullRequestUrl, postflight }),
+        cleanup: cleanupMetadata("codex missing pull request", config, { exitCode, pullRequestUrl, postflight }, scrubResult),
       });
       return { ok: false, pullRequestUrl, exitCode, firstPass, terminalPass };
     }
@@ -212,17 +230,22 @@ export async function runCodexBridgeSession(options: CodexBridgeSessionOptions):
       finalResponseText: finalText,
       finalResponseMetadata: { runner: "codex", commandProfile: config.commandProfile, pullRequestUrl, postflight, installPhase },
       completion: { metadata: { runner: "codex", commandProfile: config.commandProfile, pullRequestUrl, postflight, installPhase } },
-      cleanup: cleanupMetadata("codex completed", config, { exitCode, pullRequestUrl, postflight }),
+      cleanup: cleanupMetadata("codex completed", config, { exitCode, pullRequestUrl, postflight }, scrubResult),
     });
     return { ok: true, pullRequestUrl, exitCode, firstPass, terminalPass };
   } catch (error) {
-    await scrubCodexSandboxSecrets({ env, config });
+    const scrubResult = await scrubAndReport({
+      bridge,
+      env,
+      config,
+      verifyPaths: options.credentialScrubVerificationPaths,
+    });
     terminalPass = await bridge.runOnce({
       failure: {
         errorMessage: `codex runner failed: ${redactKnownSecrets(errorMessage(error), env)}`,
         metadata: { runner: "codex", commandProfile: config.commandProfile, installPhase },
       },
-      cleanup: cleanupMetadata("codex runner failed", config, { exitCode, pullRequestUrl }),
+      cleanup: cleanupMetadata("codex runner failed", config, { exitCode, pullRequestUrl }, scrubResult),
     });
     return { ok: false, pullRequestUrl, exitCode, firstPass, terminalPass };
   }
@@ -301,15 +324,119 @@ async function runDependencyInstallPhase(input: {
 
 export async function scrubCodexSandboxSecrets(input: {
   readonly env: CodexRunnerEnvironment;
-  readonly config: Pick<CodexRunnerConfig, "codexHome">;
-}): Promise<void> {
+  readonly config: Pick<CodexRunnerConfig, "codexHome"> & Partial<Pick<CodexRunnerConfig, "eventsPath" | "finalResponsePath">>;
+  readonly verifyPaths?: readonly string[];
+}): Promise<CodexCredentialScrubResult> {
+  const removePaths = buildCredentialScrubPaths(input);
+  const verifyPaths = [...new Set([...removePaths, ...(input.verifyPaths ?? [])])];
+  const removedPaths: string[] = [];
+  const failures: string[] = [];
+
+  for (const path of removePaths) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      removedPaths.push(path);
+    } catch (error) {
+      failures.push(errorMessage(error));
+    }
+  }
+
+  const remainingPaths: string[] = [];
+  const verifiedAbsentPaths: string[] = [];
+  for (const path of verifyPaths) {
+    if (await pathExists(path)) {
+      remainingPaths.push(path);
+    } else {
+      verifiedAbsentPaths.push(path);
+    }
+  }
+
+  const ok = failures.length === 0 && remainingPaths.length === 0;
+  return {
+    ok,
+    removedPaths,
+    verifiedAbsentPaths,
+    remainingPaths,
+    ...(ok ? {} : { errorMessage: [...failures, remainingPaths.length ? "credential scrub verification failed" : ""].filter(Boolean).join("; ") }),
+  };
+}
+
+async function scrubAndReport(input: {
+  readonly bridge: Pick<ReturnType<typeof createBridgeRunner>, "runOnce">;
+  readonly env: CodexRunnerEnvironment;
+  readonly config: CodexRunnerConfig;
+  readonly verifyPaths?: readonly string[];
+}): Promise<CodexCredentialScrubResult> {
+  const targetCount = buildCredentialScrubPaths(input).length + (input.verifyPaths?.length ?? 0);
+  await input.bridge.runOnce({
+    output: [
+      securityOutput("credentials-scrub-started", {
+        allowed: true,
+        targetCount,
+      }),
+    ],
+  });
+  const result = await scrubCodexSandboxSecrets({
+    env: input.env,
+    config: input.config,
+    verifyPaths: input.verifyPaths,
+  });
+  await input.bridge.runOnce({
+    output: [
+      securityOutput(result.ok ? "credentials-scrub-succeeded" : "credentials-scrub-failed", {
+        allowed: result.ok,
+        targetCount,
+        verifiedCount: result.verifiedAbsentPaths.length,
+        remainingCount: result.remainingPaths.length,
+        ...(result.ok
+          ? {}
+          : {
+              reason: "scrub-incomplete",
+              errorMessage: redactKnownSecrets(result.errorMessage ?? "credential scrub verification failed", input.env),
+            }),
+      }),
+    ],
+  });
+  return result;
+}
+
+function buildCredentialScrubPaths(input: {
+  readonly env: CodexRunnerEnvironment;
+  readonly config: Pick<CodexRunnerConfig, "codexHome"> & Partial<Pick<CodexRunnerConfig, "eventsPath" | "finalResponsePath">>;
+}): readonly string[] {
   const home = input.env.HOME?.trim() || "/root";
-  await Promise.all([
-    rm(input.config.codexHome, { recursive: true, force: true }),
-    rm(join(home, ".codex"), { recursive: true, force: true }),
-    rm(join(home, ".config", "gh"), { recursive: true, force: true }),
-    rm("/tmp/agent-pool-codex-proxy.env", { force: true }),
-  ]);
+  const paths = [
+    input.config.codexHome,
+    input.config.codexHome.includes("/agent-pool-codex/") ? dirname(input.config.codexHome) : null,
+    input.config.finalResponsePath ?? null,
+    input.config.eventsPath ?? null,
+    join(home, ".codex"),
+    join(home, ".config", "gh"),
+    join(home, ".git-credentials"),
+    join(home, ".netrc"),
+    "/tmp/agent-pool-codex-proxy.env",
+    "/tmp/agent-pool-github-token",
+    "/tmp/agent-pool-gh-credentials",
+    generatedAskpassPath(input.env.GIT_ASKPASS, home, input.config.codexHome),
+  ];
+  return [...new Set(paths.filter((path): path is string => Boolean(path)))];
+}
+
+function generatedAskpassPath(path: string | undefined, home: string, codexHome: string): string | null {
+  const value = path?.trim();
+  if (!value) return null;
+  const codexSessionRoot = dirname(codexHome);
+  if (value.startsWith("/tmp/") || value.startsWith(`${home}/`) || value.startsWith(`${codexSessionRoot}/`)) {
+    return value;
+  }
+  return null;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  return stat(path).then(
+    () => true,
+    () => false,
+  );
 }
 
 function buildCodexArgs(config: CodexRunnerConfig, workspaceRoot: string, prompt: string): readonly string[] {
@@ -589,13 +716,21 @@ function cleanupMetadata(
   reason: string,
   config: Pick<CodexRunnerConfig, "commandProfile">,
   metadata: Readonly<Record<string, unknown>>,
+  scrubResult: CodexCredentialScrubResult,
 ): { readonly reason: string; readonly metadata: Readonly<Record<string, unknown>> } {
   return {
     reason,
     metadata: {
       runner: "codex",
       commandProfile: config.commandProfile,
-      credentialsScrubbed: true,
+      credentialsScrubbed: scrubResult.ok,
+      credentialScrubStatus: scrubResult.ok ? "succeeded" : "failed",
+      ...(scrubResult.ok
+        ? {}
+        : {
+            credentialScrubRisk: "scrub-incomplete",
+            credentialScrubRemainingCount: scrubResult.remainingPaths.length,
+          }),
       ...metadata,
     },
   };

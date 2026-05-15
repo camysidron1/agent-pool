@@ -643,13 +643,14 @@ export function buildE2BLaunchSpec(request: RuntimeSessionRequest, options: E2BR
   const localAllowDirectEgress = Boolean(config.localAllowDirectEgress);
   const runtimeSource = readRuntimeTaskSource(request.task);
   const branchName = runtimeSource ? createTaskBranchName(runtimeSource.taskBranchPrefix, request.taskId) : null;
+  const githubTokenEnvName = sanitizeEnvName(config.githubTokenEnvName ?? "GITHUB_TOKEN");
 
   if (runnerMode === "codex") {
     if (!env[codexApiKeyEnvName]?.trim()) {
       throw new Error(`${codexApiKeyEnvName} is required for codex e2b runner`);
     }
-    if (!request.secretEnvironment?.[config.githubTokenEnvName ?? "GITHUB_TOKEN"]?.trim()) {
-      throw new Error(`${config.githubTokenEnvName ?? "GITHUB_TOKEN"} is required for codex e2b runner`);
+    if (!request.secretEnvironment?.[githubTokenEnvName]?.trim()) {
+      throw new Error(`brokered GitHub App installation token is required for codex e2b runner as ${githubTokenEnvName}`);
     }
     if (!localAllowDirectEgress && (!egressProxyUrl || egressAllowOut.length === 0)) {
       throw new Error("strict egress proxy configuration is required for codex e2b runner");
@@ -662,7 +663,7 @@ export function buildE2BLaunchSpec(request: RuntimeSessionRequest, options: E2BR
   const allowedSecretEnvNames = new Set(config.allowedSecretEnvNames ?? []);
   const requestedSecretEnvNames = [
     ...(options.secretEnvNames ?? config.allowedSecretEnvNames ?? []),
-    ...(runnerMode === "codex" ? [codexApiKeyEnvName, config.githubTokenEnvName ?? "GITHUB_TOKEN"] : []),
+    ...(runnerMode === "codex" ? [codexApiKeyEnvName, githubTokenEnvName] : []),
   ];
   const secrets: Record<string, string> = {};
 

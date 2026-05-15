@@ -87,8 +87,11 @@ describe("Codex bridge runner", () => {
     expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("dependency-install-finished");
     expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("package-install");
     expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("command-policy");
-    expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("credentials-scrubbed");
+    expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("credentials-scrub-started");
+    expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("credentials-scrub-succeeded");
     expect(JSON.stringify(events)).not.toContain("short-lived-github-token");
+    expect(JSON.stringify(events)).not.toContain("codex-secret");
+    expect(JSON.stringify(events)).not.toContain("bridge-token");
     expect(existsSync("/tmp/agent-pool-codex/session_1/codex-home")).toBe(false);
     expect(commands.find((command) => command.command === "codex")?.args.join(" ")).toContain("A pull request URL is required for success");
   });
@@ -193,18 +196,73 @@ describe("Codex bridge runner", () => {
   test("scrubs Codex, GitHub CLI, and proxy credential files before snapshot cleanup", async () => {
     const root = await tempDir("agent-pool-codex-scrub-");
     const codexHome = join(root, "codex-home");
+    const finalResponsePath = join(root, "final-response.txt");
+    const eventsPath = join(root, "codex-events.jsonl");
+    const askpassPath = join(root, "generated-askpass");
     await mkdir(join(codexHome, "state"), { recursive: true });
     await mkdir(join(root, ".config", "gh"), { recursive: true });
     await mkdir(join(root, ".codex"), { recursive: true });
     await writeFile(join(codexHome, "state", "auth.json"), "secret", "utf8");
     await writeFile(join(root, ".config", "gh", "hosts.yml"), "secret", "utf8");
     await writeFile(join(root, ".codex", "auth.json"), "secret", "utf8");
+    await writeFile(finalResponsePath, "secret", "utf8");
+    await writeFile(eventsPath, "secret", "utf8");
+    await writeFile(askpassPath, "secret", "utf8");
 
-    await scrubCodexSandboxSecrets({ env: { HOME: root }, config: { codexHome } });
+    const result = await scrubCodexSandboxSecrets({
+      env: { HOME: root, GIT_ASKPASS: askpassPath },
+      config: { codexHome, finalResponsePath, eventsPath },
+    });
 
+    expect(result.ok).toBe(true);
     expect(existsSync(codexHome)).toBe(false);
     expect(existsSync(join(root, ".config", "gh"))).toBe(false);
     expect(existsSync(join(root, ".codex"))).toBe(false);
+    expect(existsSync(finalResponsePath)).toBe(false);
+    expect(existsSync(eventsPath)).toBe(false);
+    expect(existsSync(askpassPath)).toBe(false);
+  });
+
+  test("records scrub failure events without blocking cleanup callbacks", async () => {
+    const workspaceRoot = await tempDir("agent-pool-codex-scrub-fail-");
+    const events: BridgeCallbackEvent[] = [];
+    const persistentCredentialPath = join(workspaceRoot, "mounted-credential");
+    await writeFile(persistentCredentialPath, "short-lived-github-token", "utf8");
+    const executeProcess: CodexProcessExecutor = async (input) => {
+      if (input.command === "bun") return { exitCode: 0, stdout: "", stderr: "" };
+      if (input.command === "codex") {
+        await writeFile(readArgValue(input.args, "--output-last-message"), "Opened PR https://github.com/example/tiny-fixture/pull/123", "utf8");
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      if (input.command === "gh") return { exitCode: 0, stdout: "https://github.com/example/tiny-fixture/pull/123\n", stderr: "" };
+      return { exitCode: 0, stdout: "agent-pool/task/task_1\n", stderr: "" };
+    };
+
+    const result = await runCodexBridgeSession({
+      session: bridgeSession(),
+      workspaceRoot,
+      env: runnerEnv({ HOME: workspaceRoot }),
+      fetch: collectBridgeEvents(events),
+      executeProcess,
+      credentialScrubVerificationPaths: [persistentCredentialPath],
+    });
+
+    expect(result.ok).toBe(true);
+    const output = events.filter((event) => event.kind === "output").map((event) => event.text).join("\n");
+    expect(output).toContain("credentials-scrub-started");
+    expect(output).toContain("credentials-scrub-failed");
+    expect(output).toContain('"allowed":false');
+    expect(output).toContain("scrub-incomplete");
+    const cleanup = events.find((event) => event.kind === "cleanup");
+    expect(cleanup).toMatchObject({
+      kind: "cleanup",
+      metadata: {
+        credentialsScrubbed: false,
+        credentialScrubStatus: "failed",
+        credentialScrubRisk: "scrub-incomplete",
+      },
+    });
+    expect(JSON.stringify(events)).not.toContain("short-lived-github-token");
   });
 });
 
