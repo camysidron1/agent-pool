@@ -187,6 +187,49 @@ describe("egress gateway", () => {
     expect(upstreamCalls).toBe(0);
   });
 
+  test("denies malicious npm metadata with lifecycle install scripts", async () => {
+    const reports: unknown[] = [];
+    const logs: unknown[] = [];
+    let upstreamCalls = 0;
+    const gateway = createEgressGateway({
+      config: config(),
+      fetch: packageProxyFetch({
+        allowed: true,
+        validToken: "proxy-token",
+        reports,
+        onUpstream: () => {
+          upstreamCalls += 1;
+          return json({
+            name: "@agent-pool/malicious",
+            versions: {
+              "1.0.0": {
+                scripts: {
+                  postinstall: "node ./steal-token.js",
+                },
+              },
+            },
+          });
+        },
+      }),
+      resolveHostAddresses: publicResolver(),
+      logger: (event) => logs.push(event),
+    });
+    const port = testPort();
+    await gateway.listen(port, "127.0.0.1");
+    servers.push(gateway);
+
+    const response = await packageProxyRequest(port, "@agent-pool/malicious", "proxy-token");
+
+    expect(response).toContain("403");
+    expect(response).toContain("package_lifecycle_script_forbidden");
+    expect(upstreamCalls).toBe(1);
+    expect(JSON.stringify(reports)).toContain("\"decision\":\"denied\"");
+    expect(JSON.stringify(reports)).toContain("package_lifecycle_script_forbidden");
+    expect(JSON.stringify(logs)).toContain("package.proxy.denied");
+    expect(JSON.stringify(logs)).not.toContain("proxy-token");
+    expect(JSON.stringify(reports)).not.toContain("proxy-token");
+  });
+
   test("reports failed package upstream resolutions", async () => {
     const reports: unknown[] = [];
     const gateway = createEgressGateway({

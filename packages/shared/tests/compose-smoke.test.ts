@@ -468,11 +468,55 @@ describe("compose smoke runner", () => {
         sandboxId: "<runtime-session-id>",
         action: "destroy sandbox through RuntimeProvider.stopSession",
       },
+      maliciousFixtures: {
+        enabled: false,
+        liveExecution: "not_requested",
+        fixtureIds: [],
+      },
     });
     expect(plan.launchSpec.environment.secrets).toEqual({ GITHUB_TOKEN: "[REDACTED]" });
     expect(JSON.stringify(plan)).not.toContain("dry-run-github-token");
     expect(JSON.stringify(plan)).not.toContain("dry-run-session-token");
     expect(source).not.toMatch(/@agent-pool\/db|bun:sqlite|openApiDatabase|openWebSandboxDatabase|AGENT_POOL_WEB_SANDBOX_DB_PATH/);
+  });
+
+  test("documents opt-in malicious E2B smoke fixtures without running live providers", async () => {
+    const writes: string[] = [];
+    const code = await runE2BSmokeCli(["--dry-run", "--agent-runner-mode", "codex", "--malicious-fixtures"], {
+      env: {
+        AUTH_MODE: "test",
+        E2B_TEMPLATE_ID: "template-1",
+        E2B_LOCAL_ALLOW_DIRECT_EGRESS: "true",
+      },
+      write: (text) => writes.push(text),
+      fetch: async () => {
+        throw new Error("dry-run malicious fixtures must not call the network");
+      },
+    });
+    const plan = JSON.parse(writes.join(""));
+
+    expect(code).toBe(0);
+    expect(plan.maliciousFixtures).toMatchObject({
+      enabled: true,
+      liveExecution: "dry_run_only",
+      fixtureIds: expect.arrayContaining([
+        "postinstall-lifecycle-script",
+        "unexpected-package-add",
+        "lockfile-mutation",
+        "undeclared-egress",
+        "token-file-read",
+        "gh-auth-token",
+        "metadata-instruction-injection",
+        "credential-persistence",
+      ]),
+    });
+    expect(plan.missingCredentials).toEqual([
+      "E2B_API_KEY",
+      "CODEX_API_KEY",
+      "GITHUB_APP_ID",
+      "GITHUB_APP_PRIVATE_KEY",
+      "GITHUB_APP_INSTALLATION_ID",
+    ]);
   });
 
   test("loads .env for E2B smoke planning without leaking secret values", async () => {
@@ -711,6 +755,7 @@ describe("compose smoke runner", () => {
       repositoryUrl: "https://github.com/example/tiny-fixture.git",
       baseRef: "feature/ref",
       taskBranchPrefix: "agent-pool/task",
+      maliciousFixtures: false,
     });
 
     expect(

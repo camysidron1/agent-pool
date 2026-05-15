@@ -34,6 +34,11 @@ export type E2BSmokePlan = {
     readonly timeoutMs: number;
     readonly action: "destroy sandbox through RuntimeProvider.stopSession";
   };
+  readonly maliciousFixtures: {
+    readonly enabled: boolean;
+    readonly liveExecution: "not_requested" | "dry_run_only" | "skipped_until_live_runner_is_ready";
+    readonly fixtureIds: readonly string[];
+  };
   readonly requests: {
     readonly seed: E2BSmokeRequest;
     readonly status: E2BSmokeRequest;
@@ -59,6 +64,7 @@ type ParsedE2BSmokeArgs = {
   readonly taskBranchPrefix: string;
   readonly agentRunnerMode?: "bridge-smoke" | "codex";
   readonly allowedEgressDomains?: readonly string[];
+  readonly maliciousFixtures: boolean;
 };
 
 const DEFAULT_API_URL = "http://127.0.0.1:3000";
@@ -74,6 +80,16 @@ const DRY_RUN_EGRESS_PROXY_URL = "http://dry-run-egress-proxy.invalid:8080";
 const DRY_RUN_EGRESS_ALLOW_OUT = ["127.0.0.1/32"] as const;
 const DRY_RUN_SESSION_TOKEN = "dry-run-session-token";
 const DEFAULT_COMPOSE_SERVICE_TOKEN = "compose-internal-service-token";
+const MALICIOUS_FIXTURE_IDS = [
+  "postinstall-lifecycle-script",
+  "unexpected-package-add",
+  "lockfile-mutation",
+  "undeclared-egress",
+  "token-file-read",
+  "gh-auth-token",
+  "metadata-instruction-injection",
+  "credential-persistence",
+] as const;
 
 export function createE2BSmokePlan(input: Partial<ParsedE2BSmokeArgs> & { readonly env?: EnvSource } = {}): E2BSmokePlan {
   const env = input.env ?? readProcessEnv();
@@ -181,6 +197,16 @@ export function createE2BSmokePlan(input: Partial<ParsedE2BSmokeArgs> & { readon
       timeoutMs: e2b.cleanupTimeoutMs,
       action: "destroy sandbox through RuntimeProvider.stopSession",
     },
+    maliciousFixtures: {
+      enabled: input.maliciousFixtures === true,
+      liveExecution:
+        input.maliciousFixtures === true
+          ? input.dryRun === true
+            ? "dry_run_only"
+            : "skipped_until_live_runner_is_ready"
+          : "not_requested",
+      fixtureIds: input.maliciousFixtures === true ? MALICIOUS_FIXTURE_IDS : [],
+    },
     requests: {
       seed: {
         method: "POST",
@@ -224,6 +250,21 @@ export async function runE2BSmokeCli(args: readonly string[] = process.argv.slic
     return 1;
   }
 
+  if (parsed.maliciousFixtures) {
+    write(
+      `${JSON.stringify(
+        {
+          ok: false,
+          error: "live malicious E2B smoke is not enabled yet; run default offline tests or use --dry-run --malicious-fixtures for the fixture plan",
+          maliciousFixtures: plan.maliciousFixtures,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    return 1;
+  }
+
   const fetchImpl = options.fetch ?? fetch;
   const serviceToken = parsed.serviceToken ?? loadConfig(buildE2BSmokeConfigEnv(env, readAgentRunnerMode(parsed.agentRunnerMode ?? env.AGENT_RUNNER_MODE))).serviceToken.token;
 
@@ -248,6 +289,7 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
   let taskBranchPrefix = DEFAULT_TASK_BRANCH_PREFIX;
   let agentRunnerMode: "bridge-smoke" | "codex" | undefined;
   let allowedEgressDomains: readonly string[] | undefined;
+  let maliciousFixtures = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -280,6 +322,9 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
       case "--allowed-egress-domains":
         allowedEgressDomains = readAllowedEgressDomains(readFlagValue(args, (index += 1), arg));
         break;
+      case "--malicious-fixtures":
+        maliciousFixtures = true;
+        break;
       default:
         throw new Error(`unknown smoke:e2b argument: ${arg}`);
     }
@@ -295,6 +340,7 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
     taskBranchPrefix,
     ...(agentRunnerMode ? { agentRunnerMode } : {}),
     ...(allowedEgressDomains ? { allowedEgressDomains } : {}),
+    maliciousFixtures,
   };
 }
 

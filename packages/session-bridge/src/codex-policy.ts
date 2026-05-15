@@ -64,13 +64,13 @@ export function checkCodexCommandPolicy(
   const joined = command.join(" ");
 
   if (/\brm\s+-[^\s]*r[^\s]*f|\brm\s+-[^\s]*f[^\s]*r/.test(joined)) return { allowed: false, reason: "destructive_rm_forbidden" };
-  if (SENSITIVE_ARG_PATTERN.test(joined)) return { allowed: false, reason: "credential_access_forbidden" };
-  if (FORBIDDEN_COMMANDS.has(executable)) return { allowed: false, reason: `${executable}_forbidden` };
   if (executable === "gh" && command[1] === "api") return { allowed: false, reason: "gh_api_forbidden" };
   if (executable === "gh" && command[1] === "secret") return { allowed: false, reason: "gh_secret_forbidden" };
   if (executable === "gh" && command[1] === "auth" && command[2] === "token") {
     return { allowed: false, reason: "gh_auth_token_forbidden" };
   }
+  if (SENSITIVE_ARG_PATTERN.test(joined)) return { allowed: false, reason: "credential_access_forbidden" };
+  if (FORBIDDEN_COMMANDS.has(executable)) return { allowed: false, reason: `${executable}_forbidden` };
   if (INSPECTION_COMMANDS.has(executable)) return { allowed: true };
   if (executable === "git") return checkGitCommand(command, options);
   if (executable === "bun") return checkBunCommand(command);

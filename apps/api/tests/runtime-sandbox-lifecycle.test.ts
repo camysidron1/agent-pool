@@ -181,6 +181,86 @@ describe("API runtime sandbox lifecycle endpoints", () => {
       await close();
     }
   });
+
+  test("malicious fixture security events make successful sessions snapshot-risky", async () => {
+    const { baseUrl, config, database, close } = await startTestApi();
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      services.createProject({ id: "project_a", slug: "project-a", name: "Project A" });
+      services.createTask({ id: "task_malicious", projectId: "project_a", title: "Malicious fixture" });
+      const claim = await postInternal(baseUrl, config, "/tasks/claim-next", {
+        projectId: "project_a",
+        sessionId: "session_malicious",
+        runtimeProvider: "e2b",
+      });
+      expect(claim.status).toBe(200);
+      expect(await claim.json()).toMatchObject({ ok: true, claimed: true, session: { id: "session_malicious" } });
+      expect(services.reportStartupSucceeded({ projectId: "project_a", sessionId: "session_malicious", runtimeSessionId: "sandbox_malicious" })).toMatchObject({
+        ok: true,
+      });
+
+      const outputs = [
+        { securityKind: "command-policy", allowed: false, reason: "gh_auth_token_forbidden" },
+        { securityKind: "dependency-install-failed", allowed: false, lockfileChanged: true },
+        { securityKind: "egress-denied", allowed: false, host: "undeclared.example" },
+        { securityKind: "credentials-scrub-failed", allowed: false, reason: "scrub-incomplete" },
+      ];
+      for (const [index, output] of outputs.entries()) {
+        services.recordSessionOutput({
+          projectId: "project_a",
+          taskId: "task_malicious",
+          sessionId: "session_malicious",
+          stream: "system",
+          sequence: index + 1,
+          byteOffset: index,
+          text: `${JSON.stringify({ type: "security", ...output })}\n`,
+          observedAt: "2026-05-12T12:00:00.000Z",
+        });
+      }
+
+      expect(
+        services.completeSession({
+          projectId: "project_a",
+          taskId: "task_malicious",
+          sessionId: "session_malicious",
+          observedAt: "2026-05-12T12:00:00.000Z",
+        }),
+      ).toMatchObject({ ok: true });
+      expect(
+        services.cleanupSession({
+          projectId: "project_a",
+          taskId: "task_malicious",
+          sessionId: "session_malicious",
+          reason: "bridge cleanup completed",
+        }),
+      ).toMatchObject({ ok: true });
+
+      const finalization = await postInternal(baseUrl, config, "/runtime-sandboxes/claim-finalization", {
+        projectId: "project_a",
+        cleanupGraceBefore: "2026-05-12T12:00:31.000Z",
+      });
+      expect(finalization.status).toBe(200);
+      expect(await finalization.json()).toMatchObject({
+        ok: true,
+        claimed: true,
+        finalization: {
+          sessionId: "session_malicious",
+          snapshotRequired: false,
+          snapshotEligibilityStatus: "risk",
+          snapshotRiskReasons: expect.arrayContaining([
+            "command-denied",
+            "egress-denied",
+            "install-failed",
+            "lockfile-mutated",
+            "scrub-incomplete",
+          ]),
+        },
+      });
+    } finally {
+      await close();
+    }
+  });
 });
 
 async function startTestApi(): Promise<{

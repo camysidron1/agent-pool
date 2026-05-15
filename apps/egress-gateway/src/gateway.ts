@@ -184,6 +184,29 @@ async function handlePackageProxyRequest(input: {
   });
   const body = Buffer.from(await upstream.arrayBuffer());
   const headers = safeResponseHeaders(upstream.headers);
+  const packageMetadataDecision = inspectPackageMetadata({
+    body,
+    headers,
+  });
+  if (!packageMetadataDecision.allowed) {
+    await reportPackageResolution({
+      config: input.options.config,
+      fetchImpl: input.fetchImpl,
+      identity,
+      target,
+      decision: "denied",
+      reason: packageMetadataDecision.reason,
+    });
+    input.logger({
+      event: "package.proxy.denied",
+      registryHost: target.registryHost,
+      packageName: target.packageName,
+      reason: packageMetadataDecision.reason,
+    });
+    input.response.writeHead(403, { "content-type": "text/plain" });
+    input.response.end(`${packageMetadataDecision.reason}\n`);
+    return;
+  }
   const entry: PackageProxyCacheEntry = {
     status: upstream.status,
     headers,
@@ -590,6 +613,36 @@ function safeResponseHeaders(headers: Headers): Readonly<Record<string, string>>
     }
   }
   return output;
+}
+
+function inspectPackageMetadata(input: {
+  readonly body: Buffer;
+  readonly headers: Readonly<Record<string, string>>;
+}): EgressDecision {
+  const contentType = input.headers["content-type"] ?? "";
+  const text = input.body.toString("utf8").trim();
+  if (!text.startsWith("{") && !contentType.includes("json")) return { allowed: true, reason: "not_package_metadata" };
+  try {
+    const metadata = JSON.parse(text) as unknown;
+    return hasLifecycleScript(metadata) ? { allowed: false, reason: "package_lifecycle_script_forbidden" } : { allowed: true, reason: "no_lifecycle_scripts" };
+  } catch {
+    return { allowed: true, reason: "unparsed_package_metadata" };
+  }
+}
+
+function hasLifecycleScript(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Readonly<Record<string, unknown>>;
+  if (hasForbiddenScriptMap(record.scripts)) return true;
+  const versions = record.versions;
+  if (!versions || typeof versions !== "object" || Array.isArray(versions)) return false;
+  return Object.values(versions).some((version) => version && typeof version === "object" && !Array.isArray(version) && hasForbiddenScriptMap((version as Record<string, unknown>).scripts));
+}
+
+function hasForbiddenScriptMap(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const scripts = value as Readonly<Record<string, unknown>>;
+  return ["preinstall", "install", "postinstall", "prepare"].some((name) => typeof scripts[name] === "string" && scripts[name].trim().length > 0);
 }
 
 async function validateNetworkTarget(input: {
