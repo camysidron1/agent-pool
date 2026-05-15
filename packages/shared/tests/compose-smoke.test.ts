@@ -773,6 +773,116 @@ describe("compose smoke runner", () => {
     expect(report.nextAction).toBe("Resolve readiness warnings before production use; dry-run smoke is still safe.");
   });
 
+  test("verifies callback reachability with distinct opt-in diagnostics", async () => {
+    const completeEnv: EnvSource = {
+      AUTH_MODE: "test",
+      BRIDGE_CALLBACK_BASE_URL: "https://callback.agentpool.app",
+      E2B_API_KEY: "e2b-secret",
+      E2B_TEMPLATE_ID: "template-1",
+      E2B_TEMPLATE_COMPATIBILITY_MANIFEST_JSON: JSON.stringify(AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST),
+      E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN,CODEX_API_KEY",
+      CODEX_API_KEY: "codex-secret",
+      GITHUB_APP_ID: "12345",
+      GITHUB_APP_PRIVATE_KEY: "github-app-private-key",
+      GITHUB_APP_INSTALLATION_ID: "67890",
+      EGRESS_PROXY_URL: "http://proxy-user:proxy-secret@egress-gateway.internal:8080",
+      EGRESS_PROXY_ALLOW_OUT: "10.0.10.25/32",
+      AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+    };
+    const run = async (response: Response | Error): Promise<{ readonly code: number; readonly report: Record<string, unknown>; readonly requests: readonly string[] }> => {
+      const writes: string[] = [];
+      const requests: string[] = [];
+      const code = await runE2BSmokeCli(["--readiness", "--verify-callback", "--agent-runner-mode", "codex", "--callback-timeout-ms", "25"], {
+        env: completeEnv,
+        write: (text) => writes.push(text),
+        fetch: async (input, init) => {
+          requests.push(String(input));
+          expect(new Headers(init?.headers).get("x-agent-pool-service-token")).toBeNull();
+          if (response instanceof Error) throw response;
+          return response;
+        },
+      });
+      return { code, report: JSON.parse(writes.join("")), requests };
+    };
+
+    const reachable = await run(Response.json({ ok: true, service: "agent-pool-api" }));
+    const notFound = await run(Response.json({ ok: false }, { status: 404 }));
+    const authFailed = await run(Response.json({ ok: false }, { status: 401 }));
+    const timeout = await run(Object.assign(new Error("request timed out"), { name: "AbortError" }));
+
+    expect(reachable).toMatchObject({
+      code: 0,
+      requests: ["https://callback.agentpool.app/health"],
+      report: {
+        status: "ready",
+        callbackReachability: { ok: true, status: "reachable", httpStatus: 200 },
+      },
+    });
+    expect(notFound).toMatchObject({
+      code: 1,
+      report: {
+        status: "blocked",
+        callbackReachability: { ok: false, status: "not-found", httpStatus: 404 },
+      },
+    });
+    expect(authFailed).toMatchObject({
+      code: 1,
+      report: {
+        callbackReachability: { ok: false, status: "auth-failed", httpStatus: 401 },
+      },
+    });
+    expect(timeout).toMatchObject({
+      code: 1,
+      report: {
+        callbackReachability: { ok: false, status: "timeout", httpStatus: null },
+      },
+    });
+    expect(JSON.stringify(reachable.report)).not.toContain("github-app-private-key");
+    expect(JSON.stringify(reachable.report)).not.toContain("codex-secret");
+    expect(JSON.stringify(reachable.report)).not.toContain("proxy-secret");
+  });
+
+  test("blocks local-only and non-HTTPS callback reachability without fetching", async () => {
+    const completeEnv: EnvSource = {
+      AUTH_MODE: "test",
+      E2B_API_KEY: "e2b-secret",
+      E2B_TEMPLATE_ID: "template-1",
+      E2B_TEMPLATE_COMPATIBILITY_MANIFEST_JSON: JSON.stringify(AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST),
+      E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN,CODEX_API_KEY",
+      CODEX_API_KEY: "codex-secret",
+      GITHUB_APP_ID: "12345",
+      GITHUB_APP_PRIVATE_KEY: "github-app-private-key",
+      GITHUB_APP_INSTALLATION_ID: "67890",
+      EGRESS_PROXY_URL: "http://proxy-user:proxy-secret@egress-gateway.internal:8080",
+      EGRESS_PROXY_ALLOW_OUT: "10.0.10.25/32",
+      AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+    };
+    const run = async (callbackBaseUrl: string) => {
+      const writes: string[] = [];
+      let fetches = 0;
+      const code = await runE2BSmokeCli(["--readiness", "--verify-callback", "--agent-runner-mode", "codex"], {
+        env: { ...completeEnv, BRIDGE_CALLBACK_BASE_URL: callbackBaseUrl },
+        write: (text) => writes.push(text),
+        fetch: async () => {
+          fetches += 1;
+          return Response.json({ ok: true });
+        },
+      });
+      return { code, fetches, report: JSON.parse(writes.join("")) };
+    };
+
+    await expect(run("http://127.0.0.1:3080")).resolves.toMatchObject({
+      code: 1,
+      fetches: 0,
+      report: { callbackReachability: { status: "local-only" } },
+    });
+    await expect(run("http://callback.agentpool.app")).resolves.toMatchObject({
+      code: 1,
+      fetches: 0,
+      report: { callbackReachability: { status: "wrong-protocol" } },
+    });
+  });
+
   test("reports missing E2B smoke credentials before touching the API", async () => {
     const writes: string[] = [];
     let fetches = 0;
@@ -981,6 +1091,9 @@ describe("compose smoke runner", () => {
         "feature/ref",
         "--task-branch-prefix",
         "agent-pool/task",
+        "--verify-callback",
+        "--callback-timeout-ms",
+        "250",
       ]),
     ).toEqual({
       dryRun: true,
@@ -992,6 +1105,8 @@ describe("compose smoke runner", () => {
       baseRef: "feature/ref",
       taskBranchPrefix: "agent-pool/task",
       maliciousFixtures: false,
+      verifyCallback: true,
+      callbackTimeoutMs: 250,
     });
 
     expect(

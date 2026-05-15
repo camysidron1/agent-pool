@@ -42,6 +42,7 @@ export type E2BSmokePlan = {
     readonly fixtureIds: readonly string[];
   };
   readonly requests: {
+    readonly callbackHealth: E2BSmokeRequest;
     readonly githubAppVerify: E2BSmokeRequest;
     readonly seed: E2BSmokeRequest;
     readonly status: E2BSmokeRequest;
@@ -103,6 +104,15 @@ export type E2BReadinessCheck = {
   readonly nextAction: string | null;
 };
 
+export type E2BCallbackReachabilityResult = {
+  readonly ok: boolean;
+  readonly status: "reachable" | "local-only" | "wrong-protocol" | "not-found" | "auth-failed" | "timeout" | "error";
+  readonly url: string;
+  readonly httpStatus: number | null;
+  readonly detail: string;
+  readonly nextAction: string | null;
+};
+
 export type E2BReadinessReport = {
   readonly ok: true;
   readonly kind: "e2b-readiness";
@@ -114,6 +124,7 @@ export type E2BReadinessReport = {
   readonly missingSettings: readonly string[];
   readonly runtimeSource: RuntimeTaskSourceMetadata;
   readonly securityReadiness: E2BSmokeSecurityReadiness;
+  readonly callbackReachability?: E2BCallbackReachabilityResult;
   readonly checks: readonly E2BReadinessCheck[];
 };
 
@@ -129,6 +140,8 @@ type ParsedE2BSmokeArgs = {
   readonly agentRunnerMode?: "bridge-smoke" | "codex";
   readonly allowedEgressDomains?: readonly string[];
   readonly maliciousFixtures: boolean;
+  readonly verifyCallback: boolean;
+  readonly callbackTimeoutMs: number;
 };
 
 const DEFAULT_API_URL = "http://127.0.0.1:3000";
@@ -144,6 +157,7 @@ const DRY_RUN_EGRESS_PROXY_URL = "http://dry-run-egress-proxy.invalid:8080";
 const DRY_RUN_EGRESS_ALLOW_OUT = ["127.0.0.1/32"] as const;
 const DRY_RUN_SESSION_TOKEN = "dry-run-session-token";
 const DEFAULT_COMPOSE_SERVICE_TOKEN = "compose-internal-service-token";
+const DEFAULT_CALLBACK_REACHABILITY_TIMEOUT_MS = 5_000;
 const MALICIOUS_FIXTURE_IDS = [
   "postinstall-lifecycle-script",
   "unexpected-package-add",
@@ -283,6 +297,10 @@ export function createE2BSmokePlan(input: Partial<ParsedE2BSmokeArgs> & { readon
     cleanup,
     maliciousFixtures,
     requests: {
+      callbackHealth: {
+        method: "GET",
+        url: `${trimTrailingSlash(config.bridge.callbackBaseUrl)}/health`,
+      },
       githubAppVerify: {
         method: "POST",
         url: `${apiUrl}/internal/orchestrator/github-app/verify`,
@@ -309,9 +327,7 @@ export function createE2BReadinessReport(input: Partial<ParsedE2BSmokeArgs> & { 
   const agentRunnerMode = readAgentRunnerMode(input.agentRunnerMode ?? input.env?.AGENT_RUNNER_MODE);
   const plan = createE2BSmokePlan({ ...input, agentRunnerMode });
   const checks = buildReadinessChecks(plan, agentRunnerMode);
-  const hasBlocks = checks.some((check) => check.status === "block");
-  const hasWarnings = checks.some((check) => check.status === "warn");
-  const status: E2BReadinessStatus = hasBlocks ? "blocked" : hasWarnings ? "warning" : "ready";
+  const status = summarizeReadinessStatus(checks);
 
   return {
     ok: true,
@@ -326,6 +342,33 @@ export function createE2BReadinessReport(input: Partial<ParsedE2BSmokeArgs> & { 
     securityReadiness: plan.securityReadiness,
     checks,
   };
+}
+
+function withCallbackReachability(report: E2BReadinessReport, callbackReachability: E2BCallbackReachabilityResult): E2BReadinessReport {
+  const checks = [
+    ...report.checks,
+    {
+      id: "callback-reachability",
+      label: "Callback reachability",
+      status: callbackReachability.ok ? "pass" as const : "block" as const,
+      detail: callbackReachability.detail,
+      nextAction: callbackReachability.nextAction,
+    },
+  ];
+  const status = summarizeReadinessStatus(checks);
+  return {
+    ...report,
+    status,
+    nextAction: nextReadinessAction(status),
+    callbackReachability,
+    checks,
+  };
+}
+
+function summarizeReadinessStatus(checks: readonly E2BReadinessCheck[]): E2BReadinessStatus {
+  const hasBlocks = checks.some((check) => check.status === "block");
+  const hasWarnings = checks.some((check) => check.status === "warn");
+  return hasBlocks ? "blocked" : hasWarnings ? "warning" : "ready";
 }
 
 function buildReadinessChecks(plan: E2BSmokePlan, agentRunnerMode: "bridge-smoke" | "codex"): readonly E2BReadinessCheck[] {
@@ -538,7 +581,14 @@ export async function runE2BSmokeCli(args: readonly string[] = process.argv.slic
   const write = options.write ?? ((text: string) => process.stdout.write(text));
 
   if (parsed.readiness) {
+    const plan = createE2BSmokePlan({ ...parsed, env });
     const report = createE2BReadinessReport({ ...parsed, env });
+    if (parsed.verifyCallback) {
+      const callbackReachability = await verifyCallbackReachability(plan, options.fetch ?? fetch, parsed.callbackTimeoutMs);
+      const verifiedReport = withCallbackReachability(report, callbackReachability);
+      write(`${JSON.stringify(verifiedReport, null, 2)}\n`);
+      return callbackReachability.ok && verifiedReport.status !== "blocked" ? 0 : 1;
+    }
     write(`${JSON.stringify(report, null, 2)}\n`);
     return 0;
   }
@@ -625,6 +675,8 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
   let agentRunnerMode: "bridge-smoke" | "codex" | undefined;
   let allowedEgressDomains: readonly string[] | undefined;
   let maliciousFixtures = false;
+  let verifyCallback = false;
+  let callbackTimeoutMs = DEFAULT_CALLBACK_REACHABILITY_TIMEOUT_MS;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -663,6 +715,12 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
       case "--malicious-fixtures":
         maliciousFixtures = true;
         break;
+      case "--verify-callback":
+        verifyCallback = true;
+        break;
+      case "--callback-timeout-ms":
+        callbackTimeoutMs = readPositiveInteger(readFlagValue(args, (index += 1), arg), arg);
+        break;
       default:
         throw new Error(`unknown smoke:e2b argument: ${arg}`);
     }
@@ -680,6 +738,8 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
     ...(agentRunnerMode ? { agentRunnerMode } : {}),
     ...(allowedEgressDomains ? { allowedEgressDomains } : {}),
     maliciousFixtures,
+    verifyCallback,
+    callbackTimeoutMs,
   };
 }
 
@@ -703,6 +763,99 @@ function readTemplateCompatibilityManifest(env: EnvSource): unknown {
     return JSON.parse(raw);
   } catch {
     return raw;
+  }
+}
+
+async function verifyCallbackReachability(
+  plan: E2BSmokePlan,
+  fetchImpl: typeof fetch,
+  timeoutMs: number,
+): Promise<E2BCallbackReachabilityResult> {
+  const url = plan.requests.callbackHealth.url;
+  const callbackBaseUrl = plan.launchSpec.bridge.callbackBaseUrl;
+  if (isLocalCallbackUrl(callbackBaseUrl)) {
+    return {
+      ok: false,
+      status: "local-only",
+      url,
+      httpStatus: null,
+      detail: `${callbackBaseUrl} is local-only and not reachable from a live E2B sandbox.`,
+      nextAction: "Expose the local Caddy/API edge through a tunnel or use the deployed HTTPS API URL.",
+    };
+  }
+  if (!/^https:\/\//i.test(callbackBaseUrl)) {
+    return {
+      ok: false,
+      status: "wrong-protocol",
+      url,
+      httpStatus: null,
+      detail: `${callbackBaseUrl} is not HTTPS.`,
+      nextAction: "Use an HTTPS Cloudflare tunnel, Caddy edge, or deployed API URL for live E2B callbacks.",
+    };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetchImpl(url, {
+      method: "GET",
+      signal: controller.signal,
+      headers: {
+        accept: "application/json",
+      },
+    });
+    await response.text().catch(() => "");
+    if (response.ok) {
+      return {
+        ok: true,
+        status: "reachable",
+        url,
+        httpStatus: response.status,
+        detail: `Callback health endpoint is reachable with HTTP ${response.status}.`,
+        nextAction: null,
+      };
+    }
+    if (response.status === 401 || response.status === 403) {
+      return {
+        ok: false,
+        status: "auth-failed",
+        url,
+        httpStatus: response.status,
+        detail: `Callback health endpoint returned HTTP ${response.status}; the tunnel or edge may be enforcing auth before the API.`,
+        nextAction: "Allow unauthenticated access to /health and /callbacks/* at the public callback edge.",
+      };
+    }
+    if (response.status === 404) {
+      return {
+        ok: false,
+        status: "not-found",
+        url,
+        httpStatus: response.status,
+        detail: "Callback health endpoint returned HTTP 404.",
+        nextAction: "Point BRIDGE_CALLBACK_BASE_URL at the Agent Pool API or Caddy edge, not the web-only origin.",
+      };
+    }
+    return {
+      ok: false,
+      status: "error",
+      url,
+      httpStatus: response.status,
+      detail: `Callback health endpoint returned HTTP ${response.status}.`,
+      nextAction: "Check the tunnel, Caddy routing, and API health endpoint.",
+    };
+  } catch (error) {
+    const message = errorMessage(error);
+    const timedOut = (error instanceof Error && error.name === "AbortError") || /timeout|timed out|aborted/i.test(message);
+    return {
+      ok: false,
+      status: timedOut ? "timeout" : "error",
+      url,
+      httpStatus: null,
+      detail: timedOut ? `Callback health endpoint timed out after ${timeoutMs}ms.` : `Callback health endpoint failed: ${message}`,
+      nextAction: timedOut ? "Check that the tunnel is running and publicly routable." : "Check DNS, TLS, and tunnel routing.",
+    };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
