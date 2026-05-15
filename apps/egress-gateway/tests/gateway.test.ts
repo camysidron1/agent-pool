@@ -22,7 +22,9 @@ describe("egress gateway", () => {
     const reports: unknown[] = [];
     const gateway = createEgressGateway({
       config: config(),
-      fetch: authzFetch({ allowedHost: "127.0.0.1", validToken: "proxy-token", reports }),
+      fetch: authzFetch({ allowedHost: "github.com", validToken: "proxy-token", reports }),
+      resolveHostAddresses: publicResolver(),
+      connectTcp: (port) => connectTcp(port, "127.0.0.1"),
       logger: () => undefined,
     });
     const port = testPort();
@@ -31,6 +33,7 @@ describe("egress gateway", () => {
 
     const response = await connectThroughProxy({
       proxyPort: port,
+      targetHost: "github.com",
       targetPort: upstream.port,
       token: "proxy-token",
     });
@@ -45,6 +48,7 @@ describe("egress gateway", () => {
     const gateway = createEgressGateway({
       config: config(),
       fetch: authzFetch({ allowedHost: "github.com", validToken: "proxy-token", reports }),
+      resolveHostAddresses: publicResolver(),
       logger: () => undefined,
     });
     const port = testPort();
@@ -53,6 +57,7 @@ describe("egress gateway", () => {
 
     const response = await connectThroughProxy({
       proxyPort: port,
+      targetHost: "evil.test",
       targetPort: 443,
       token: "proxy-token",
     });
@@ -60,6 +65,44 @@ describe("egress gateway", () => {
     expect(response).toContain("403");
     expect(JSON.stringify(reports)).toContain("\"allowed\":false");
     expect(JSON.stringify(reports)).not.toContain("proxy-token");
+  });
+
+  test("denies IP literal and private DNS targets before opening CONNECT upstreams", async () => {
+    const reports: unknown[] = [];
+    let connectCalls = 0;
+    const gateway = createEgressGateway({
+      config: config(),
+      fetch: authzFetch({ allowedHost: "github.com", validToken: "proxy-token", reports }),
+      resolveHostAddresses: async (host) => (host === "github.com" ? ["10.0.0.4"] : ["93.184.216.34"]),
+      connectTcp: (port, host) => {
+        connectCalls += 1;
+        return connectTcp(port, host);
+      },
+      logger: () => undefined,
+    });
+    const port = testPort();
+    await gateway.listen(port, "127.0.0.1");
+    servers.push(gateway);
+
+    const literal = await connectThroughProxy({
+      proxyPort: port,
+      targetHost: "127.0.0.1",
+      targetPort: 443,
+      token: "proxy-token",
+    });
+    const rebound = await connectThroughProxy({
+      proxyPort: port,
+      targetHost: "github.com",
+      targetPort: 443,
+      token: "proxy-token",
+    });
+
+    expect(literal).toContain("403");
+    expect(rebound).toContain("403");
+    expect(JSON.stringify(reports)).toContain("ip_literal_forbidden");
+    expect(JSON.stringify(reports)).toContain("dns_target_not_public");
+    expect(JSON.stringify(reports)).not.toContain("proxy-token");
+    expect(connectCalls).toBe(0);
   });
 
   test("denies missing proxy authentication before calling backend authz", async () => {
@@ -97,6 +140,7 @@ describe("egress gateway", () => {
           return json({ name: "@agent-pool/sdk", version: "1.0.0" });
         },
       }),
+      resolveHostAddresses: publicResolver(),
       logger: (event) => logs.push(event),
     });
     const port = testPort();
@@ -129,6 +173,7 @@ describe("egress gateway", () => {
           return json({ ok: true });
         },
       }),
+      resolveHostAddresses: publicResolver(),
       logger: () => undefined,
     });
     const port = testPort();
@@ -152,6 +197,7 @@ describe("egress gateway", () => {
         reports,
         onUpstream: () => new Response("missing", { status: 404, headers: { "content-type": "text/plain" } }),
       }),
+      resolveHostAddresses: publicResolver(),
       logger: () => undefined,
     });
     const port = testPort();
@@ -163,6 +209,39 @@ describe("egress gateway", () => {
     expect(response).toContain("404");
     expect(JSON.stringify(reports)).toContain("\"decision\":\"failed\"");
     expect(JSON.stringify(reports)).toContain("upstream_404");
+    expect(JSON.stringify(reports)).not.toContain("proxy-token");
+  });
+
+  test("denies package proxy redirects to undeclared hosts without following them", async () => {
+    const reports: unknown[] = [];
+    let redirectedFetches = 0;
+    const gateway = createEgressGateway({
+      config: config(),
+      fetch: packageProxyFetch({
+        allowed: true,
+        validToken: "proxy-token",
+        reports,
+        onUpstream: (url) => {
+          if (url.startsWith("https://evil.test/")) {
+            redirectedFetches += 1;
+            return json({ name: "evil" });
+          }
+          return new Response("", { status: 302, headers: { location: "https://evil.test/left-pad" } });
+        },
+      }),
+      resolveHostAddresses: publicResolver(),
+      logger: () => undefined,
+    });
+    const port = testPort();
+    await gateway.listen(port, "127.0.0.1");
+    servers.push(gateway);
+
+    const response = await packageProxyRequest(port, "left-pad", "proxy-token");
+
+    expect(response).toContain("403");
+    expect(response).toContain("redirect_not_declared_for_session");
+    expect(redirectedFetches).toBe(0);
+    expect(JSON.stringify(reports)).toContain("\"host\":\"evil.test\"");
     expect(JSON.stringify(reports)).not.toContain("proxy-token");
   });
 });
@@ -218,7 +297,19 @@ function packageProxyFetch(input: {
       input.reports.push(reported);
       return json({ ok: true });
     }
+    if (textUrl.endsWith("/internal/egress/authorize")) {
+      const allowed = body.host === "registry.npmjs.org";
+      return json({ ok: true, allowed, reason: allowed ? "allowed" : "not_declared_for_session" });
+    }
+    if (textUrl.endsWith("/internal/egress/report")) {
+      const { proxyToken: _redacted, ...reported } = body;
+      input.reports.push(reported);
+      return json({ ok: true });
+    }
     if (textUrl.startsWith("https://registry.npmjs.org/")) {
+      return input.onUpstream(textUrl);
+    }
+    if (textUrl.startsWith("https://evil.test/")) {
       return input.onUpstream(textUrl);
     }
     return new Response("unexpected fetch", { status: 500 });
@@ -227,15 +318,17 @@ function packageProxyFetch(input: {
 
 async function connectThroughProxy(input: {
   readonly proxyPort: number;
+  readonly targetHost?: string;
   readonly targetPort: number;
   readonly token: string;
 }): Promise<string> {
   const credentials = Buffer.from(`${encodeProxyIdentity("project_a", "session_1")}:${input.token}`, "utf8").toString("base64");
+  const targetHost = input.targetHost ?? "github.com";
   return rawProxyRequest(
     input.proxyPort,
     [
-      `CONNECT 127.0.0.1:${input.targetPort} HTTP/1.1`,
-      `host: 127.0.0.1:${input.targetPort}`,
+      `CONNECT ${targetHost}:${input.targetPort} HTTP/1.1`,
+      `host: ${targetHost}:${input.targetPort}`,
       `proxy-authorization: Basic ${credentials}`,
       "",
       "",
@@ -291,6 +384,10 @@ async function listenTcpServer(onConnection: (socket: import("node:net").Socket)
 
 function json(body: unknown): Response {
   return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+}
+
+function publicResolver(address = "93.184.216.34"): () => Promise<readonly string[]> {
+  return async () => [address];
 }
 
 function testPort(): number {

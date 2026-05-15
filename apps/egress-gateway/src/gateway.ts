@@ -1,5 +1,6 @@
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
-import { connect as connectTcp, type Socket } from "node:net";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { connect as defaultConnectTcp, isIP, type Socket } from "node:net";
 import type { Duplex } from "node:stream";
 import { pipeline } from "node:stream";
 
@@ -18,7 +19,12 @@ export type CreateEgressGatewayOptions = {
   readonly fetch?: typeof fetch;
   readonly logger?: EgressGatewayLogger;
   readonly packageCache?: PackageProxyCache;
+  readonly resolveHostAddresses?: EgressGatewayHostResolver;
+  readonly connectTcp?: EgressGatewayTcpConnector;
 };
+
+export type EgressGatewayHostResolver = (host: string) => Promise<readonly string[]>;
+export type EgressGatewayTcpConnector = (port: number, host: string) => Socket;
 
 export type PackageProxyCacheEntry = {
   readonly status: number;
@@ -46,6 +52,8 @@ export function createEgressGateway(options: CreateEgressGatewayOptions): Egress
   const fetchImpl = options.fetch ?? fetch;
   const logger = options.logger ?? ((event) => console.log(JSON.stringify(event)));
   const packageCache = options.packageCache ?? createInMemoryPackageProxyCache();
+  const resolveHostAddresses = options.resolveHostAddresses ?? defaultResolveHostAddresses;
+  const connectTcp = options.connectTcp ?? defaultConnectTcp;
   const server = createServer((request, response) => {
     if (request.url === "/health") {
       response.writeHead(200, { "content-type": "application/json" });
@@ -53,14 +61,14 @@ export function createEgressGateway(options: CreateEgressGatewayOptions): Egress
       return;
     }
     if (isPackageProxyRequest(request.url)) {
-      handlePackageProxyRequest({ request, response, options, fetchImpl, logger, packageCache }).catch((error) => {
+      handlePackageProxyRequest({ request, response, options, fetchImpl, logger, packageCache, resolveHostAddresses }).catch((error) => {
         logger({ level: "error", event: "package.proxy.failed", errorMessage: errorMessage(error) });
         if (!response.headersSent) response.writeHead(502, { "content-type": "text/plain" });
         response.end("package proxy failed\n");
       });
       return;
     }
-    handleHttpProxyRequest({ request, response, options, fetchImpl, logger }).catch((error) => {
+    handleHttpProxyRequest({ request, response, options, fetchImpl, logger, resolveHostAddresses }).catch((error) => {
       logger({ level: "error", event: "egress.proxy.http_failed", errorMessage: errorMessage(error) });
       if (!response.headersSent) response.writeHead(502, { "content-type": "text/plain" });
       response.end("egress proxy failed\n");
@@ -68,7 +76,7 @@ export function createEgressGateway(options: CreateEgressGatewayOptions): Egress
   });
 
   server.on("connect", (request, clientSocket, head) => {
-    handleConnectProxyRequest({ request, clientSocket, head, options, fetchImpl, logger }).catch((error) => {
+    handleConnectProxyRequest({ request, clientSocket, head, options, fetchImpl, logger, resolveHostAddresses, connectTcp }).catch((error) => {
       logger({ level: "error", event: "egress.proxy.connect_failed", errorMessage: errorMessage(error) });
       denyConnect(clientSocket, 502, "egress proxy failed");
     });
@@ -112,12 +120,31 @@ async function handlePackageProxyRequest(input: {
   readonly fetchImpl: typeof fetch;
   readonly logger: EgressGatewayLogger;
   readonly packageCache: PackageProxyCache;
+  readonly resolveHostAddresses: EgressGatewayHostResolver;
 }): Promise<void> {
   const target = parsePackageProxyTarget(input.request.url);
   const identity = readProxyIdentity(input.request.headers.authorization) ?? readProxyIdentity(input.request.headers["proxy-authorization"]);
   if (!target || !identity) {
     input.response.writeHead(407, { "content-type": "text/plain", "www-authenticate": "Basic realm=\"agent-pool-package-proxy\"" });
     input.response.end("package proxy authentication required\n");
+    return;
+  }
+  const networkDecision = await validateNetworkTarget({
+    host: target.registryHost,
+    resolveHostAddresses: input.resolveHostAddresses,
+  });
+  if (!networkDecision.allowed) {
+    await reportPackageResolution({
+      config: input.options.config,
+      fetchImpl: input.fetchImpl,
+      identity,
+      target,
+      decision: "denied",
+      reason: networkDecision.reason,
+    });
+    input.logger({ event: "package.proxy.denied", registryHost: target.registryHost, packageName: target.packageName, reason: networkDecision.reason });
+    input.response.writeHead(403, { "content-type": "text/plain" });
+    input.response.end(`${networkDecision.reason}\n`);
     return;
   }
   const decision = await authorizePackageRequest({
@@ -145,9 +172,15 @@ async function handlePackageProxyRequest(input: {
   }
 
   input.logger({ event: "package.proxy.cache_miss", registryHost: target.registryHost, packageName: target.packageName });
-  const upstream = await input.fetchImpl(target.upstreamUrl, {
-    method: input.request.method,
+  const upstream = await fetchPackageProxyUpstream({
+    target,
+    method: input.request.method ?? "GET",
     headers: stripProxyHeaders(input.request.headers),
+    identity,
+    config: input.options.config,
+    fetchImpl: input.fetchImpl,
+    logger: input.logger,
+    resolveHostAddresses: input.resolveHostAddresses,
   });
   const body = Buffer.from(await upstream.arrayBuffer());
   const headers = safeResponseHeaders(upstream.headers);
@@ -179,6 +212,8 @@ async function handleConnectProxyRequest(input: {
   readonly options: CreateEgressGatewayOptions;
   readonly fetchImpl: typeof fetch;
   readonly logger: EgressGatewayLogger;
+  readonly resolveHostAddresses: EgressGatewayHostResolver;
+  readonly connectTcp: EgressGatewayTcpConnector;
 }): Promise<void> {
   const target = parseConnectTarget(input.request.url);
   const identity = readProxyIdentity(input.request.headers["proxy-authorization"]);
@@ -195,13 +230,14 @@ async function handleConnectProxyRequest(input: {
     host: target.host,
     port: target.port,
     method: "CONNECT",
+    resolveHostAddresses: input.resolveHostAddresses,
   });
   if (!decision.allowed) {
     denyConnect(input.clientSocket, 403, decision.reason);
     return;
   }
 
-  const upstream = connectTcp(target.port, target.host);
+  const upstream = input.connectTcp(target.port, target.host);
   upstream.once("connect", () => {
     input.clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
     if (input.head.length > 0) upstream.write(input.head);
@@ -219,6 +255,7 @@ async function handleHttpProxyRequest(input: {
   readonly options: CreateEgressGatewayOptions;
   readonly fetchImpl: typeof fetch;
   readonly logger: EgressGatewayLogger;
+  readonly resolveHostAddresses: EgressGatewayHostResolver;
 }): Promise<void> {
   const target = parseHttpProxyTarget(input.request.url);
   const identity = readProxyIdentity(input.request.headers["proxy-authorization"]);
@@ -236,6 +273,7 @@ async function handleHttpProxyRequest(input: {
     host: target.hostname,
     port: Number(target.port || (target.protocol === "https:" ? 443 : 80)),
     method: input.request.method ?? "GET",
+    resolveHostAddresses: input.resolveHostAddresses,
   });
   if (!decision.allowed) {
     input.response.writeHead(403, { "content-type": "text/plain" });
@@ -252,7 +290,24 @@ async function handleHttpProxyRequest(input: {
       method: input.request.method,
       headers,
     },
-    (upstreamResponse) => {
+    async (upstreamResponse) => {
+      const redirectDecision = await authorizeRedirectIfNeeded({
+        currentUrl: target,
+        location: upstreamResponse.headers.location,
+        status: upstreamResponse.statusCode ?? 0,
+        config: input.options.config,
+        fetchImpl: input.fetchImpl,
+        logger: input.logger,
+        identity,
+        method: `${input.request.method ?? "GET"}_REDIRECT`,
+        resolveHostAddresses: input.resolveHostAddresses,
+      });
+      if (!redirectDecision.allowed) {
+        upstreamResponse.resume();
+        input.response.writeHead(403, { "content-type": "text/plain" });
+        input.response.end(`${redirectDecision.reason}\n`);
+        return;
+      }
       input.response.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
       pipeline(upstreamResponse, input.response, () => undefined);
     },
@@ -272,7 +327,17 @@ async function authorizeAndReport(input: {
   readonly host: string;
   readonly port: number;
   readonly method: string;
+  readonly resolveHostAddresses: EgressGatewayHostResolver;
 }): Promise<EgressDecision> {
+  const networkDecision = await validateNetworkTarget({
+    host: input.host,
+    resolveHostAddresses: input.resolveHostAddresses,
+  });
+  if (!networkDecision.allowed) {
+    await reportEgressDecision({ ...input, host: normalizeHost(input.host), allowed: false, reason: networkDecision.reason });
+    input.logger({ event: "egress.denied", host: normalizeHost(input.host), allowed: false, reason: networkDecision.reason });
+    return networkDecision;
+  }
   const body = {
     projectId: input.identity.projectId,
     sessionId: input.identity.sessionId,
@@ -290,15 +355,30 @@ async function authorizeAndReport(input: {
   const result = (await response.json().catch(() => ({}))) as Readonly<Record<string, unknown>>;
   const allowed = response.ok && result.ok === true && result.allowed === true;
   const reason = typeof result.reason === "string" ? result.reason : allowed ? "allowed" : "denied";
+  await reportEgressDecision({ ...input, host: body.host, allowed, reason });
+  input.logger({ event: allowed ? "egress.allowed" : "egress.denied", host: body.host, allowed, reason });
+  return { allowed, reason };
+}
+
+async function reportEgressDecision(input: {
+  readonly config: AppConfig;
+  readonly fetchImpl: typeof fetch;
+  readonly identity: ProxyIdentity;
+  readonly host: string;
+  readonly port: number;
+  readonly method: string;
+  readonly allowed: boolean;
+  readonly reason: string;
+}): Promise<void> {
   const event = {
     projectId: input.identity.projectId,
     sessionId: input.identity.sessionId,
     proxyToken: input.identity.proxyToken,
-    host: body.host,
+    host: input.host,
     port: input.port,
     method: input.method,
-    allowed,
-    reason,
+    allowed: input.allowed,
+    reason: input.reason,
   };
   await input.fetchImpl(`${input.config.egressGateway.backendInternalUrl}/internal/egress/report`, {
     method: "POST",
@@ -308,8 +388,36 @@ async function authorizeAndReport(input: {
     },
     body: JSON.stringify(event),
   }).catch(() => undefined);
-  input.logger({ event: allowed ? "egress.allowed" : "egress.denied", host: body.host, allowed, reason });
-  return { allowed, reason };
+}
+
+async function authorizeRedirectIfNeeded(input: {
+  readonly currentUrl: URL;
+  readonly location: string | string[] | undefined;
+  readonly status: number;
+  readonly config: AppConfig;
+  readonly fetchImpl: typeof fetch;
+  readonly logger: EgressGatewayLogger;
+  readonly identity: ProxyIdentity;
+  readonly method: string;
+  readonly resolveHostAddresses: EgressGatewayHostResolver;
+}): Promise<EgressDecision> {
+  if (!isRedirectResponse(input.status)) return { allowed: true, reason: "not_redirect" };
+  const location = Array.isArray(input.location) ? input.location[0] : input.location;
+  if (!location) return { allowed: true, reason: "redirect_without_location" };
+  const nextUrl = new URL(location, input.currentUrl);
+  if (normalizeHost(nextUrl.hostname) === normalizeHost(input.currentUrl.hostname)) {
+    return { allowed: true, reason: "same_host_redirect" };
+  }
+  return authorizeAndReport({
+    config: input.config,
+    fetchImpl: input.fetchImpl,
+    logger: input.logger,
+    identity: input.identity,
+    host: nextUrl.hostname,
+    port: Number(nextUrl.port || (nextUrl.protocol === "https:" ? 443 : 80)),
+    method: input.method,
+    resolveHostAddresses: input.resolveHostAddresses,
+  });
 }
 
 async function authorizePackageRequest(input: {
@@ -337,6 +445,56 @@ async function authorizePackageRequest(input: {
   const allowed = response.ok && result.ok === true && result.allowed === true;
   const reason = typeof result.reason === "string" ? result.reason : allowed ? "allowed" : "denied";
   return { allowed, reason };
+}
+
+async function fetchPackageProxyUpstream(input: {
+  readonly target: PackageProxyTarget;
+  readonly method: string;
+  readonly headers: Headers;
+  readonly identity: ProxyIdentity;
+  readonly config: AppConfig;
+  readonly fetchImpl: typeof fetch;
+  readonly logger: EgressGatewayLogger;
+  readonly resolveHostAddresses: EgressGatewayHostResolver;
+}): Promise<Response> {
+  let url = input.target.upstreamUrl;
+  for (let redirects = 0; redirects <= 3; redirects += 1) {
+    const response = await input.fetchImpl(url, {
+      method: input.method,
+      headers: input.headers,
+      redirect: "manual",
+    });
+    if (!isRedirectResponse(response.status)) return response;
+    const location = response.headers.get("location");
+    if (!location) return response;
+    const nextUrl = new URL(location, url);
+    const currentHost = new URL(url).hostname;
+    if (normalizeHost(nextUrl.hostname) !== normalizeHost(currentHost)) {
+      const decision = await authorizeAndReport({
+        config: input.config,
+        fetchImpl: input.fetchImpl,
+        logger: input.logger,
+        identity: input.identity,
+        host: nextUrl.hostname,
+        port: Number(nextUrl.port || (nextUrl.protocol === "https:" ? 443 : 80)),
+        method: "PACKAGE_REDIRECT",
+        resolveHostAddresses: input.resolveHostAddresses,
+      });
+      if (!decision.allowed) {
+        await reportPackageResolution({
+          config: input.config,
+          fetchImpl: input.fetchImpl,
+          identity: input.identity,
+          target: input.target,
+          decision: "denied",
+          reason: `redirect_${decision.reason}`,
+        });
+        return new Response(`redirect_${decision.reason}\n`, { status: 403, headers: { "content-type": "text/plain" } });
+      }
+    }
+    url = nextUrl.toString();
+  }
+  return new Response("redirect_limit_exceeded\n", { status: 508, headers: { "content-type": "text/plain" } });
 }
 
 async function reportPackageResolution(input: {
@@ -434,10 +592,115 @@ function safeResponseHeaders(headers: Headers): Readonly<Record<string, string>>
   return output;
 }
 
+async function validateNetworkTarget(input: {
+  readonly host: string;
+  readonly resolveHostAddresses: EgressGatewayHostResolver;
+}): Promise<EgressDecision> {
+  const host = normalizeHost(stripHostBrackets(input.host));
+  const syntaxError = validateHostSyntax(host);
+  if (syntaxError) return { allowed: false, reason: syntaxError };
+  if (isBlockedHostname(host)) return { allowed: false, reason: "blocked_hostname" };
+  if (isIP(host)) return { allowed: false, reason: "ip_literal_forbidden" };
+  let addresses: readonly string[];
+  try {
+    addresses = await input.resolveHostAddresses(host);
+  } catch {
+    return { allowed: false, reason: "dns_resolution_failed" };
+  }
+  if (addresses.length === 0) return { allowed: false, reason: "dns_no_addresses" };
+  if (addresses.some((address) => !isPublicIpAddress(address))) {
+    return { allowed: false, reason: "dns_target_not_public" };
+  }
+  return { allowed: true, reason: "network_target_public" };
+}
+
+function validateHostSyntax(host: string): string | null {
+  if (!host || host.length > 253 || /[\s/:\\]/.test(host)) return "invalid_host";
+  if (host.endsWith(".")) return "invalid_host";
+  const labels = host.split(".");
+  if (labels.length < 2) return "invalid_host";
+  for (const label of labels) {
+    if (!label || label.length > 63 || !/^[a-z0-9-]+$/.test(label) || label.startsWith("-") || label.endsWith("-")) {
+      return "invalid_host";
+    }
+  }
+  return null;
+}
+
+function isBlockedHostname(host: string): boolean {
+  return (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "metadata" ||
+    host === "metadata.google.internal" ||
+    host.endsWith(".metadata.google.internal")
+  );
+}
+
+function isPublicIpAddress(address: string): boolean {
+  const normalized = stripHostBrackets(address).toLowerCase();
+  if (isIPv4Address(normalized)) return isPublicIPv4Address(normalized);
+  if (normalized.startsWith("::ffff:")) {
+    const mapped = normalized.slice("::ffff:".length);
+    if (isIPv4Address(mapped)) return isPublicIPv4Address(mapped);
+  }
+  return isPublicIPv6Address(normalized);
+}
+
+function isIPv4Address(address: string): boolean {
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(address);
+}
+
+function isPublicIPv4Address(address: string): boolean {
+  const parts = address.split(".").map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  const [a = 0, b = 0, c = 0] = parts;
+  if (a === 0 || a === 10 || a === 127) return false;
+  if (a === 100 && b >= 64 && b <= 127) return false;
+  if (a === 169 && b === 254) return false;
+  if (a === 172 && b >= 16 && b <= 31) return false;
+  if (a === 192 && b === 168) return false;
+  if (a === 192 && b === 0 && c === 0) return false;
+  if (a === 192 && b === 0 && c === 2) return false;
+  if (a === 198 && (b === 18 || b === 19)) return false;
+  if (a === 198 && b === 51 && c === 100) return false;
+  if (a === 203 && b === 0 && c === 113) return false;
+  if (a >= 224) return false;
+  return true;
+}
+
+function isPublicIPv6Address(address: string): boolean {
+  const normalized = address.toLowerCase();
+  if (normalized === "::" || normalized === "::1") return false;
+  if (normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb")) return false;
+  if (normalized.startsWith("fc") || normalized.startsWith("fd")) return false;
+  if (normalized.startsWith("ff")) return false;
+  if (normalized.startsWith("2001:db8")) return false;
+  return isIP(normalized) === 6;
+}
+
+function stripHostBrackets(value: string): string {
+  const trimmed = value.trim().toLowerCase();
+  return trimmed.startsWith("[") && trimmed.endsWith("]") ? trimmed.slice(1, -1) : trimmed;
+}
+
+async function defaultResolveHostAddresses(host: string): Promise<readonly string[]> {
+  const records = await dnsLookup(host, { all: true, verbatim: true });
+  return records.map((record) => record.address);
+}
+
+function isRedirectResponse(status: number): boolean {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+}
+
 function parseConnectTarget(value: string | undefined): { readonly host: string; readonly port: number } | null {
   const raw = value?.trim();
   if (!raw) return null;
-  const [host, portText] = raw.split(":");
+  if (raw.includes("/") || /\s/.test(raw)) return null;
+  const separator = raw.lastIndexOf(":");
+  if (separator <= 0 || separator === raw.length - 1) return null;
+  const host = raw.slice(0, separator);
+  const portText = raw.slice(separator + 1);
   const port = Number(portText);
   if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return null;
   return { host: normalizeHost(host), port };
