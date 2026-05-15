@@ -23,6 +23,60 @@ describe("public web API client", () => {
     expect(calls[0]?.credentials).toBe("include");
   });
 
+  test("loads runtime readiness through the public API namespace", async () => {
+    const calls: { readonly url: string; readonly headers: Headers; readonly credentials?: RequestCredentials }[] = [];
+    const client = createPublicApiClient({
+      baseUrl: "https://agent-pool.example/",
+      operatorId: "operator-test",
+      fetchImpl: async (input, init) => {
+        calls.push({ url: String(input), headers: new Headers(init?.headers), credentials: init?.credentials });
+        return jsonResponse({
+          ok: true,
+          readiness: {
+            status: "blocked",
+            generatedAt: "2026-05-15T00:00:00.000Z",
+            runtimeProvider: "e2b",
+            agentRunnerMode: "codex",
+            smokeProjectId: "compose-smoke",
+            smokeEnabled: true,
+            checks: [],
+            missingPrerequisites: ["GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY/GITHUB_APP_INSTALLATION_ID"],
+            warnings: [],
+            lastSmoke: {
+              status: "missing",
+              projectId: "compose-smoke",
+              summary: "No smoke task yet.",
+              taskId: null,
+              taskTitle: null,
+              taskStatus: null,
+              sessionId: null,
+              sessionStatus: null,
+              runtimeProvider: null,
+              updatedAt: null,
+              evidence: {
+                status: "not-recorded",
+                summary: "No evidence task is available yet.",
+                command: "bun run smoke:e2b -- --evidence --agent-runner-mode codex",
+              },
+              links: [],
+            },
+            links: [],
+            redaction: { secrets: "redacted", databasePaths: "omitted" },
+          },
+        });
+      },
+    });
+
+    await expect(client.readRuntimeReadiness()).resolves.toMatchObject({
+      ok: true,
+      readiness: { status: "blocked", runtimeProvider: "e2b" },
+    });
+
+    expect(calls[0]?.url).toBe("https://agent-pool.example/api/public/runtime/readiness");
+    expect(calls[0]?.headers.get(PUBLIC_OPERATOR_ID_HEADER)).toBe("operator-test");
+    expect(calls[0]?.credentials).toBe("include");
+  });
+
   test("logs in and logs out through cookie-backed auth routes", async () => {
     const calls: { readonly url: string; readonly body: string | null; readonly credentials?: RequestCredentials }[] = [];
     const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {

@@ -56,6 +56,9 @@ async function assertServedBundle(): Promise<void> {
     assertBundleMarkers(script, [
       ["auth storage", "agent-pool.operatorId"],
       ["public auth header", "x-agent-pool-operator-id"],
+      ["runtime readiness", "Runtime readiness"],
+      ["runtime readiness API", "/runtime/readiness"],
+      ["runtime readiness responsive marker", "runtime-readiness-marker"],
       ["project selector", "project-selector"],
       ["kanban board", "Loaded project Kanban board"],
       ["task panel", "Task detail"],

@@ -171,6 +171,171 @@ label {
   background: #f5f7fa;
 }
 
+.runtime-readiness {
+  align-items: start;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  background: #ffffff;
+  display: grid;
+  gap: 0.9rem;
+  grid-template-columns: minmax(0, 1.1fr) auto minmax(16rem, 0.9fr);
+  margin: 0 auto 1rem;
+  max-width: 86rem;
+  padding: 1rem;
+}
+
+.runtime-readiness h2 {
+  font-size: 1rem;
+  margin-bottom: 0.25rem;
+}
+
+.runtime-readiness p,
+.runtime-readiness dd {
+  color: #607084;
+  margin: 0;
+}
+
+.runtime-readiness-heading {
+  align-items: start;
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.runtime-readiness-marker {
+  border-radius: 999px;
+  display: inline-block;
+  height: 0.8rem;
+  margin-top: 0.35rem;
+  width: 0.8rem;
+}
+
+.runtime-readiness-marker-ready {
+  background: #1f7a45;
+}
+
+.runtime-readiness-marker-blocked {
+  background: #a33a2b;
+}
+
+.runtime-readiness-marker-warning {
+  background: #a26412;
+}
+
+.runtime-readiness-marker-unknown {
+  background: #607084;
+}
+
+.runtime-readiness-ready {
+  border-color: #b8dcc8;
+}
+
+.runtime-readiness-blocked {
+  border-color: #efc8c1;
+}
+
+.runtime-readiness-warning {
+  border-color: #ead2a6;
+}
+
+.runtime-readiness-status span,
+.runtime-readiness-prereqs span,
+.runtime-readiness-links a {
+  border: 1px solid #d8dee8;
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 0.8rem;
+  font-weight: 700;
+  padding: 0.35rem 0.65rem;
+}
+
+.runtime-readiness-status span {
+  color: #263349;
+}
+
+.runtime-readiness-prereqs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  grid-column: 1 / -1;
+}
+
+.runtime-readiness-prereqs span {
+  border-color: #efc8c1;
+  color: #a33a2b;
+}
+
+.runtime-readiness-smoke {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+}
+
+.runtime-readiness-smoke dt {
+  color: #46556a;
+  font-size: 0.75rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.runtime-readiness-smoke dd {
+  font-size: 0.88rem;
+}
+
+.runtime-readiness-checks {
+  display: grid;
+  gap: 0.5rem;
+  grid-column: 1 / -1;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.runtime-readiness-check {
+  align-items: start;
+  border-left: 3px solid #d8dee8;
+  display: grid;
+  gap: 0.15rem;
+  padding-left: 0.65rem;
+}
+
+.runtime-readiness-check strong {
+  font-size: 0.86rem;
+}
+
+.runtime-readiness-check span {
+  color: #607084;
+  font-size: 0.84rem;
+}
+
+.runtime-readiness-check-pass {
+  border-color: #1f7a45;
+}
+
+.runtime-readiness-check-block {
+  border-color: #a33a2b;
+}
+
+.runtime-readiness-check-warn {
+  border-color: #a26412;
+}
+
+.runtime-readiness-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  grid-column: 1 / -1;
+}
+
+.runtime-readiness-links a {
+  color: #263349;
+  text-decoration: none;
+}
+
+.runtime-readiness-links a:hover {
+  background: #f5f7fa;
+}
+
 .secondary-button {
   background: #ffffff;
   color: #263349;
@@ -1303,6 +1468,7 @@ label {
   .auth-row,
   .topbar,
   .operator-menu,
+  .runtime-readiness,
   .board-toolbar,
   .project-summary,
   .task-composer,
@@ -1320,6 +1486,11 @@ label {
 
   .task-counts {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .runtime-readiness-heading,
+  .runtime-readiness-smoke {
+    grid-template-columns: 1fr;
   }
 
   .detail-grid {

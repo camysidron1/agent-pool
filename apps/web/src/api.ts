@@ -46,6 +46,59 @@ export type PublicRuntimeSource = {
   readonly commandProfile?: string | null;
 };
 
+export type PublicRuntimeReadinessStatus = "ready" | "blocked" | "warning" | "unknown";
+export type PublicRuntimeReadinessCheckStatus = "pass" | "block" | "warn" | "unknown";
+
+export type PublicRuntimeReadinessCheck = {
+  readonly id: string;
+  readonly label: string;
+  readonly status: PublicRuntimeReadinessCheckStatus;
+  readonly detail: string;
+  readonly prerequisite: string | null;
+  readonly nextAction: string | null;
+};
+
+export type PublicRuntimeReadinessLink = {
+  readonly label: string;
+  readonly href: string;
+  readonly kind: "api" | "sse" | "task" | "evidence";
+};
+
+export type PublicRuntimeReadinessSummary = {
+  readonly status: PublicRuntimeReadinessStatus;
+  readonly generatedAt: string;
+  readonly runtimeProvider: string;
+  readonly agentRunnerMode: string;
+  readonly smokeProjectId: string;
+  readonly smokeEnabled: boolean;
+  readonly checks: readonly PublicRuntimeReadinessCheck[];
+  readonly missingPrerequisites: readonly string[];
+  readonly warnings: readonly string[];
+  readonly lastSmoke: {
+    readonly status: "available" | "missing" | "unavailable" | "unknown";
+    readonly projectId: string;
+    readonly summary: string;
+    readonly taskId: string | null;
+    readonly taskTitle: string | null;
+    readonly taskStatus: string | null;
+    readonly sessionId: string | null;
+    readonly sessionStatus: string | null;
+    readonly runtimeProvider: string | null;
+    readonly updatedAt: string | null;
+    readonly evidence: {
+      readonly status: "task-diagnostics" | "not-recorded" | "unavailable";
+      readonly summary: string;
+      readonly command: string;
+    };
+    readonly links: readonly PublicRuntimeReadinessLink[];
+  };
+  readonly links: readonly PublicRuntimeReadinessLink[];
+  readonly redaction: {
+    readonly secrets: "redacted";
+    readonly databasePaths: "omitted";
+  };
+};
+
 export type PublicCommandSummary = {
   readonly id: string;
   readonly projectId: string;
@@ -284,6 +337,8 @@ export function createPublicApiClient(options: PublicApiClientOptions) {
 
   return {
     me: () => request<PublicApiSuccess<{ readonly operator: unknown; readonly authMode: string }>>("/me"),
+    readRuntimeReadiness: () =>
+      request<PublicApiSuccess<{ readonly readiness: PublicRuntimeReadinessSummary }>>("/runtime/readiness"),
     listProjects: () => request<PublicApiSuccess<{ readonly projects: readonly PublicProjectSummary[] }>>("/projects"),
     listTasks: (projectId: string) =>
       request<PublicApiSuccess<{ readonly tasks: readonly PublicTaskSummary[] }>>(`/projects/${encodePath(projectId)}/tasks`),

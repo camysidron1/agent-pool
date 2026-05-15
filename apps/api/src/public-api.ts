@@ -70,6 +70,59 @@ export type PublicSseHub = {
   publish(event: PublicSseEvent): void;
 };
 
+type PublicRuntimeReadinessStatus = "ready" | "blocked" | "warning" | "unknown";
+type PublicRuntimeReadinessCheckStatus = "pass" | "block" | "warn" | "unknown";
+
+type PublicRuntimeReadinessCheck = {
+  readonly id: string;
+  readonly label: string;
+  readonly status: PublicRuntimeReadinessCheckStatus;
+  readonly detail: string;
+  readonly prerequisite: string | null;
+  readonly nextAction: string | null;
+};
+
+type PublicRuntimeReadinessLink = {
+  readonly label: string;
+  readonly href: string;
+  readonly kind: "api" | "sse" | "task" | "evidence";
+};
+
+type PublicRuntimeReadinessSummary = {
+  readonly status: PublicRuntimeReadinessStatus;
+  readonly generatedAt: string;
+  readonly runtimeProvider: RuntimeProviderName;
+  readonly agentRunnerMode: string;
+  readonly smokeProjectId: string;
+  readonly smokeEnabled: boolean;
+  readonly checks: readonly PublicRuntimeReadinessCheck[];
+  readonly missingPrerequisites: readonly string[];
+  readonly warnings: readonly string[];
+  readonly lastSmoke: {
+    readonly status: "available" | "missing" | "unavailable" | "unknown";
+    readonly projectId: string;
+    readonly summary: string;
+    readonly taskId: string | null;
+    readonly taskTitle: string | null;
+    readonly taskStatus: string | null;
+    readonly sessionId: string | null;
+    readonly sessionStatus: string | null;
+    readonly runtimeProvider: string | null;
+    readonly updatedAt: string | null;
+    readonly evidence: {
+      readonly status: "task-diagnostics" | "not-recorded" | "unavailable";
+      readonly summary: string;
+      readonly command: string;
+    };
+    readonly links: readonly PublicRuntimeReadinessLink[];
+  };
+  readonly links: readonly PublicRuntimeReadinessLink[];
+  readonly redaction: {
+    readonly secrets: "redacted";
+    readonly databasePaths: "omitted";
+  };
+};
+
 export function registerPublicApiRoutes(app: Express, options: PublicApiOptions): void {
   const requirePublicOperator = createPublicOperatorMiddleware(options.config);
   const sseHub = options.sseHub ?? createPublicSseHub();
@@ -110,6 +163,13 @@ export function registerPublicApiRoutes(app: Express, options: PublicApiOptions)
       ok: true,
       operator: request.publicOperator,
       authMode: options.config.authMode,
+    });
+  });
+
+  app.get("/api/public/runtime/readiness", requirePublicOperator, (_request, response) => {
+    response.status(200).json({
+      ok: true,
+      readiness: buildPublicRuntimeReadiness(options.config, options.services ?? null),
     });
   });
 
@@ -648,6 +708,338 @@ function requirePublicStorage(options: PublicApiOptions, response: Response): St
   }
 
   return options.storage;
+}
+
+function buildPublicRuntimeReadiness(config: AppConfig, services: PublicApiServices | null): PublicRuntimeReadinessSummary {
+  const checks = buildRuntimeReadinessChecks(config);
+  const missingPrerequisites = checks
+    .filter((check) => check.status === "block" && check.prerequisite)
+    .map((check) => check.prerequisite as string);
+  const warnings = checks.filter((check) => check.status === "warn").map((check) => check.detail);
+  const status = summarizeRuntimeReadinessStatus(checks);
+  const lastSmoke = buildLastSmokeReadiness(config, services);
+
+  return {
+    status,
+    generatedAt: new Date().toISOString(),
+    runtimeProvider: config.controlPlane.runtimeProvider,
+    agentRunnerMode: config.controlPlane.e2b.agentRunnerMode,
+    smokeProjectId: config.controlPlane.smokeProjectId,
+    smokeEnabled: config.controlPlane.smokeEnabled,
+    checks,
+    missingPrerequisites,
+    warnings,
+    lastSmoke,
+    links: [
+      {
+        label: "Smoke project events",
+        href: `/api/public/projects/${encodeURIComponent(config.controlPlane.smokeProjectId)}/events`,
+        kind: "sse",
+      },
+      ...lastSmoke.links,
+    ],
+    redaction: {
+      secrets: "redacted",
+      databasePaths: "omitted",
+    },
+  };
+}
+
+function buildRuntimeReadinessChecks(config: AppConfig): readonly PublicRuntimeReadinessCheck[] {
+  const provider = config.controlPlane.runtimeProvider;
+  const e2b = config.controlPlane.e2b;
+  const checks: PublicRuntimeReadinessCheck[] = [
+    {
+      id: "runtime-provider",
+      label: "Runtime provider",
+      status: provider === "e2b" ? "pass" : provider === "fake" ? "warn" : "unknown",
+      detail:
+        provider === "e2b"
+          ? "E2B is configured as the active runtime provider."
+          : provider === "fake"
+            ? "Fake runtime is active; live E2B sandbox runs will not execute."
+            : `Runtime provider ${provider} does not have public readiness coverage yet.`,
+      prerequisite: provider === "e2b" ? null : "RUNTIME_PROVIDER=e2b",
+      nextAction: provider === "e2b" ? null : "Switch RUNTIME_PROVIDER to e2b before live sandbox testing.",
+    },
+    {
+      id: "compose-smoke",
+      label: "Smoke diagnostics",
+      status: config.controlPlane.smokeEnabled ? "pass" : "warn",
+      detail: config.controlPlane.smokeEnabled
+        ? "Smoke fixtures are enabled for task/session diagnostics."
+        : "Smoke fixtures are disabled, so the operator panel may not find a recent smoke task.",
+      prerequisite: config.controlPlane.smokeEnabled ? null : "COMPOSE_SMOKE_ENABLED=true",
+      nextAction: config.controlPlane.smokeEnabled ? null : "Enable COMPOSE_SMOKE_ENABLED for local readiness diagnostics.",
+    },
+  ];
+
+  if (provider !== "e2b") {
+    return checks;
+  }
+
+  checks.push(
+    {
+      id: "e2b-credential",
+      label: "E2B API key",
+      status: e2b.apiKeyConfigured ? "pass" : "block",
+      detail: e2b.apiKeyConfigured ? `${e2b.apiKeyEnvName} is configured and redacted.` : `${e2b.apiKeyEnvName} is missing.`,
+      prerequisite: e2b.apiKeyConfigured ? null : e2b.apiKeyEnvName,
+      nextAction: e2b.apiKeyConfigured ? null : `Set ${e2b.apiKeyEnvName} in the runtime environment.`,
+    },
+    {
+      id: "e2b-template",
+      label: "E2B template",
+      status: e2b.templateId || e2b.sandboxImageId ? "pass" : "block",
+      detail: e2b.templateId || e2b.sandboxImageId ? "Template or sandbox image id is configured and redacted." : "No E2B template or sandbox image id is configured.",
+      prerequisite: e2b.templateId || e2b.sandboxImageId ? null : "E2B_TEMPLATE_ID or E2B_SANDBOX_IMAGE_ID",
+      nextAction: e2b.templateId || e2b.sandboxImageId ? null : "Build the Agent Pool E2B template and set its id.",
+    },
+    {
+      id: "callback-url",
+      label: "Bridge callback URL",
+      ...summarizeCallbackReadiness(config.bridge.callbackBaseUrl),
+    },
+  );
+
+  if (e2b.agentRunnerMode !== "codex") {
+    checks.push({
+      id: "agent-runner-mode",
+      label: "Agent runner",
+      status: "warn",
+      detail: "E2B is configured for bridge smoke mode instead of the Codex PR runner.",
+      prerequisite: "AGENT_RUNNER_MODE=codex",
+      nextAction: "Set AGENT_RUNNER_MODE=codex for real agent sandbox testing.",
+    });
+    return checks;
+  }
+
+  checks.push(
+    {
+      id: "codex-api-key",
+      label: "Codex API key",
+      status: e2b.codexApiKeyConfigured ? "pass" : "block",
+      detail: e2b.codexApiKeyConfigured ? `${e2b.codexApiKeyEnvName} is configured and redacted.` : `${e2b.codexApiKeyEnvName} is missing.`,
+      prerequisite: e2b.codexApiKeyConfigured ? null : e2b.codexApiKeyEnvName,
+      nextAction: e2b.codexApiKeyConfigured ? null : `Set ${e2b.codexApiKeyEnvName} for non-interactive Codex execution.`,
+    },
+    {
+      id: "github-app-broker",
+      label: "GitHub App broker",
+      status: config.githubApp.configured ? "pass" : "block",
+      detail: config.githubApp.configured
+        ? "GitHub App installation token broker is configured."
+        : "GitHub App installation token broker is not fully configured.",
+      prerequisite: config.githubApp.configured ? null : "GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY/GITHUB_APP_INSTALLATION_ID",
+      nextAction: config.githubApp.configured
+        ? null
+        : "Set GitHub App id, private key, and installation id so only short-lived repository tokens enter the sandbox.",
+    },
+    {
+      id: "egress-mode",
+      label: "Egress mode",
+      status: e2b.localAllowDirectEgress ? "warn" : e2b.egressProxyUrl && e2b.egressProxyAllowOut.length > 0 ? "pass" : "block",
+      detail: e2b.localAllowDirectEgress
+        ? "Direct egress override is enabled for test mode."
+        : e2b.egressProxyUrl && e2b.egressProxyAllowOut.length > 0
+          ? "Proxy-only egress is configured; proxy URL and allow-out targets are redacted."
+          : "Proxy-only egress is not fully configured.",
+      prerequisite: e2b.localAllowDirectEgress || (e2b.egressProxyUrl && e2b.egressProxyAllowOut.length > 0)
+        ? null
+        : "EGRESS_PROXY_URL and EGRESS_PROXY_ALLOW_OUT",
+      nextAction: e2b.localAllowDirectEgress || (e2b.egressProxyUrl && e2b.egressProxyAllowOut.length > 0)
+        ? null
+        : "Set the egress gateway proxy URL and static allow-out target before live Codex runs.",
+    },
+    {
+      id: "allowed-egress-domains",
+      label: "Allowed egress domains",
+      status: e2b.allowedEgressDomains.length > 0 ? "pass" : "block",
+      detail: e2b.allowedEgressDomains.length > 0
+        ? `${e2b.allowedEgressDomains.length} global egress domain(s) are configured.`
+        : "No global egress domain allowlist is configured.",
+      prerequisite: e2b.allowedEgressDomains.length > 0 ? null : "AGENT_POOL_ALLOWED_EGRESS_DOMAINS",
+      nextAction: e2b.allowedEgressDomains.length > 0
+        ? null
+        : "Set AGENT_POOL_ALLOWED_EGRESS_DOMAINS before accepting task-declared runtime source domains.",
+    },
+  );
+
+  return checks;
+}
+
+function summarizeCallbackReadiness(
+  callbackBaseUrl: string,
+): Pick<PublicRuntimeReadinessCheck, "status" | "detail" | "prerequisite" | "nextAction"> {
+  try {
+    const url = new URL(callbackBaseUrl);
+    const isLocalHost = ["127.0.0.1", "localhost", "::1"].includes(url.hostname);
+    if (isLocalHost) {
+      return {
+        status: "block",
+        detail: "Bridge callback URL is local-only; E2B cannot call it without a public tunnel.",
+        prerequisite: "BRIDGE_CALLBACK_BASE_URL",
+        nextAction: "Point BRIDGE_CALLBACK_BASE_URL at the public Caddy or tunnel URL.",
+      };
+    }
+    if (url.protocol !== "https:") {
+      return {
+        status: "warn",
+        detail: "Bridge callback URL is not HTTPS.",
+        prerequisite: "BRIDGE_CALLBACK_BASE_URL=https://...",
+        nextAction: "Use an HTTPS callback URL for live E2B sessions.",
+      };
+    }
+
+    return {
+      status: "pass",
+      detail: "Bridge callback URL is public HTTPS.",
+      prerequisite: null,
+      nextAction: null,
+    };
+  } catch {
+    return {
+      status: "block",
+      detail: "Bridge callback URL is invalid.",
+      prerequisite: "BRIDGE_CALLBACK_BASE_URL",
+      nextAction: "Set BRIDGE_CALLBACK_BASE_URL to the public API edge URL.",
+    };
+  }
+}
+
+function summarizeRuntimeReadinessStatus(checks: readonly PublicRuntimeReadinessCheck[]): PublicRuntimeReadinessStatus {
+  if (checks.some((check) => check.status === "block")) return "blocked";
+  if (checks.some((check) => check.status === "warn")) return "warning";
+  if (checks.some((check) => check.status === "unknown")) return "unknown";
+  return "ready";
+}
+
+function buildLastSmokeReadiness(
+  config: AppConfig,
+  services: PublicApiServices | null,
+): PublicRuntimeReadinessSummary["lastSmoke"] {
+  const projectId = config.controlPlane.smokeProjectId;
+  const evidenceCommand = "bun run smoke:e2b -- --evidence --agent-runner-mode codex";
+
+  if (!services) {
+    return {
+      status: "unavailable",
+      projectId,
+      summary: "Database-backed public services are unavailable, so smoke task diagnostics cannot be read.",
+      taskId: null,
+      taskTitle: null,
+      taskStatus: null,
+      sessionId: null,
+      sessionStatus: null,
+      runtimeProvider: null,
+      updatedAt: null,
+      evidence: {
+        status: "unavailable",
+        summary: "Evidence status is unavailable without public services.",
+        command: evidenceCommand,
+      },
+      links: [],
+    };
+  }
+
+  const project = services.listProjects().find((candidate) => candidate.id === projectId);
+  if (!project) {
+    return {
+      status: "missing",
+      projectId,
+      summary: `Smoke project ${projectId} has not been created yet.`,
+      taskId: null,
+      taskTitle: null,
+      taskStatus: null,
+      sessionId: null,
+      sessionStatus: null,
+      runtimeProvider: null,
+      updatedAt: null,
+      evidence: {
+        status: "not-recorded",
+        summary: "No smoke evidence task is available yet.",
+        command: evidenceCommand,
+      },
+      links: [
+        {
+          label: "Smoke project events",
+          href: `/api/public/projects/${encodeURIComponent(projectId)}/events`,
+          kind: "sse",
+        },
+      ],
+    };
+  }
+
+  const latestTask = [...services.listProjectTasks({ projectId })].sort(compareTasksByUpdatedAt).at(0) ?? null;
+  if (!latestTask) {
+    return {
+      status: "missing",
+      projectId,
+      summary: `Smoke project ${project.name} has no tasks yet.`,
+      taskId: null,
+      taskTitle: null,
+      taskStatus: null,
+      sessionId: null,
+      sessionStatus: null,
+      runtimeProvider: null,
+      updatedAt: project.updatedAt,
+      evidence: {
+        status: "not-recorded",
+        summary: "No smoke evidence task is available yet.",
+        command: evidenceCommand,
+      },
+      links: [
+        {
+          label: "Smoke project events",
+          href: `/api/public/projects/${encodeURIComponent(projectId)}/events`,
+          kind: "sse",
+        },
+      ],
+    };
+  }
+
+  return {
+    status: "available",
+    projectId,
+    summary: `Latest smoke task is ${latestTask.status}.`,
+    taskId: latestTask.id,
+    taskTitle: latestTask.title,
+    taskStatus: latestTask.status,
+    sessionId: latestTask.latestSession?.id ?? null,
+    sessionStatus: latestTask.latestSession?.status ?? null,
+    runtimeProvider: latestTask.latestSession?.runtimeProvider ?? null,
+    updatedAt: latestTask.updatedAt,
+    evidence: {
+      status: "task-diagnostics",
+      summary: "Use the task detail events, logs, and security timeline as the current smoke evidence source.",
+      command: evidenceCommand,
+    },
+    links: [
+      {
+        label: "Latest smoke task",
+        href: `/api/public/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(latestTask.id)}`,
+        kind: "task",
+      },
+      {
+        label: "Smoke project events",
+        href: `/api/public/projects/${encodeURIComponent(projectId)}/events`,
+        kind: "sse",
+      },
+    ],
+  };
+}
+
+function compareTasksByUpdatedAt(
+  left: { readonly updatedAt: string; readonly createdAt: string; readonly displayId: number },
+  right: { readonly updatedAt: string; readonly createdAt: string; readonly displayId: number },
+): number {
+  const updatedDelta = Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+  if (updatedDelta !== 0) return updatedDelta;
+
+  const createdDelta = Date.parse(right.createdAt) - Date.parse(left.createdAt);
+  if (createdDelta !== 0) return createdDelta;
+
+  return right.displayId - left.displayId;
 }
 
 function respondSseStream(

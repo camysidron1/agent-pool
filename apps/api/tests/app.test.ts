@@ -484,6 +484,126 @@ describe("API service skeleton", () => {
     }
   });
 
+  test("public runtime readiness requires operator auth and redacts diagnostics", async () => {
+    const { baseUrl, config, close } = await startTestApi();
+
+    try {
+      const missing = await fetch(`${baseUrl}/api/public/runtime/readiness`);
+      const ok = await fetch(`${baseUrl}/api/public/runtime/readiness`, {
+        headers: publicHeaders(config),
+      });
+      const body = await ok.json();
+      const serialized = JSON.stringify(body);
+
+      expect(missing.status).toBe(401);
+      expect(ok.status).toBe(200);
+      expect(body).toMatchObject({
+        ok: true,
+        readiness: {
+          status: "warning",
+          runtimeProvider: "fake",
+          agentRunnerMode: "bridge-smoke",
+          smokeProjectId: "compose-smoke",
+          redaction: { secrets: "redacted", databasePaths: "omitted" },
+        },
+      });
+      expect(serialized).not.toContain(config.serviceToken.token);
+      expect(serialized).not.toContain("~/.agent-pool/data/agent-pool.db");
+      expect(serialized).not.toContain(".agent-pool/data/agent-pool.db");
+      expect(serialized).not.toContain(API_DATABASE_PATH_ENV);
+    } finally {
+      await close();
+    }
+  });
+
+  test("public runtime readiness surfaces E2B Codex blockers without leaking secrets", async () => {
+    const e2bKey = "e2b_test_key_must_not_leak";
+    const codexKey = "sk-test-key-must-not-leak";
+    const proxySecret = "proxy-secret-must-not-leak";
+    const { baseUrl, config, close } = await startTestApi({
+      env: {
+        RUNTIME_PROVIDER: "e2b",
+        AGENT_RUNNER_MODE: "codex",
+        E2B_API_KEY: e2bKey,
+        E2B_TEMPLATE_ID: "template_agent_pool",
+        CODEX_API_KEY: codexKey,
+        E2B_ALLOWED_SECRET_ENV_NAMES: "CODEX_API_KEY,GITHUB_TOKEN",
+        EGRESS_PROXY_URL: `http://proxy-user:${proxySecret}@egress.local:3002`,
+        EGRESS_PROXY_ALLOW_OUT: "10.0.0.2/32",
+        AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+        BRIDGE_CALLBACK_BASE_URL: "https://console.agentpool.app",
+      },
+    });
+
+    try {
+      const ok = await fetch(`${baseUrl}/api/public/runtime/readiness`, {
+        headers: publicHeaders(config),
+      });
+      const body = await ok.json();
+      const serialized = JSON.stringify(body);
+
+      expect(ok.status).toBe(200);
+      expect(body.readiness.status).toBe("blocked");
+      expect(body.readiness.missingPrerequisites).toContain("GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY/GITHUB_APP_INSTALLATION_ID");
+      expect(body.readiness.checks).toContainEqual(
+        expect.objectContaining({
+          id: "github-app-broker",
+          status: "block",
+        }),
+      );
+      expect(serialized).not.toContain(e2bKey);
+      expect(serialized).not.toContain(codexKey);
+      expect(serialized).not.toContain(proxySecret);
+      expect(serialized).not.toContain("template_agent_pool");
+      expect(serialized).not.toContain("~/.agent-pool/data/agent-pool.db");
+      expect(serialized).not.toContain(API_DATABASE_PATH_ENV);
+    } finally {
+      await close();
+    }
+  });
+
+  test("public runtime readiness links to the latest smoke task diagnostics when present", async () => {
+    const { baseUrl, config, database, close } = await startTestApi();
+
+    try {
+      const services = createCanonicalStateServices(database.sqlite);
+      const project = services.createProject({
+        id: config.controlPlane.smokeProjectId,
+        slug: config.controlPlane.smokeProjectId,
+        name: "Compose Smoke",
+      });
+      const task = services.createTask({
+        id: "task_runtime_readiness_smoke",
+        projectId: project.id,
+        title: "Runtime readiness smoke",
+        description: "Recorded smoke task for operator diagnostics.",
+      }).task;
+
+      const ok = await fetch(`${baseUrl}/api/public/runtime/readiness`, {
+        headers: publicHeaders(config),
+      });
+      const body = await ok.json();
+
+      expect(ok.status).toBe(200);
+      expect(body.readiness.lastSmoke).toMatchObject({
+        status: "available",
+        projectId: config.controlPlane.smokeProjectId,
+        taskId: task.id,
+        taskTitle: "Runtime readiness smoke",
+        taskStatus: "queued",
+        evidence: { status: "task-diagnostics" },
+      });
+      expect(body.readiness.lastSmoke.links).toContainEqual(
+        expect.objectContaining({
+          label: "Latest smoke task",
+          href: `/api/public/projects/${config.controlPlane.smokeProjectId}/tasks/${task.id}`,
+        }),
+      );
+    } finally {
+      await close();
+    }
+  });
+
   test("local public API requires a signed operator session cookie", async () => {
     const { baseUrl, config, close } = await startTestApi({
       env: {

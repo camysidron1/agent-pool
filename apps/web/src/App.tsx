@@ -18,6 +18,7 @@ import {
   type PublicArtifactSummary,
   type PublicNoteSummary,
   type PublicProjectSummary,
+  type PublicRuntimeReadinessSummary,
   type PublicRuntimeSource,
   type PublicSessionSummary,
   type PublicTaskDetail,
@@ -47,6 +48,7 @@ import {
   selectActiveSession,
   type BoardColumnId,
 } from "./board";
+import { summarizeRuntimeReadiness } from "./readiness";
 import { shouldRefreshBoardForEvent, subscribeProjectEvents } from "./sse";
 import {
   buildSteeringInterruptPayload,
@@ -96,6 +98,9 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
   const [authError, setAuthError] = useState<string | null>(null);
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [projects, setProjects] = useState<readonly PublicProjectSummary[]>([]);
+  const [runtimeReadiness, setRuntimeReadiness] = useState<PublicRuntimeReadinessSummary | null>(null);
+  const [runtimeReadinessLoadState, setRuntimeReadinessLoadState] = useState<LoadState>("idle");
+  const [runtimeReadinessError, setRuntimeReadinessError] = useState<string | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(() => readStoredSelectedProjectId(storage));
   const [projectLoadState, setProjectLoadState] = useState<LoadState>("idle");
   const [projectError, setProjectError] = useState<string | null>(null);
@@ -170,6 +175,37 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
       cancelled = true;
     };
   }, [api, storage]);
+
+  useEffect(() => {
+    if (!api) {
+      setRuntimeReadiness(null);
+      setRuntimeReadinessLoadState("idle");
+      setRuntimeReadinessError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setRuntimeReadinessLoadState("loading");
+    setRuntimeReadinessError(null);
+
+    api
+      .readRuntimeReadiness()
+      .then((response) => {
+        if (cancelled) return;
+        setRuntimeReadiness(response.readiness);
+        setRuntimeReadinessLoadState("ready");
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setRuntimeReadiness(null);
+        setRuntimeReadinessError(formatApiError(error));
+        setRuntimeReadinessLoadState("error");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
 
   useEffect(() => {
     if (!api || !selectedProjectId) {
@@ -689,6 +725,12 @@ export function App({ apiBaseUrl, storage = readBrowserStorage() }: AppProps) {
         </div>
       </header>
 
+      <RuntimeReadinessPanel
+        readiness={runtimeReadiness}
+        loadState={runtimeReadinessLoadState}
+        error={runtimeReadinessError}
+      />
+
       <section className="workspace-band" aria-label="Project board">
         <div className="board-toolbar">
           <label htmlFor="project-selector">Project</label>
@@ -929,6 +971,73 @@ function BoardNotice({ title, body, tone = "neutral" }: { readonly title: string
       <h2>{title}</h2>
       <p>{body}</p>
     </div>
+  );
+}
+
+function RuntimeReadinessPanel({
+  readiness,
+  loadState,
+  error,
+}: {
+  readonly readiness: PublicRuntimeReadinessSummary | null;
+  readonly loadState: LoadState;
+  readonly error: string | null;
+}) {
+  const view = summarizeRuntimeReadiness(readiness);
+  const title = loadState === "loading" ? "Checking runtime readiness" : view.title;
+  const body = error ?? view.body;
+  const smoke = readiness?.lastSmoke ?? null;
+
+  return (
+    <section className={`runtime-readiness runtime-readiness-${view.tone}`} aria-label="Runtime readiness" aria-live="polite">
+      <div className="runtime-readiness-heading">
+        <span className={view.markerClassName} aria-hidden="true" />
+        <div>
+          <p className="eyebrow">Runtime readiness</p>
+          <h2>{title}</h2>
+          <p>{body}</p>
+        </div>
+      </div>
+      <div className="runtime-readiness-status">
+        <span>{loadState === "loading" ? "Checking" : view.statusLabel}</span>
+      </div>
+      <dl className="runtime-readiness-smoke" aria-label="Last smoke and evidence summary">
+        <div>
+          <dt>Smoke</dt>
+          <dd>{smoke?.summary ?? "No smoke summary loaded."}</dd>
+        </div>
+        <div>
+          <dt>Evidence</dt>
+          <dd>{smoke?.evidence.summary ?? "No evidence summary loaded."}</dd>
+        </div>
+      </dl>
+      {view.missingPrerequisites.length > 0 ? (
+        <div className="runtime-readiness-prereqs" aria-label="Missing prerequisites">
+          {view.missingPrerequisites.map((prerequisite) => (
+            <span key={prerequisite}>{prerequisite}</span>
+          ))}
+        </div>
+      ) : null}
+      {view.visibleChecks.length > 0 ? (
+        <ul className="runtime-readiness-checks" aria-label="Runtime readiness checks">
+          {view.visibleChecks.map((check) => (
+            <li key={check.id} className={`runtime-readiness-check runtime-readiness-check-${check.status}`}>
+              <strong>{check.label}</strong>
+              <span>{check.detail}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {view.links.length > 0 ? (
+        <nav className="runtime-readiness-links" aria-label="Runtime diagnostics links">
+          {view.links.map((link) => (
+            <a key={`${link.kind}:${link.href}`} href={link.href}>
+              {link.label}
+            </a>
+          ))}
+        </nav>
+      ) : null}
+    </section>
   );
 }
 
