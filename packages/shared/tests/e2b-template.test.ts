@@ -3,6 +3,11 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import {
+  AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST,
+  AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST,
+} from "@agent-pool/runtime";
+
 import { createE2BTemplateBuildPlan } from "../../../deploy/e2b/build-template";
 import { loadLocalEnv } from "../../../deploy/local-env";
 
@@ -22,11 +27,34 @@ describe("E2B template assets", () => {
 
     expect(templateSource).toContain('.fromBunImage(AGENT_POOL_E2B_BUN_VERSION)');
     expect(templateSource).toContain("apt-get install -y --no-install-recommends git ca-certificates");
+    expect(templateSource).toContain("/agent-pool/e2b-template-manifest.json");
     expect(templateSource).toContain('copy("deploy/e2b/github-token-askpass", "/agent-pool/bin/github-token-askpass"');
     expect(templateSource).toContain('copy("packages/session-bridge/src", "/agent-pool/session-bridge/src")');
     expect(askpassSource).toContain('AGENT_POOL_GITHUB_TOKEN_ENV:-GITHUB_TOKEN');
     expect(askpassSource).toContain("x-access-token");
     expect(`${templateSource}\n${askpassSource}`).not.toMatch(/ghp_|github_pat_|e2b_[A-Za-z0-9_-]{20,}|BEGIN (RSA|OPENSSH) PRIVATE KEY/);
+  });
+
+  test("exposes a versioned compatibility manifest with a stable digest", () => {
+    const manifest = JSON.parse(JSON.stringify(AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST)) as typeof AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST;
+    expect(manifest.schemaVersion).toBe(1);
+    expect(manifest.templateName).toBe("agent-pool-bun-git");
+    expect(manifest.bunVersion).toBe("1.2.23");
+    expect(manifest.bridgeContractVersion).toBe("session-bridge-v1");
+    expect(manifest.codexPackage).toBe("@openai/codex@0.130.0");
+    expect(manifest.agentRunnerModes).toEqual(["bridge-smoke", "codex"]);
+    expect(manifest.commandProfiles).toEqual(["agent-pool-bun-pr"]);
+    expect(manifest.requiredPaths).toEqual(
+      expect.arrayContaining([
+        "/agent-pool/bin/github-token-askpass",
+        "/agent-pool/session-bridge/src/sandbox-entry.ts",
+        "/agent-pool/e2b-template-manifest.json",
+      ]),
+    );
+    expect(manifest.requiredTools.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining(["bun", "git", "gh", "jq", "rg", "bubblewrap", "npm", "codex", "ca-certificates"]),
+    );
+    expect(AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
 
   test("build plan validates inputs without requiring an E2B API key or provider call", () => {
@@ -36,6 +64,8 @@ describe("E2B template assets", () => {
       memoryMB: 1024,
       apiKeyConfigured: false,
       dryRun: true,
+      compatibilityDigest: AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST,
+      manifest: AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST,
     });
     expect(
       createE2BTemplateBuildPlan(["--name", "agent-pool-bun-git-dev", "--cpu-count", "2", "--memory-mb", "2048"], {
@@ -47,6 +77,8 @@ describe("E2B template assets", () => {
       memoryMB: 2048,
       apiKeyConfigured: true,
       dryRun: false,
+      compatibilityDigest: AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST,
+      manifest: AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST,
     });
     expect(() => createE2BTemplateBuildPlan(["--cpu-count", "0"], {})).toThrow("--cpu-count must be a positive integer");
   });
@@ -66,6 +98,8 @@ describe("E2B template assets", () => {
       memoryMB: 2048,
       apiKeyConfigured: true,
       dryRun: true,
+      compatibilityDigest: AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST,
+      manifest: AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST,
     });
     expect(JSON.stringify(plan)).not.toContain("e2b-secret");
   });

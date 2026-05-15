@@ -10,6 +10,7 @@ import {
   readPrometheusVerification,
   runComposeSmokeCli,
 } from "../../../deploy/compose/smoke-compose";
+import { AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST } from "@agent-pool/runtime";
 import { createE2BReadinessReport, createE2BSmokePlan, parseE2BSmokeArgs, runE2BSmokeCli } from "../../../deploy/compose/e2b-smoke";
 import { loadLocalEnv, parseLocalEnvFile, type EnvSource } from "../../../deploy/local-env";
 
@@ -561,6 +562,7 @@ describe("compose smoke runner", () => {
         AUTH_MODE: "test",
         E2B_API_KEY: "e2b-secret",
         E2B_TEMPLATE_ID: "template-1",
+        E2B_TEMPLATE_COMPATIBILITY_MANIFEST_JSON: JSON.stringify(AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST),
         E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN,CODEX_API_KEY",
         E2B_LOCAL_ALLOW_DIRECT_EGRESS: "true",
         CODEX_API_KEY: "codex-secret",
@@ -715,6 +717,7 @@ describe("compose smoke runner", () => {
         BRIDGE_CALLBACK_BASE_URL: "https://callback.agentpool.app",
         E2B_API_KEY: "e2b-secret",
         E2B_TEMPLATE_ID: "template-1",
+        E2B_TEMPLATE_COMPATIBILITY_MANIFEST_JSON: JSON.stringify(AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST),
         E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN,CODEX_API_KEY",
         CODEX_API_KEY: "codex-secret",
         GITHUB_APP_ID: "12345",
@@ -750,6 +753,7 @@ describe("compose smoke runner", () => {
         BRIDGE_CALLBACK_BASE_URL: "https://callback.agentpool.app",
         E2B_API_KEY: "e2b-secret",
         E2B_TEMPLATE_ID: "template-1",
+        E2B_TEMPLATE_COMPATIBILITY_MANIFEST_JSON: JSON.stringify(AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST),
         E2B_LOCAL_ALLOW_DIRECT_EGRESS: "true",
         CODEX_API_KEY: "codex-secret",
         GITHUB_APP_ID: "12345",

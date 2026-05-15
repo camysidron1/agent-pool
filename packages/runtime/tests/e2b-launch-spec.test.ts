@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST,
+  AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST,
   buildE2BLaunchSpec,
   buildSandboxBridgeStartupPlan,
   redactE2BLaunchSpec,
+  verifyE2BTemplateCompatibility,
   type E2BRuntimeProviderConfig,
   type RuntimeBridgeSessionOptions,
 } from "../src";
@@ -95,6 +98,11 @@ describe("E2B launch spec", () => {
         allowPublicTraffic: false,
         proxyUrl: null,
         noProxy: null,
+      },
+      templateCompatibility: {
+        status: "missing",
+        expectedDigest: AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST,
+        actualDigest: null,
       },
     });
     expect(JSON.stringify(spec)).not.toContain("UNRELATED_SECRET");
@@ -387,5 +395,50 @@ describe("E2B launch spec", () => {
         { config: { ...config, workingDirectory: "/Users/camysidron/.agent-pool/data/agent-pool.db" } },
       ),
     ).toThrow("host paths or the TUI database");
+  });
+
+  test("verifies compatible E2B template manifests and digests", () => {
+    expect(verifyE2BTemplateCompatibility({ actualManifest: AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST })).toMatchObject({
+      status: "compatible",
+      expectedDigest: AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST,
+      actualDigest: AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST,
+      issues: [],
+    });
+    expect(verifyE2BTemplateCompatibility({ actualDigest: AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST })).toMatchObject({
+      status: "compatible",
+      expectedDigest: AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST,
+      actualDigest: AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST,
+      actual: null,
+      issues: [],
+    });
+  });
+
+  test("reports missing and incompatible E2B template metadata before launch", () => {
+    expect(verifyE2BTemplateCompatibility()).toMatchObject({
+      status: "missing",
+      issues: [expect.objectContaining({ id: "manifest-missing" })],
+    });
+    expect(
+      verifyE2BTemplateCompatibility({
+        actualManifest: {
+          ...AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST,
+          bridgeContractVersion: "session-bridge-v0",
+        },
+      }),
+    ).toMatchObject({
+      status: "incompatible",
+      issues: expect.arrayContaining([expect.objectContaining({ id: "bridge-contract-mismatch" })]),
+    });
+    expect(
+      verifyE2BTemplateCompatibility({
+        actualManifest: {
+          ...AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST,
+          requiredTools: AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST.requiredTools.filter((tool) => tool.name !== "gh"),
+        },
+      }),
+    ).toMatchObject({
+      status: "incompatible",
+      issues: expect.arrayContaining([expect.objectContaining({ id: "required-tools-missing" })]),
+    });
   });
 });

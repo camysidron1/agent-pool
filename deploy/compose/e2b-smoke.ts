@@ -1,5 +1,6 @@
 import { loadConfig, type EnvSource } from "@agent-pool/config";
 import {
+  AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST,
   buildE2BLaunchSpec,
   buildGitHubBootstrapPlan,
   buildSandboxBridgeStartupPlan,
@@ -186,6 +187,8 @@ export function createE2BSmokePlan(input: Partial<ParsedE2BSmokeArgs> & { readon
     apiKeyConfigured: true,
     githubTokenConfigured: true,
     templateId: e2b.templateId ?? DRY_RUN_TEMPLATE_ID,
+    templateCompatibilityManifest: readTemplateCompatibilityManifest(env),
+    templateCompatibilityDigest: env.E2B_TEMPLATE_COMPATIBILITY_DIGEST?.trim() || null,
     allowedSecretEnvNames,
     ...(agentRunnerMode === "codex" && !e2b.localAllowDirectEgress && (!e2b.egressProxyUrl || e2b.egressProxyAllowOut.length === 0)
       ? {
@@ -343,6 +346,19 @@ function buildReadinessChecks(plan: E2BSmokePlan, agentRunnerMode: "bridge-smoke
       nextAction: missingSettingSet.has("E2B_TEMPLATE_ID or E2B_SANDBOX_IMAGE_ID")
         ? "Set E2B_TEMPLATE_ID or E2B_SANDBOX_IMAGE_ID after building the Agent Pool template."
         : null,
+    },
+    {
+      id: "e2b-template-compatibility",
+      label: "E2B template compatibility",
+      status: plan.launchSpec.templateCompatibility.status === "compatible" ? "pass" : "block",
+      detail:
+        plan.launchSpec.templateCompatibility.status === "compatible"
+          ? `Template compatibility digest matches ${AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST}.`
+          : plan.launchSpec.templateCompatibility.issues[0]?.detail ?? "Template compatibility metadata is missing or incompatible.",
+      nextAction:
+        plan.launchSpec.templateCompatibility.status === "compatible"
+          ? null
+          : "Run e2b:template:build -- --dry-run, rebuild the template if needed, and set E2B_TEMPLATE_COMPATIBILITY_DIGEST.",
     },
     {
       id: "callback-url",
@@ -652,6 +668,16 @@ function isLocalCallbackUrl(value: string): boolean {
 
 function isValidGithubRepositoryUrl(value: string): boolean {
   return /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(value);
+}
+
+function readTemplateCompatibilityManifest(env: EnvSource): unknown {
+  const raw = env.E2B_TEMPLATE_COMPATIBILITY_MANIFEST_JSON?.trim();
+  if (!raw) return undefined;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
 }
 
 async function seedE2BSmokeFixture(plan: E2BSmokePlan, serviceToken: string, fetchImpl: typeof fetch): Promise<unknown> {

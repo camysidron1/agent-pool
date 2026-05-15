@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, normalize, relative } from "node:path";
@@ -121,6 +122,8 @@ export type E2BRuntimeProviderConfig = {
   readonly apiKeyConfigured: boolean;
   readonly templateId?: string | null;
   readonly sandboxImageId?: string | null;
+  readonly templateCompatibilityManifest?: unknown;
+  readonly templateCompatibilityDigest?: string | null;
   readonly workingDirectory?: string;
   readonly startupTimeoutMs?: number;
   readonly cleanupTimeoutMs?: number;
@@ -140,6 +143,71 @@ export type E2BRuntimeProviderConfig = {
   readonly localAllowDirectEgress?: boolean;
   readonly allowedEgressDomains?: readonly string[];
 };
+
+export type E2BTemplateCompatibilityTool = {
+  readonly name: string;
+  readonly version?: string;
+  readonly purpose: string;
+};
+
+export type E2BTemplateCompatibilityManifest = {
+  readonly schemaVersion: 1;
+  readonly templateName: string;
+  readonly templateVersion: string;
+  readonly bunVersion: string;
+  readonly bridgeContractVersion: string;
+  readonly codexPackage: string;
+  readonly agentRunnerModes: readonly ("bridge-smoke" | "codex")[];
+  readonly commandProfiles: readonly string[];
+  readonly requiredTools: readonly E2BTemplateCompatibilityTool[];
+  readonly requiredPaths: readonly string[];
+};
+
+export type E2BTemplateCompatibilityIssue = {
+  readonly id: string;
+  readonly severity: "block";
+  readonly detail: string;
+};
+
+export type E2BTemplateCompatibilityReport = {
+  readonly status: "compatible" | "missing" | "incompatible";
+  readonly expectedDigest: string;
+  readonly actualDigest: string | null;
+  readonly expected: E2BTemplateCompatibilityManifest;
+  readonly actual: E2BTemplateCompatibilityManifest | null;
+  readonly issues: readonly E2BTemplateCompatibilityIssue[];
+};
+
+export const AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST = {
+  schemaVersion: 1,
+  templateName: "agent-pool-bun-git",
+  templateVersion: "2026-05-15.1",
+  bunVersion: "1.2.23",
+  bridgeContractVersion: "session-bridge-v1",
+  codexPackage: "@openai/codex@0.130.0",
+  agentRunnerModes: ["bridge-smoke", "codex"],
+  commandProfiles: ["agent-pool-bun-pr"],
+  requiredTools: [
+    { name: "bun", version: "1.2.23", purpose: "workspace package manager and session bridge runtime" },
+    { name: "git", purpose: "repository clone, branch, commit, and push operations" },
+    { name: "gh", purpose: "pull request creation and inspection through brokered GitHub App tokens" },
+    { name: "jq", purpose: "structured JSON inspection in smoke diagnostics" },
+    { name: "rg", purpose: "fast repository inspection" },
+    { name: "bubblewrap", purpose: "Codex workspace sandbox defense in depth" },
+    { name: "npm", purpose: "pinned Codex package installation during template build" },
+    { name: "codex", version: "@openai/codex@0.130.0", purpose: "non-interactive Codex runner" },
+    { name: "ca-certificates", purpose: "TLS trust store for GitHub, registry, gateway, and API callbacks" },
+  ],
+  requiredPaths: [
+    "/agent-pool/bin/github-token-askpass",
+    "/agent-pool/session-bridge/src/sandbox-entry.ts",
+    "/agent-pool/e2b-template-manifest.json",
+  ],
+} as const satisfies E2BTemplateCompatibilityManifest;
+
+export const AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST = createE2BTemplateCompatibilityDigest(
+  AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST,
+);
 
 export type E2BSandboxCreateInput = {
   readonly launchSpec: E2BLaunchSpec;
@@ -234,6 +302,7 @@ export type E2BLaunchSpec = {
     readonly proxyUrl: string | null;
     readonly noProxy: string | null;
   };
+  readonly templateCompatibility: E2BTemplateCompatibilityReport;
 };
 
 export type RuntimeTaskSourceMetadata = {
@@ -644,6 +713,10 @@ export function buildE2BLaunchSpec(request: RuntimeSessionRequest, options: E2BR
   const runtimeSource = readRuntimeTaskSource(request.task);
   const branchName = runtimeSource ? createTaskBranchName(runtimeSource.taskBranchPrefix, request.taskId) : null;
   const githubTokenEnvName = sanitizeEnvName(config.githubTokenEnvName ?? "GITHUB_TOKEN");
+  const templateCompatibility = verifyE2BTemplateCompatibility({
+    actualManifest: config.templateCompatibilityManifest,
+    actualDigest: config.templateCompatibilityDigest,
+  });
 
   if (runnerMode === "codex") {
     if (!env[codexApiKeyEnvName]?.trim()) {
@@ -775,6 +848,7 @@ export function buildE2BLaunchSpec(request: RuntimeSessionRequest, options: E2BR
       proxyUrl: sessionProxyUrl,
       noProxy: egressNoProxy,
     },
+    templateCompatibility,
   };
 }
 
@@ -796,6 +870,133 @@ export function redactE2BLaunchSpec(spec: E2BLaunchSpec): RedactedE2BLaunchSpec 
       ...spec.network,
       proxyUrl: spec.network.proxyUrl ? "[REDACTED]" : null,
     },
+  };
+}
+
+export function createE2BTemplateCompatibilityDigest(manifest: E2BTemplateCompatibilityManifest): string {
+  return `sha256:${createHash("sha256").update(stableJson(manifest)).digest("hex")}`;
+}
+
+export function verifyE2BTemplateCompatibility(input: {
+  readonly actualManifest?: unknown;
+  readonly actualDigest?: string | null;
+} = {}): E2BTemplateCompatibilityReport {
+  const expected = AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST;
+  const expectedDigest = AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST;
+  const actualManifestResult = readE2BTemplateCompatibilityManifest(input.actualManifest);
+  const rawDigest = input.actualDigest?.trim() || null;
+  const actualDigest = actualManifestResult.manifest
+    ? createE2BTemplateCompatibilityDigest(actualManifestResult.manifest)
+    : rawDigest;
+  const issues: E2BTemplateCompatibilityIssue[] = [];
+
+  if (actualManifestResult.error) {
+    issues.push({
+      id: "manifest-invalid",
+      severity: "block",
+      detail: actualManifestResult.error,
+    });
+  }
+
+  if (!actualManifestResult.manifest && !rawDigest && !actualManifestResult.error) {
+    issues.push({
+      id: "manifest-missing",
+      severity: "block",
+      detail: "E2B template compatibility manifest or digest is missing.",
+    });
+  }
+
+  if (rawDigest && !/^sha256:[a-f0-9]{64}$/.test(rawDigest)) {
+    issues.push({
+      id: "digest-invalid",
+      severity: "block",
+      detail: "E2B template compatibility digest must be a sha256 digest.",
+    });
+  }
+
+  if (actualManifestResult.manifest) {
+    const actual = actualManifestResult.manifest;
+    if (actual.schemaVersion !== expected.schemaVersion) {
+      issues.push({
+        id: "schema-version-mismatch",
+        severity: "block",
+        detail: `E2B template manifest schema ${actual.schemaVersion} does not match expected ${expected.schemaVersion}.`,
+      });
+    }
+    if (actual.bridgeContractVersion !== expected.bridgeContractVersion) {
+      issues.push({
+        id: "bridge-contract-mismatch",
+        severity: "block",
+        detail: `E2B template bridge contract ${actual.bridgeContractVersion} does not match expected ${expected.bridgeContractVersion}.`,
+      });
+    }
+    if (actual.bunVersion !== expected.bunVersion) {
+      issues.push({
+        id: "bun-version-mismatch",
+        severity: "block",
+        detail: `E2B template Bun ${actual.bunVersion} does not match expected ${expected.bunVersion}.`,
+      });
+    }
+    if (actual.codexPackage !== expected.codexPackage) {
+      issues.push({
+        id: "codex-package-mismatch",
+        severity: "block",
+        detail: `E2B template Codex package ${actual.codexPackage} does not match expected ${expected.codexPackage}.`,
+      });
+    }
+    for (const mode of expected.agentRunnerModes) {
+      if (!actual.agentRunnerModes.includes(mode)) {
+        issues.push({
+          id: "runner-mode-missing",
+          severity: "block",
+          detail: `E2B template is missing runner mode ${mode}.`,
+        });
+      }
+    }
+    for (const profile of expected.commandProfiles) {
+      if (!actual.commandProfiles.includes(profile)) {
+        issues.push({
+          id: "command-profile-missing",
+          severity: "block",
+          detail: `E2B template is missing command profile ${profile}.`,
+        });
+      }
+    }
+    const actualToolNames = new Set(actual.requiredTools.map((tool) => tool.name));
+    const missingTools = expected.requiredTools.map((tool) => tool.name).filter((name) => !actualToolNames.has(name));
+    if (missingTools.length > 0) {
+      issues.push({
+        id: "required-tools-missing",
+        severity: "block",
+        detail: `E2B template is missing required tools: ${missingTools.join(", ")}.`,
+      });
+    }
+    const actualPaths = new Set(actual.requiredPaths);
+    const missingPaths = expected.requiredPaths.filter((path) => !actualPaths.has(path));
+    if (missingPaths.length > 0) {
+      issues.push({
+        id: "required-paths-missing",
+        severity: "block",
+        detail: `E2B template is missing required paths: ${missingPaths.join(", ")}.`,
+      });
+    }
+  }
+
+  if (actualDigest && actualDigest !== expectedDigest) {
+    issues.push({
+      id: "manifest-digest-mismatch",
+      severity: "block",
+      detail: `E2B template compatibility digest ${actualDigest} does not match expected ${expectedDigest}.`,
+    });
+  }
+
+  return {
+    status: issues.length === 0 ? "compatible" : actualManifestResult.manifest || rawDigest || actualManifestResult.error ? "incompatible" : "missing",
+    expectedDigest,
+    actualDigest,
+    expected,
+    actual: actualManifestResult.manifest,
+    issues,
   };
 }
 
@@ -958,6 +1159,107 @@ function quoteShellArg(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+function stableJson(value: unknown): string {
+  return JSON.stringify(stabilizeJsonValue(value));
+}
+
+function stabilizeJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => stabilizeJsonValue(item));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, stabilizeJsonValue(item)]),
+    );
+  }
+  return value;
+}
+
+function readE2BTemplateCompatibilityManifest(input: unknown): {
+  readonly manifest: E2BTemplateCompatibilityManifest | null;
+  readonly error: string | null;
+} {
+  if (input === undefined || input === null) {
+    return { manifest: null, error: null };
+  }
+  if (typeof input === "string") {
+    try {
+      return readE2BTemplateCompatibilityManifest(JSON.parse(input));
+    } catch {
+      return { manifest: null, error: "E2B template compatibility manifest is not valid JSON." };
+    }
+  }
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { manifest: null, error: "E2B template compatibility manifest must be an object." };
+  }
+
+  const record = input as Readonly<Record<string, unknown>>;
+  const schemaVersion = record.schemaVersion;
+  const templateName = readStringField(record, "templateName");
+  const templateVersion = readStringField(record, "templateVersion");
+  const bunVersion = readStringField(record, "bunVersion");
+  const bridgeContractVersion = readStringField(record, "bridgeContractVersion");
+  const codexPackage = readStringField(record, "codexPackage");
+  const agentRunnerModes = readStringArrayField(record, "agentRunnerModes").filter(
+    (mode): mode is "bridge-smoke" | "codex" => mode === "bridge-smoke" || mode === "codex",
+  );
+  const commandProfiles = readStringArrayField(record, "commandProfiles");
+  const requiredPaths = readStringArrayField(record, "requiredPaths");
+  const requiredTools = readE2BTemplateTools(record.requiredTools);
+
+  if (
+    schemaVersion !== 1 ||
+    !templateName ||
+    !templateVersion ||
+    !bunVersion ||
+    !bridgeContractVersion ||
+    !codexPackage ||
+    agentRunnerModes.length === 0 ||
+    commandProfiles.length === 0 ||
+    requiredTools.length === 0 ||
+    requiredPaths.length === 0
+  ) {
+    return { manifest: null, error: "E2B template compatibility manifest is incomplete." };
+  }
+
+  return {
+    manifest: {
+      schemaVersion,
+      templateName,
+      templateVersion,
+      bunVersion,
+      bridgeContractVersion,
+      codexPackage,
+      agentRunnerModes,
+      commandProfiles,
+      requiredTools,
+      requiredPaths,
+    },
+    error: null,
+  };
+}
+
+function readE2BTemplateTools(value: unknown): readonly E2BTemplateCompatibilityTool[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): E2BTemplateCompatibilityTool[] => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const record = item as Readonly<Record<string, unknown>>;
+    const name = readStringField(record, "name");
+    const purpose = readStringField(record, "purpose");
+    const version = readStringField(record, "version");
+    if (!name || !purpose) return [];
+    return [
+      {
+        name,
+        purpose,
+        ...(version ? { version } : {}),
+      },
+    ];
+  });
+}
+
 function createSessionProxyUrl(input: {
   readonly proxyUrl: string;
   readonly projectId: string;
@@ -1015,6 +1317,9 @@ async function startE2BSession(
 
   try {
     const launchSpec = buildE2BLaunchSpec(request, options);
+    if (hasTemplateCompatibilityInput(config) && launchSpec.templateCompatibility.status !== "compatible") {
+      throw new Error(formatE2BTemplateCompatibilityError(launchSpec.templateCompatibility));
+    }
     const redactedLaunchSpec = redactE2BLaunchSpec(launchSpec);
     const logBase = {
       provider: "e2b",
@@ -1142,6 +1447,15 @@ async function startE2BSession(
     });
     throw new Error(redactSecretValues(errorMessage(error), secretValues));
   }
+}
+
+function formatE2BTemplateCompatibilityError(report: E2BTemplateCompatibilityReport): string {
+  const details = report.issues.map((issue) => issue.detail).join("; ") || "unknown template compatibility issue";
+  return `e2b template compatibility check failed: ${details}`;
+}
+
+function hasTemplateCompatibilityInput(config: E2BRuntimeProviderConfig): boolean {
+  return config.templateCompatibilityManifest !== undefined || config.templateCompatibilityDigest !== undefined;
 }
 
 async function stopE2BSession(

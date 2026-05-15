@@ -1,4 +1,9 @@
 import { Template, defaultBuildLogger } from "e2b";
+import {
+  AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST,
+  AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST,
+  type E2BTemplateCompatibilityManifest,
+} from "@agent-pool/runtime";
 
 import { loadLocalEnv, readProcessEnv, type EnvSource } from "../local-env";
 import { AGENT_POOL_E2B_TEMPLATE_NAME, agentPoolE2BTemplate } from "./template";
@@ -9,6 +14,8 @@ export type E2BTemplateBuildPlan = {
   readonly memoryMB: number;
   readonly apiKeyConfigured: boolean;
   readonly dryRun: boolean;
+  readonly compatibilityDigest: string;
+  readonly manifest: E2BTemplateCompatibilityManifest;
 };
 
 if (import.meta.main) {
@@ -43,6 +50,8 @@ export async function main(args: readonly string[], env?: EnvSource): Promise<vo
         name: buildInfo.name,
         templateId: buildInfo.templateId,
         buildId: buildInfo.buildId,
+        compatibilityDigest: plan.compatibilityDigest,
+        manifest: plan.manifest,
       },
       null,
       2,
@@ -83,7 +92,13 @@ export function createE2BTemplateBuildPlan(args: readonly string[], env: EnvSour
     memoryMB,
     apiKeyConfigured: Boolean(env.E2B_API_KEY?.trim()),
     dryRun,
+    compatibilityDigest: AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST,
+    manifest: cloneTemplateManifest(AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST),
   };
+}
+
+function cloneTemplateManifest(manifest: E2BTemplateCompatibilityManifest): E2BTemplateCompatibilityManifest {
+  return JSON.parse(JSON.stringify(manifest)) as E2BTemplateCompatibilityManifest;
 }
 
 function readFlag(args: readonly string[], index: number, flag: string): string {

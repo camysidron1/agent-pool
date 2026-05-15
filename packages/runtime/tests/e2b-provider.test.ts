@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST,
   createE2BRuntimeProvider,
   type E2BCommandResult,
   type E2BCommandRunOptions,
@@ -46,6 +47,7 @@ const config: E2BRuntimeProviderConfig = {
   apiKeyConfigured: true,
   templateId: "template-1",
   sandboxImageId: null,
+  templateCompatibilityDigest: AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_DIGEST,
   workingDirectory: "/workspace/agent-pool",
   startupTimeoutMs: 90_000,
   cleanupTimeoutMs: 45_000,
@@ -210,6 +212,28 @@ describe("E2B runtime provider", () => {
     await expect(missingTokenProvider.startSession(request)).rejects.toThrow("GITHUB_TOKEN is required for github bootstrap");
     expect(missingSourceClient.calls).toEqual([]);
     expect(missingTokenClient.calls).toEqual([]);
+  });
+
+  test("rejects missing or stale template compatibility metadata before creating a sandbox", async () => {
+    const missingTemplateClient = createRecordingClient();
+    const missingTemplateProvider = createE2BRuntimeProvider({
+      client: missingTemplateClient.client,
+      config: { ...config, templateCompatibilityDigest: null },
+      env: { GITHUB_TOKEN: "github-secret" },
+      secretEnvNames: ["GITHUB_TOKEN"],
+    });
+    const staleTemplateClient = createRecordingClient();
+    const staleTemplateProvider = createE2BRuntimeProvider({
+      client: staleTemplateClient.client,
+      config: { ...config, templateCompatibilityDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+      env: { GITHUB_TOKEN: "github-secret" },
+      secretEnvNames: ["GITHUB_TOKEN"],
+    });
+
+    await expect(missingTemplateProvider.startSession(request)).rejects.toThrow("E2B template compatibility manifest or digest is missing");
+    await expect(staleTemplateProvider.startSession(request)).rejects.toThrow("E2B template compatibility digest");
+    expect(missingTemplateClient.calls).toEqual([]);
+    expect(staleTemplateClient.calls).toEqual([]);
   });
 
   test("redacts sandbox creation failures", async () => {
