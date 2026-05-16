@@ -63,12 +63,16 @@ import {
 } from "./steering";
 import {
   canPreviewArtifact,
+  formatSafeJsonValue,
+  formatSafeText,
   formatRawLogEntries,
+  getArtifactPreviewJson,
   getArtifactHref,
   getArtifactStatus,
   getArtifactTitle,
   getAttemptTimeline,
   getFinalResultDetail,
+  getLiveEvidenceReview,
   getRawLogEntries,
   getSecurityLifecycleBadges,
   getSecurityTimeline,
@@ -76,6 +80,7 @@ import {
   groupArtifacts,
   shouldFollowRawLogScroll,
   summarizeLogFallback,
+  type EvidenceReviewStatus,
   type SecurityTimelineTone,
   type RawLogEntry,
 } from "./task-detail";
@@ -1268,6 +1273,8 @@ function TaskPanel({
 
           <SecurityTimelineSection detail={detail} />
 
+          <EvidenceReviewSection detail={detail} onPreview={setPreviewArtifact} />
+
           <ArtifactSection detail={detail} onPreview={setPreviewArtifact} />
 
           <OperatorNotesSection
@@ -1532,6 +1539,101 @@ function SecurityTimelineSection({ detail }: { readonly detail: PublicTaskDetail
   );
 }
 
+function EvidenceReviewSection({
+  detail,
+  onPreview,
+}: {
+  readonly detail: PublicTaskDetail;
+  readonly onPreview: (artifact: PublicArtifactSummary) => void;
+}) {
+  const review = getLiveEvidenceReview(detail);
+  const evidenceArtifact = review.artifact;
+
+  return (
+    <section className={`panel-section evidence-review evidence-review-${review.status}`} aria-label="Live evidence review">
+      <header className="evidence-review-heading">
+        <span className={review.markerClassName} aria-hidden="true" />
+        <div>
+          <p className="eyebrow">Live evidence</p>
+          <h3>{review.title}</h3>
+          <p>{review.summary}</p>
+        </div>
+        <span className={`evidence-review-status evidence-review-status-${review.status}`}>{labelEvidenceReviewStatus(review.status)}</span>
+      </header>
+      <dl className="evidence-review-grid" aria-label="Live evidence summary">
+        {review.fields.map((field) => (
+          <div key={field.id}>
+            <dt>{field.label}</dt>
+            <dd>
+              {field.href ? (
+                <a href={field.href} target="_blank" rel="noreferrer">
+                  {field.value}
+                </a>
+              ) : (
+                field.value
+              )}
+            </dd>
+          </div>
+        ))}
+      </dl>
+      <dl className="evidence-review-meta" aria-label="Evidence artifact metadata">
+        <div>
+          <dt>Evidence artifact</dt>
+          <dd>{review.artifact ? getArtifactTitle(review.artifact) : "not recorded"}</dd>
+        </div>
+        <div>
+          <dt>Generated</dt>
+          <dd>{formatTimestamp(review.generatedAt)}</dd>
+        </div>
+        <div>
+          <dt>Launch spec</dt>
+          <dd>{review.launchSpecHash ?? "not recorded"}</dd>
+        </div>
+      </dl>
+      {review.blockers.length > 0 ? (
+        <ul className="evidence-review-blockers" aria-label="Evidence blockers">
+          {review.blockers.map((blocker) => (
+            <li key={blocker}>{blocker}</li>
+          ))}
+        </ul>
+      ) : null}
+      <nav className="evidence-review-links" aria-label="Task and session diagnostics links">
+        {evidenceArtifact && review.evidenceJson ? (
+          <button type="button" className="secondary-button" onClick={() => onPreview(evidenceArtifact)}>
+            View JSON
+          </button>
+        ) : null}
+        {review.diagnosticsLinks.map((link) => (
+          <a key={link.href} href={link.href} target="_blank" rel="noreferrer">
+            {link.label}
+          </a>
+        ))}
+      </nav>
+      {review.evidenceJson ? (
+        <details className="evidence-review-json">
+          <summary>Raw redacted evidence JSON</summary>
+          <pre>{review.evidenceJson}</pre>
+        </details>
+      ) : null}
+    </section>
+  );
+}
+
+function labelEvidenceReviewStatus(status: EvidenceReviewStatus): string {
+  switch (status) {
+    case "passed":
+      return "passed";
+    case "blocked":
+      return "blocked";
+    case "failed":
+      return "failed";
+    case "cleanup-risk":
+      return "cleanup risk";
+    case "unknown":
+      return "unknown";
+  }
+}
+
 function labelSecurityTimelineTone(tone: SecurityTimelineTone): string {
   switch (tone) {
     case "allowed":
@@ -1611,14 +1713,14 @@ function FinalResultSection({ detail }: { readonly detail: PublicTaskDetail }) {
           </dl>
           {result.text ? (
             <pre className="final-response-text" aria-label="Final response text">
-              {result.text}
+              {formatSafeText(result.text)}
             </pre>
           ) : (
             <p>Final response text was not recorded.</p>
           )}
           {Object.keys(result.metadata).length > 0 ? (
             <pre className="final-response-metadata" aria-label="Final response metadata">
-              {JSON.stringify(result.metadata, null, 2)}
+              {formatSafeJsonValue(result.metadata)}
             </pre>
           ) : null}
           {result.urls.length > 0 ? (
@@ -1793,10 +1895,11 @@ function ArtifactListItem({
 
 function ArtifactPreviewModal({ artifact, onClose }: { readonly artifact: PublicArtifactSummary; readonly onClose: () => void }) {
   const href = getArtifactHref(artifact);
+  const label = artifact.kind === "document" ? "Document artifact preview" : "Evidence JSON preview";
 
   return (
     <div className="modal-backdrop" role="presentation">
-      <section className="artifact-modal" role="dialog" aria-modal="true" aria-label="Document artifact preview">
+      <section className="artifact-modal" role="dialog" aria-modal="true" aria-label={label}>
         <header>
           <div>
             <p className="eyebrow">{artifact.kind}</p>
@@ -1821,15 +1924,7 @@ function ArtifactPreviewModal({ artifact, onClose }: { readonly artifact: Public
           </div>
         </dl>
         <pre className="artifact-preview-body" aria-label="Inline document preview">
-          {JSON.stringify(
-            {
-              uri: artifact.uri,
-              title: artifact.title,
-              metadata: artifact.metadata,
-            },
-            null,
-            2,
-          )}
+          {getArtifactPreviewJson(artifact)}
         </pre>
         {href ? (
           <a className="artifact-modal-link" href={href} target="_blank" rel="noreferrer">

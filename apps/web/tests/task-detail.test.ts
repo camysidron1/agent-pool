@@ -4,11 +4,16 @@ import type { PublicTaskDetail } from "../src/api";
 import {
   canPreviewArtifact,
   formatRawLogEntries,
+  formatSafeJsonValue,
+  formatSafeText,
   getArtifactHref,
+  getArtifactPreviewJson,
   getArtifactStatus,
   getArtifactTitle,
   getAttemptTimeline,
+  getEvidenceReviewMarkerClass,
   getFinalResultDetail,
+  getLiveEvidenceReview,
   getSessionInitializationMilestones,
   getRawLogEntries,
   getSecurityLifecycleBadges,
@@ -300,6 +305,135 @@ describe("web task detail helpers", () => {
   test("handles missing security events without synthetic noise", () => {
     expect(getSecurityTimeline(detailTask())).toEqual([]);
   });
+
+  test("builds live evidence review from artifact and PR diagnostics", () => {
+    const completedSession = session("session-a", 1, "succeeded", {
+      runtimeSessionId: "sandbox-a",
+      finalResponseMetadata: {
+        runner: "codex",
+        pr: {
+          url: "https://github.com/example/tiny-fixture/pull/123",
+          branch: "agent-pool/e2b-smoke/run-1/task-a",
+          finalCommitSha: "abc123",
+          diffStat: "1 file changed",
+          checks: { status: "passed", total: 1, passed: 1, failed: 0 },
+        },
+        transcriptSummary: {
+          cleanupObserved: true,
+          snapshotStatus: "ready",
+          credentialScrubStatus: "succeeded",
+          egress: { denied: 0 },
+          policy: { denied: 0 },
+        },
+      },
+      finalResponseRecordedAt: "2026-05-13T00:04:00.000Z",
+    });
+    const detail = {
+      ...detailTask(),
+      latestSession: completedSession,
+      sessions: [completedSession],
+      artifacts: [
+        artifact("artifact-evidence", "file", "storage://agent-pool-web-sandbox/evidence/pass.json", {
+          title: "E2B smoke evidence pass",
+          metadata: evidenceMetadata({
+            status: "pass",
+            stageDiagnostics: {
+              stages: [
+                { id: "cleanup", status: "passed", detail: "Provider destroyed." },
+                { id: "snapshot", status: "passed", detail: "Snapshot ready." },
+              ],
+            },
+          }),
+        }),
+      ],
+      events: [
+        {
+          id: "event-provider-cleanup",
+          projectId: "project-a",
+          taskId: "task-a",
+          sessionId: "session-a",
+          commandId: null,
+          type: "runtime_sandbox.cleanup_succeeded",
+          payload: {},
+          createdAt: "2026-05-13T00:00:07.000Z",
+        },
+      ],
+    };
+
+    const review = getLiveEvidenceReview(detail);
+
+    expect(review.status).toBe("passed");
+    expect(review.markerClassName).toBe("evidence-review-marker evidence-review-marker-passed");
+    expect(review.prUrl).toBe("https://github.com/example/tiny-fixture/pull/123");
+    expect(review.branch).toBe("agent-pool/e2b-smoke/run-1/task-a");
+    expect(review.commit).toBe("abc123");
+    expect(review.diffStat).toBe("1 file changed");
+    expect(review.checkStatusSummary).toBe("passed (1/1 passed)");
+    expect(review.securityVerdict).toBe("proxy-only ready");
+    expect(review.cleanupStatus).toBe("provider destroyed");
+    expect(review.snapshotStatus).toBe("Ready");
+    expect(review.diagnosticsLinks.map((link) => link.label)).toEqual(["Task JSON", "Task artifacts", "Session artifacts"]);
+    expect(canPreviewArtifact(review.artifact!)).toBe(true);
+  });
+
+  test("maps live evidence review statuses and responsive marker classes", () => {
+    expect(getLiveEvidenceReview(detailTask()).status).toBe("unknown");
+    expect(getLiveEvidenceReview({ ...detailTask(), artifacts: [evidenceArtifact("blocked", { blockers: [{ field: "callback", reason: "tunnel missing" }] })] }).status).toBe("blocked");
+    expect(getLiveEvidenceReview({ ...detailTask(), artifacts: [evidenceArtifact("failed")] }).status).toBe("failed");
+    expect(
+      getLiveEvidenceReview({
+        ...detailTask(),
+        artifacts: [
+          evidenceArtifact("pass", {
+            snapshotDecision: { status: "risk", reasons: ["scrub incomplete"] },
+            stageDiagnostics: { stages: [{ id: "snapshot", status: "risk", detail: "scrub incomplete" }] },
+          }),
+        ],
+      }).status,
+    ).toBe("cleanup-risk");
+    expect([
+      getEvidenceReviewMarkerClass("passed"),
+      getEvidenceReviewMarkerClass("blocked"),
+      getEvidenceReviewMarkerClass("failed"),
+      getEvidenceReviewMarkerClass("cleanup-risk"),
+      getEvidenceReviewMarkerClass("unknown"),
+    ]).toEqual([
+      "evidence-review-marker evidence-review-marker-passed",
+      "evidence-review-marker evidence-review-marker-blocked",
+      "evidence-review-marker evidence-review-marker-failed",
+      "evidence-review-marker evidence-review-marker-cleanup-risk",
+      "evidence-review-marker evidence-review-marker-unknown",
+    ]);
+  });
+
+  test("redacts evidence previews, final metadata helpers, and raw log text", () => {
+    const unsafe = "github_pat_secret_token ~/.agent-pool/data/agent-pool.db https://proxy-user:proxy-pass@gateway.local";
+    const evidence = evidenceArtifact("pass", {
+      redactedLaunchSpec: {
+        environment: {
+          secrets: {
+            GITHUB_TOKEN: unsafe,
+          },
+        },
+      },
+      stageDiagnostics: {
+        transcript: unsafe,
+      },
+    });
+
+    const preview = getArtifactPreviewJson(evidence);
+    const safeJson = formatSafeJsonValue({ token: unsafe, nested: { path: unsafe } });
+    const safeText = formatSafeText(unsafe);
+    const rawLogs = formatRawLogEntries([readRawLogEntryForTest("event-unsafe", unsafe)]);
+
+    for (const rendered of [preview, safeJson, safeText, rawLogs]) {
+      expect(rendered).not.toContain("github_pat_secret_token");
+      expect(rendered).not.toContain("~/.agent-pool/data/agent-pool.db");
+      expect(rendered).not.toContain("proxy-pass");
+    }
+    expect(preview).toContain("[redacted]");
+    expect(rawLogs).toContain("[redacted-db-path]");
+  });
 });
 
 function outputEvent(id: string, sequence: number, text: string) {
@@ -317,6 +451,17 @@ function outputEvent(id: string, sequence: number, text: string) {
       observedAt: "2026-05-13T00:00:00.000Z",
     },
     createdAt: `2026-05-13T00:00:0${sequence}.000Z`,
+  };
+}
+
+function readRawLogEntryForTest(id: string, text: string) {
+  return {
+    id,
+    stream: "stdout",
+    sequence: 1,
+    text,
+    observedAt: "2026-05-13T00:00:00.000Z",
+    createdAt: "2026-05-13T00:00:01.000Z",
   };
 }
 
@@ -393,5 +538,58 @@ function artifact(
     title: options.title ?? null,
     metadata: options.metadata ?? {},
     createdAt: "2026-05-13T00:00:00.000Z",
+  };
+}
+
+function evidenceArtifact(status: string, overrides: Readonly<Record<string, unknown>> = {}) {
+  return artifact("artifact-evidence", "file", `storage://agent-pool-web-sandbox/evidence/${status}.json`, {
+    title: `E2B smoke evidence ${status}`,
+    metadata: evidenceMetadata({ status, ...overrides }),
+  });
+}
+
+function evidenceMetadata(overrides: Readonly<Record<string, unknown>> = {}) {
+  const evidence = {
+    kind: "agent-pool-e2b-live-readiness-evidence",
+    schemaVersion: 1,
+    generatedAt: "2026-05-15T12:00:00.000Z",
+    status: "pass",
+    launchSpecHash: `sha256:${"a".repeat(64)}`,
+    runtimeSource: {
+      repositoryUrl: "https://github.com/example/tiny-fixture.git",
+      baseRef: "main",
+      taskBranchPrefix: "agent-pool/e2b-smoke/run-1",
+      allowedEgressDomains: ["github.com", "api.github.com", "registry.npmjs.org", "api.openai.com"],
+      commandProfile: "agent-pool-bun-pr",
+    },
+    securityReadiness: {
+      network: { egressMode: "proxy", proxyOnly: true },
+      credentials: { github: "brokered-github-app-installation-token", rawSecretsPresent: false },
+    },
+    stageDiagnostics: null,
+    cleanup: { provider: "e2b", sandboxId: "<runtime-session-id>", action: "destroy sandbox" },
+    snapshotDecision: { status: "ready", reasons: [] },
+    blockers: [],
+    redaction: {
+      containsNoServiceToken: true,
+      containsNoGithubToken: true,
+      containsNoE2BApiKey: true,
+      containsNoCodexApiKey: true,
+      containsNoProxyCredentials: true,
+      containsNoBridgeOrSessionToken: true,
+      containsNoLegacyTuiDbPath: true,
+      containsNoApiDbPath: true,
+    },
+    ...overrides,
+  };
+  return {
+    source: "smoke:e2b",
+    evidenceKind: "agent-pool-e2b-live-readiness-evidence",
+    evidenceStatus: evidence.status,
+    validationStatus: evidence.status === "invalid" ? "invalid" : evidence.status === "blocked" ? "blocked" : "pass",
+    generatedAt: evidence.generatedAt,
+    launchSpecHash: evidence.launchSpecHash,
+    blockers: evidence.blockers,
+    evidence,
   };
 }

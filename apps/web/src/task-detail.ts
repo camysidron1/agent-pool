@@ -2,6 +2,11 @@ import type { JsonRecord, PublicArtifactSummary, PublicEventSummary, PublicLogSt
 import { summarizeLogStream } from "./board";
 
 const ARTIFACT_KIND_ORDER = ["document", "file", "link", "log", "final_response_url"] as const;
+const EVIDENCE_KIND = "agent-pool-e2b-live-readiness-evidence";
+const MAX_SAFE_STRING_LENGTH = 600;
+const MAX_SAFE_ARRAY_ITEMS = 32;
+const MAX_SAFE_OBJECT_KEYS = 80;
+const MAX_EVIDENCE_JSON_LENGTH = 18_000;
 
 export type RawLogEntry = {
   readonly id: string;
@@ -63,6 +68,45 @@ export type FinalResultDetail = {
   readonly text: string | null;
   readonly metadata: JsonRecord;
   readonly urls: readonly string[];
+};
+
+export type EvidenceReviewStatus = "passed" | "blocked" | "failed" | "cleanup-risk" | "unknown";
+
+export type EvidenceReviewTone = "good" | "warning" | "danger" | "neutral";
+
+export type EvidenceReviewLink = {
+  readonly label: string;
+  readonly href: string;
+};
+
+export type EvidenceReviewField = {
+  readonly id: string;
+  readonly label: string;
+  readonly value: string;
+  readonly href?: string | null;
+};
+
+export type LiveEvidenceReview = {
+  readonly status: EvidenceReviewStatus;
+  readonly tone: EvidenceReviewTone;
+  readonly markerClassName: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly artifact: PublicArtifactSummary | null;
+  readonly generatedAt: string | null;
+  readonly launchSpecHash: string | null;
+  readonly prUrl: string | null;
+  readonly branch: string | null;
+  readonly commit: string | null;
+  readonly diffStat: string | null;
+  readonly checkStatusSummary: string;
+  readonly securityVerdict: string;
+  readonly cleanupStatus: string;
+  readonly snapshotStatus: string;
+  readonly blockers: readonly string[];
+  readonly fields: readonly EvidenceReviewField[];
+  readonly diagnosticsLinks: readonly EvidenceReviewLink[];
+  readonly evidenceJson: string | null;
 };
 
 export function getSessionInitializationMilestones(
@@ -260,7 +304,15 @@ export function getSecurityTimeline(task: PublicTaskDetail): readonly SecurityTi
 }
 
 export function formatRawLogEntries(entries: readonly RawLogEntry[]): string {
-  return entries.map((entry) => entry.text).join("");
+  return redactUiString(entries.map((entry) => entry.text).join(""));
+}
+
+export function formatSafeText(value: string): string {
+  return redactUiString(value);
+}
+
+export function formatSafeJsonValue(value: unknown): string {
+  return formatSafeJson(value);
 }
 
 export function summarizeLogFallback(logStreams: readonly PublicLogStreamSummary[]): readonly string[] {
@@ -309,7 +361,79 @@ export function getArtifactHref(artifact: PublicArtifactSummary): string | null 
 }
 
 export function canPreviewArtifact(artifact: PublicArtifactSummary): boolean {
-  return artifact.kind === "document";
+  return artifact.kind === "document" || isSmokeEvidenceArtifact(artifact);
+}
+
+export function getArtifactPreviewJson(artifact: PublicArtifactSummary): string {
+  return formatSafeJson({
+    uri: artifact.uri,
+    title: artifact.title,
+    metadata: artifact.metadata,
+  });
+}
+
+export function getEvidenceReviewMarkerClass(status: EvidenceReviewStatus): string {
+  return `evidence-review-marker evidence-review-marker-${status}`;
+}
+
+export function getLiveEvidenceReview(task: PublicTaskDetail): LiveEvidenceReview {
+  const artifact = selectLatestSmokeEvidenceArtifact(task.artifacts);
+  const evidence = readRecord(artifact?.metadata.evidence);
+  const finalResult = getFinalResultDetail(task);
+  const pr = readPrReview(evidence, finalResult.metadata);
+  const transcript = readTranscriptReview(evidence, finalResult.metadata);
+  const evidenceStatus = readEvidenceStatus(artifact, evidence);
+  const blockers = readEvidenceBlockers(artifact, evidence);
+  const security = summarizeEvidenceSecurity(evidence, transcript);
+  const cleanup = summarizeEvidenceCleanup(task, evidence, transcript);
+  const snapshot = summarizeEvidenceSnapshot(evidence, transcript);
+  const status = deriveEvidenceReviewStatus({
+    artifact,
+    evidenceStatus,
+    validationStatus: readStringValue(artifact?.metadata.validationStatus),
+    cleanup,
+    snapshot,
+    security,
+    blockers,
+  });
+  const generatedAt = readStringValue(evidence?.generatedAt) ?? readStringValue(artifact?.metadata.generatedAt) ?? artifact?.createdAt ?? null;
+  const launchSpecHash = readStringValue(evidence?.launchSpecHash) ?? readStringValue(artifact?.metadata.launchSpecHash);
+  const checkStatusSummary = summarizePrChecks(pr);
+  const title = labelEvidenceReviewStatus(status);
+  const summary = summarizeEvidenceReview(status, artifact, blockers, cleanup, snapshot);
+  const fields: EvidenceReviewField[] = [
+    { id: "pr", label: "PR", value: pr.url ?? "not observed", href: pr.url },
+    { id: "branch", label: "Branch", value: pr.branch ?? "not observed" },
+    { id: "commit", label: "Commit", value: pr.commit ?? "not observed" },
+    { id: "diff", label: "Diff", value: pr.diffStat ?? "not observed" },
+    { id: "checks", label: "Checks", value: checkStatusSummary },
+    { id: "security", label: "Security", value: security.label },
+    { id: "cleanup", label: "Cleanup", value: cleanup.label },
+    { id: "snapshot", label: "Snapshot", value: snapshot.label },
+  ];
+
+  return {
+    status,
+    tone: toneEvidenceReviewStatus(status),
+    markerClassName: getEvidenceReviewMarkerClass(status),
+    title,
+    summary,
+    artifact,
+    generatedAt,
+    launchSpecHash,
+    prUrl: pr.url,
+    branch: pr.branch,
+    commit: pr.commit,
+    diffStat: pr.diffStat,
+    checkStatusSummary,
+    securityVerdict: security.label,
+    cleanupStatus: cleanup.label,
+    snapshotStatus: snapshot.label,
+    blockers,
+    fields,
+    diagnosticsLinks: buildEvidenceDiagnosticsLinks(task, artifact),
+    evidenceJson: evidence ? formatSafeJson(evidence) : null,
+  };
 }
 
 export function getAttemptTimeline(task: PublicTaskDetail): readonly AttemptTimelineItem[] {
@@ -352,6 +476,245 @@ function readRawLogEntry(event: PublicEventSummary): RawLogEntry | null {
     observedAt: readPayloadString(event, "observedAt"),
     createdAt: event.createdAt,
   };
+}
+
+function isSmokeEvidenceArtifact(artifact: PublicArtifactSummary): boolean {
+  return artifact.metadata.source === "smoke:e2b" || artifact.metadata.evidenceKind === EVIDENCE_KIND;
+}
+
+function selectLatestSmokeEvidenceArtifact(artifacts: readonly PublicArtifactSummary[]): PublicArtifactSummary | null {
+  return [...artifacts]
+    .filter(isSmokeEvidenceArtifact)
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt) || left.id.localeCompare(right.id))[0] ?? null;
+}
+
+type PrReview = {
+  readonly url: string | null;
+  readonly branch: string | null;
+  readonly commit: string | null;
+  readonly diffStat: string | null;
+  readonly checkStatus: string | null;
+  readonly checks: JsonRecord;
+};
+
+type TranscriptReview = {
+  readonly cleanupObserved: boolean | null;
+  readonly snapshotStatus: string | null;
+  readonly credentialScrubStatus: string | null;
+  readonly egressDenied: number | null;
+  readonly policyDenied: number | null;
+};
+
+type StatusSummary = {
+  readonly key: string;
+  readonly label: string;
+};
+
+function readPrReview(evidence: JsonRecord | null, finalMetadata: JsonRecord): PrReview {
+  const stageDiagnostics = readRecord(evidence?.stageDiagnostics);
+  const statusDiagnostics = readRecord(readRecord(evidence?.statusResult)?.diagnostics);
+  const metadataPr = readRecord(finalMetadata.pr);
+  const stagePr = readRecord(stageDiagnostics?.pr) ?? readRecord(statusDiagnostics?.pr);
+  const postflight = readRecord(finalMetadata.postflight);
+  const githubPullRequest = readRecord(postflight?.githubPullRequest);
+  const pr = metadataPr ?? stagePr ?? githubPullRequest ?? {};
+  const checks =
+    readRecord(pr.checks) ??
+    readRecord(stagePr?.checks) ??
+    readRecord(githubPullRequest?.checks) ??
+    readRecord(postflight?.checkStatusSummary) ??
+    {};
+
+  return {
+    url: sanitizeMaybeUrl(readStringValue(pr.url) ?? readStringValue(stagePr?.url) ?? readStringValue(githubPullRequest?.url) ?? readStringValue(finalMetadata.pullRequestUrl)),
+    branch: safeDisplayString(readStringValue(pr.branch) ?? readStringValue(stagePr?.branch) ?? readStringValue(githubPullRequest?.branch) ?? readStringValue(postflight?.branch)),
+    commit: safeDisplayString(readStringValue(pr.finalCommitSha) ?? readStringValue(stagePr?.finalCommitSha) ?? readStringValue(githubPullRequest?.finalCommitSha) ?? readStringValue(postflight?.headSha)),
+    diffStat: safeDisplayString(readStringValue(pr.diffStat) ?? readStringValue(stagePr?.diffStat) ?? readStringValue(postflight?.diffStat)),
+    checkStatus: safeDisplayString(readStringValue(pr.checkStatus) ?? readStringValue(stagePr?.checkStatus) ?? readStringValue(checks.status)),
+    checks,
+  };
+}
+
+function readTranscriptReview(evidence: JsonRecord | null, finalMetadata: JsonRecord): TranscriptReview {
+  const stageDiagnostics = readRecord(evidence?.stageDiagnostics);
+  const statusDiagnostics = readRecord(readRecord(evidence?.statusResult)?.diagnostics);
+  const transcript =
+    readRecord(finalMetadata.transcriptSummary) ??
+    readRecord(stageDiagnostics?.transcriptSummary) ??
+    readRecord(statusDiagnostics?.transcriptSummary) ??
+    {};
+  const egress = readRecord(transcript.egress);
+  const policy = readRecord(transcript.policy);
+
+  return {
+    cleanupObserved: readBoolean(transcript.cleanupObserved),
+    snapshotStatus: safeDisplayString(readStringValue(transcript.snapshotStatus)),
+    credentialScrubStatus: safeDisplayString(readStringValue(transcript.credentialScrubStatus)),
+    egressDenied: readNumberValue(transcript.egressDenied) ?? readNumberValue(egress?.denied),
+    policyDenied: readNumberValue(transcript.policyDenied) ?? readNumberValue(policy?.denied),
+  };
+}
+
+function readEvidenceStatus(artifact: PublicArtifactSummary | null, evidence: JsonRecord | null): string | null {
+  return readStringValue(evidence?.status) ?? readStringValue(artifact?.metadata.evidenceStatus) ?? readStringValue(artifact?.metadata.status);
+}
+
+function readEvidenceBlockers(artifact: PublicArtifactSummary | null, evidence: JsonRecord | null): readonly string[] {
+  const source = Array.isArray(evidence?.blockers) ? evidence?.blockers : Array.isArray(artifact?.metadata.blockers) ? artifact?.metadata.blockers : [];
+  return source
+    .map((entry) => {
+      const record = readRecord(entry);
+      const field = safeDisplayString(readStringValue(record?.field));
+      const reason = safeDisplayString(readStringValue(record?.reason));
+      if (field && reason) return `${field}: ${reason}`;
+      return reason ?? field;
+    })
+    .filter((entry): entry is string => Boolean(entry));
+}
+
+function summarizeEvidenceSecurity(evidence: JsonRecord | null, transcript: TranscriptReview): StatusSummary {
+  const securityReadiness = readRecord(evidence?.securityReadiness);
+  const network = readRecord(securityReadiness?.network);
+  const credentials = readRecord(securityReadiness?.credentials);
+  const rawSecretsPresent = readBoolean(credentials?.rawSecretsPresent);
+  const proxyOnly = readBoolean(network?.proxyOnly);
+  const egressDenied = transcript.egressDenied ?? 0;
+  const policyDenied = transcript.policyDenied ?? 0;
+  const scrubStatus = transcript.credentialScrubStatus;
+
+  if (rawSecretsPresent === true || egressDenied > 0 || policyDenied > 0 || scrubStatus === "failed") {
+    return { key: "risk", label: "risk detected" };
+  }
+
+  if (proxyOnly === true || scrubStatus === "succeeded") {
+    return { key: "passed", label: proxyOnly === true ? "proxy-only ready" : "credentials scrubbed" };
+  }
+
+  return { key: "unknown", label: "not observed" };
+}
+
+function summarizeEvidenceCleanup(task: PublicTaskDetail, evidence: JsonRecord | null, transcript: TranscriptReview): StatusSummary {
+  const cleanupStage = readStageStatus(evidence, "cleanup");
+  const providerFailed = task.events.some((event) => event.type === "runtime_sandbox.cleanup_failed");
+  const providerSucceeded = task.events.some((event) => event.type === "runtime_sandbox.cleanup_succeeded");
+  const bridgeCleanup = task.events.some((event) => event.type === "session.cleanup" || event.type === "session.cleanup.idempotent");
+
+  if (providerFailed || cleanupStage === "failed") return { key: "failed", label: "provider cleanup failed" };
+  if (providerSucceeded) return { key: "passed", label: "provider destroyed" };
+  if (cleanupStage === "passed" || transcript.cleanupObserved === true || bridgeCleanup) return { key: "passed", label: "cleanup observed" };
+  if (cleanupStage === "running" || cleanupStage === "pending") return { key: cleanupStage, label: labelFromKebab(cleanupStage) };
+  return { key: "unknown", label: "not observed" };
+}
+
+function summarizeEvidenceSnapshot(evidence: JsonRecord | null, transcript: TranscriptReview): StatusSummary {
+  const snapshotDecision = readRecord(evidence?.snapshotDecision);
+  const stageStatus = readStageStatus(evidence, "snapshot");
+  const status = transcript.snapshotStatus ?? readStringValue(snapshotDecision?.status) ?? stageStatus;
+  if (!status) return { key: "unknown", label: "not observed" };
+  const safe = safeDisplayString(status) ?? "unknown";
+  return { key: safe, label: labelFromKebab(safe) };
+}
+
+function readStageStatus(evidence: JsonRecord | null, id: string): string | null {
+  const diagnostics = readRecord(evidence?.stageDiagnostics);
+  const stages = Array.isArray(diagnostics?.stages) ? diagnostics.stages : [];
+  for (const stage of stages) {
+    const record = readRecord(stage);
+    if (record?.id === id) return safeDisplayString(readStringValue(record.status));
+  }
+  return null;
+}
+
+function deriveEvidenceReviewStatus(input: {
+  readonly artifact: PublicArtifactSummary | null;
+  readonly evidenceStatus: string | null;
+  readonly validationStatus: string | null;
+  readonly cleanup: StatusSummary;
+  readonly snapshot: StatusSummary;
+  readonly security: StatusSummary;
+  readonly blockers: readonly string[];
+}): EvidenceReviewStatus {
+  if (!input.artifact) return "unknown";
+  if (input.validationStatus === "invalid") return "failed";
+  if (input.evidenceStatus === "blocked" || input.blockers.length > 0) return "blocked";
+  if (input.evidenceStatus === "failed" || input.security.key === "risk") return "failed";
+  if (input.cleanup.key === "failed" || ["risk", "failed"].includes(input.snapshot.key)) return "cleanup-risk";
+  if (input.evidenceStatus === "pass") return "passed";
+  return "unknown";
+}
+
+function labelEvidenceReviewStatus(status: EvidenceReviewStatus): string {
+  switch (status) {
+    case "passed":
+      return "Live evidence passed";
+    case "blocked":
+      return "Live evidence blocked";
+    case "failed":
+      return "Live evidence failed";
+    case "cleanup-risk":
+      return "Cleanup risk";
+    case "unknown":
+      return "Live evidence unknown";
+  }
+}
+
+function toneEvidenceReviewStatus(status: EvidenceReviewStatus): EvidenceReviewTone {
+  switch (status) {
+    case "passed":
+      return "good";
+    case "blocked":
+    case "cleanup-risk":
+      return "warning";
+    case "failed":
+      return "danger";
+    case "unknown":
+      return "neutral";
+  }
+}
+
+function summarizeEvidenceReview(
+  status: EvidenceReviewStatus,
+  artifact: PublicArtifactSummary | null,
+  blockers: readonly string[],
+  cleanup: StatusSummary,
+  snapshot: StatusSummary,
+): string {
+  if (!artifact) return "No live E2B evidence artifact has been persisted for this task.";
+  if (blockers.length > 0) return blockers[0] ?? "Evidence is blocked.";
+  if (status === "cleanup-risk") return `Cleanup requires review: ${cleanup.label}; snapshot ${snapshot.label}.`;
+  if (status === "passed") return "PR, security, cleanup, and snapshot evidence are available from the latest smoke run.";
+  if (status === "failed") return "The latest live smoke evidence reports a failed execution or security verdict.";
+  if (status === "blocked") return "The latest live smoke evidence is blocked by missing prerequisites or runtime setup.";
+  return "Evidence is present, but the latest run has not produced a conclusive live status.";
+}
+
+function summarizePrChecks(pr: PrReview): string {
+  const total = readNumberValue(pr.checks.total);
+  const passed = readNumberValue(pr.checks.passed);
+  const failed = readNumberValue(pr.checks.failed);
+  const status = pr.checkStatus ?? safeDisplayString(readStringValue(pr.checks.status));
+  if (typeof total === "number" && typeof passed === "number") {
+    const suffix = typeof failed === "number" && failed > 0 ? `, ${failed} failed` : "";
+    return `${status ?? "checks"} (${passed}/${total} passed${suffix})`;
+  }
+  return status ?? "not observed";
+}
+
+function buildEvidenceDiagnosticsLinks(task: PublicTaskDetail, artifact: PublicArtifactSummary | null): readonly EvidenceReviewLink[] {
+  const projectId = encodeURIComponent(task.projectId);
+  const taskId = encodeURIComponent(task.id);
+  const links: EvidenceReviewLink[] = [
+    { label: "Task JSON", href: `/api/public/projects/${projectId}/tasks/${taskId}` },
+    { label: "Task artifacts", href: `/api/public/projects/${projectId}/tasks/${taskId}/artifacts` },
+  ];
+  const sessionId = artifact?.sessionId ?? task.latestSession?.id ?? null;
+  if (sessionId) {
+    links.push({
+      label: "Session artifacts",
+      href: `/api/public/projects/${projectId}/tasks/${taskId}/sessions/${encodeURIComponent(sessionId)}/artifacts`,
+    });
+  }
+  return links;
 }
 
 function parseSecurityLog(text: string): JsonRecord | null {
@@ -544,6 +907,68 @@ function readPayloadNumber(event: PublicEventSummary, key: string): number | nul
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function readRecord(value: unknown): JsonRecord | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : null;
+}
+
+function readStringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function readNumberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function readBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function sanitizeMaybeUrl(value: string | null): string | null {
+  const safe = safeDisplayString(value);
+  return safe && /^https?:\/\//i.test(safe) ? safe : null;
+}
+
+function safeDisplayString(value: string | null): string | null {
+  if (!value) return null;
+  const safe = redactUiString(value);
+  return safe.length > MAX_SAFE_STRING_LENGTH ? `${safe.slice(0, MAX_SAFE_STRING_LENGTH)}... [truncated]` : safe;
+}
+
+function formatSafeJson(value: unknown): string {
+  const json = JSON.stringify(redactUiValue(value), null, 2);
+  if (json.length <= MAX_EVIDENCE_JSON_LENGTH) return json;
+  return `${json.slice(0, MAX_EVIDENCE_JSON_LENGTH)}\n... [truncated]`;
+}
+
+function redactUiValue(value: unknown, key = "", depth = 0): unknown {
+  if (depth > 8) return "[truncated]";
+  if (typeof value === "string") return safeDisplayStringForKey(value, key);
+  if (typeof value !== "object" || value === null) return value;
+  if (Array.isArray(value)) {
+    const items = value.slice(0, MAX_SAFE_ARRAY_ITEMS).map((item) => redactUiValue(item, key, depth + 1));
+    if (value.length > MAX_SAFE_ARRAY_ITEMS) items.push(`[truncated ${value.length - MAX_SAFE_ARRAY_ITEMS} items]`);
+    return items;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>).slice(0, MAX_SAFE_OBJECT_KEYS);
+  const redacted: Record<string, unknown> = {};
+  for (const [childKey, childValue] of entries) {
+    redacted[childKey] = /token|secret|password|api[-_]?key|private[-_]?key|proxy|authorization|cookie|callback/i.test(childKey)
+      ? "[redacted]"
+      : redactUiValue(childValue, childKey, depth + 1);
+  }
+  const totalKeys = Object.keys(value as Record<string, unknown>).length;
+  if (totalKeys > MAX_SAFE_OBJECT_KEYS) redacted.__truncatedKeys = totalKeys - MAX_SAFE_OBJECT_KEYS;
+  return redacted;
+}
+
+function safeDisplayStringForKey(value: string, key: string): string {
+  const redacted = /token|secret|password|api[-_]?key|private[-_]?key|proxy|authorization|cookie|callback/i.test(key)
+    ? "[redacted]"
+    : redactUiString(value);
+  return redacted.length > MAX_SAFE_STRING_LENGTH ? `${redacted.slice(0, MAX_SAFE_STRING_LENGTH)}... [truncated]` : redacted;
+}
+
 function artifactKindRank(kind: string): number {
   const index = ARTIFACT_KIND_ORDER.findIndex((candidate) => candidate === kind);
   return index === -1 ? ARTIFACT_KIND_ORDER.length : index;
@@ -569,6 +994,15 @@ function labelArtifactKind(kind: string): string {
 function readMetadataString(artifact: PublicArtifactSummary, key: string): string | null {
   const value = artifact.metadata[key];
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function redactUiString(value: string): string {
+  return value
+    .replace(/\/\/([^:/\s]+):([^@\s]+)@/g, "//$1:[redacted]@")
+    .replace(/\b(?:github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]+|e2b_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+)\b/g, "[redacted]")
+    .replace(/\b(?:short-lived-github-token|codex-secret|bridge-token|session-secret|callback-token|proxy-token|service-token)\b/gi, "[redacted]")
+    .replace(/~\/\.agent-pool\/data\/agent-pool\.db/g, "[redacted-db-path]")
+    .replace(/(?:\/[^\s"'`]+)+\/agent-pool\.db/g, "[redacted-db-path]");
 }
 
 function formatAttemptTiming(session: PublicSessionSummary): string {
