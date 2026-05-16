@@ -124,6 +124,8 @@ export type SmokeStatusDiagnostics = {
   readonly currentStage: SmokeDiagnosticStageId;
   readonly failedStage: SmokeDiagnosticStageId | null;
   readonly stages: readonly SmokeStageDiagnosticRecord[];
+  readonly pr: SmokePrLifecycleDiagnosticRecord;
+  readonly transcriptSummary: SmokeTranscriptDiagnosticRecord;
   readonly latestSession: SessionStatusRecord | null;
   readonly runtimeSandbox: RuntimeSandboxStatusRecord | null;
   readonly latestSnapshot: SnapshotStatusRecord | null;
@@ -136,6 +138,32 @@ type SmokeStageDiagnosticRecord = {
   readonly label: string;
   readonly status: SmokeDiagnosticStageStatus;
   readonly detail: string;
+};
+
+type SmokePrLifecycleDiagnosticRecord = {
+  readonly url: string | null;
+  readonly branch: string | null;
+  readonly finalCommitSha: string | null;
+  readonly diffStat: string | null;
+  readonly checkStatus: string | null;
+  readonly checks: Readonly<Record<string, unknown>>;
+  readonly failureReason: Readonly<Record<string, unknown>> | null;
+};
+
+type SmokeTranscriptDiagnosticRecord = {
+  readonly bounded: true;
+  readonly commandStarts: number;
+  readonly commandFinishes: number;
+  readonly installAudits: number;
+  readonly egressAllowed: number;
+  readonly egressDenied: number;
+  readonly policyAllowed: number;
+  readonly policyDenied: number;
+  readonly credentialScrubStatus: string;
+  readonly cleanupObserved: boolean;
+  readonly snapshotStatus: string | null;
+  readonly events: readonly unknown[];
+  readonly eventsTruncated: number;
 };
 
 type ProjectStatusRecord = {
@@ -163,6 +191,7 @@ type SessionStatusRecord = {
   readonly heartbeatStatus: string;
   readonly lastHeartbeatAt: string | null;
   readonly finalResponseRecordedAt: string | null;
+  readonly finalResponseMetadata: Readonly<Record<string, unknown>>;
 };
 
 type RuntimeSandboxStatusRecord = {
@@ -237,6 +266,12 @@ type OutputEventRecord = {
   readonly sequence: number | null;
   readonly observedAt: string | null;
   readonly text: string;
+};
+
+type TerminalEventRecord = {
+  readonly type: string;
+  readonly errorMessage: string | null;
+  readonly metadata: Readonly<Record<string, unknown>>;
 };
 
 export function isSmokeFixtureEnabled(config: AppConfig): boolean {
@@ -410,6 +445,7 @@ export function readSmokeFixtureStatus(options: SmokeFixtureOptions): SmokeStatu
   const eventCounts = readEventCounts(options.database, ids.projectId, ids.taskId);
   const outputStreams = readLogStreams(options.database, ids.projectId, ids.taskId);
   const outputEvents = readOutputEvents(options.database, ids.projectId, ids.taskId);
+  const terminalEvents = readTerminalEvents(options.database, ids.projectId, ids.taskId);
   const runtimeSandbox = readLatestRuntimeSandbox(options.database, ids.projectId, ids.taskId);
   const latestSnapshot = readLatestSnapshot(options.database, ids.projectId, ids.taskId);
   const securityEvents = summarizeSecurityEvents(outputEvents);
@@ -434,6 +470,7 @@ export function readSmokeFixtureStatus(options: SmokeFixtureOptions): SmokeStatu
     completionEvents,
     failureEvents,
     cleanupEvents,
+    terminalEvents,
   });
 
   return {
@@ -539,6 +576,7 @@ function readSessionRows(database: ApiDatabaseConnection, projectId: string, tas
         heartbeat_status: string;
         last_heartbeat_at: string | null;
         final_response_recorded_at: string | null;
+        final_response_metadata_json: string | null;
       },
       [string, string]
     >(
@@ -552,7 +590,8 @@ function readSessionRows(database: ApiDatabaseConnection, projectId: string, tas
           runtime_session_id,
           heartbeat_status,
           last_heartbeat_at,
-          final_response_recorded_at
+          final_response_recorded_at,
+          final_response_metadata_json
         FROM sessions
         WHERE project_id = ? AND task_id = ?
         ORDER BY created_at DESC, id DESC
@@ -569,6 +608,7 @@ function readSessionRows(database: ApiDatabaseConnection, projectId: string, tas
       heartbeatStatus: row.heartbeat_status,
       lastHeartbeatAt: row.last_heartbeat_at,
       finalResponseRecordedAt: row.final_response_recorded_at,
+      finalResponseMetadata: parseMetadataRecord(row.final_response_metadata_json),
     }));
 }
 
@@ -613,6 +653,29 @@ function readOutputEvents(database: ApiDatabaseConnection, projectId: string, ta
         sequence: typeof payload.sequence === "number" ? payload.sequence : null,
         observedAt: readString(payload.observedAt),
         text: redactDiagnosticText(readString(payload.text) ?? ""),
+      };
+    });
+}
+
+function readTerminalEvents(database: ApiDatabaseConnection, projectId: string, taskId: string): readonly TerminalEventRecord[] {
+  return database.sqlite
+    .query<{ type: string; payload_json: string }, [string, string]>(
+      `
+        SELECT type, payload_json
+        FROM events
+        WHERE project_id = ?
+          AND task_id = ?
+          AND type IN ('session.completed', 'session.completed.idempotent', 'session.failed', 'session.failed.idempotent', 'session.cleanup', 'session.cleanup.idempotent')
+        ORDER BY created_at ASC, rowid ASC
+      `,
+    )
+    .all(projectId, taskId)
+    .map((row) => {
+      const payload = readJsonObject(row.payload_json);
+      return {
+        type: row.type,
+        errorMessage: readRedactedString(payload.errorMessage),
+        metadata: parseMetadataRecord(payload.metadata),
       };
     });
 }
@@ -783,8 +846,18 @@ function buildSmokeDiagnostics(input: {
   readonly completionEvents: number;
   readonly failureEvents: number;
   readonly cleanupEvents: number;
+  readonly terminalEvents: readonly TerminalEventRecord[];
 }): SmokeStatusDiagnostics {
   const latestSession = input.sessions[0] ?? null;
+  const pr = summarizePrLifecycleDiagnostics(latestSession?.finalResponseMetadata ?? {}, input.terminalEvents);
+  const transcriptSummary = summarizeTranscriptDiagnostics({
+    finalResponseMetadata: latestSession?.finalResponseMetadata ?? {},
+    terminalEvents: input.terminalEvents,
+    securityEvents: input.securityEvents,
+    cleanupObserved: input.cleanupEvents > 0,
+    runtimeSandbox: input.runtimeSandbox,
+    latestSnapshot: input.latestSnapshot,
+  });
   const taskSeeded = Boolean(input.project && input.task);
   const sessionClaimed = input.sessions.length > 0;
   const taskFailed = input.task?.status === "failed" || input.task?.status === "blocked";
@@ -798,7 +871,7 @@ function buildSmokeDiagnostics(input: {
   const commandDenied = hasDeniedSecurity(input.securityEvents, "command-policy");
   const codexSeen = hasSecurity(input.securityEvents, "codex-started") || hasSecurity(input.securityEvents, "command-policy") || hasSecurity(input.securityEvents, "postflight");
   const postflightSeen = hasSecurity(input.securityEvents, "postflight");
-  const prObserved = input.finalResponseArtifacts > 0 || (postflightSeen && input.finalResponseRecorded);
+  const prObserved = Boolean(pr.url) || input.finalResponseArtifacts > 0 || (postflightSeen && input.finalResponseRecorded);
   const cleanupFailed = input.runtimeSandbox?.status === "cleanup_failed";
   const cleanupPassed = input.cleanupEvents > 0 || input.runtimeSandbox?.status === "cleanup_succeeded";
   const snapshotRisk = input.runtimeSandbox?.snapshotEligibilityStatus === "risk";
@@ -884,12 +957,114 @@ function buildSmokeDiagnostics(input: {
     currentStage,
     failedStage,
     stages,
+    pr,
+    transcriptSummary,
     latestSession,
     runtimeSandbox: input.runtimeSandbox,
     latestSnapshot: input.latestSnapshot,
     securityEvents: input.securityEvents,
     logSnippets: input.logSnippets,
   };
+}
+
+function summarizePrLifecycleDiagnostics(
+  finalResponseMetadata: Readonly<Record<string, unknown>>,
+  terminalEvents: readonly TerminalEventRecord[],
+): SmokePrLifecycleDiagnosticRecord {
+  const metadata = firstMetadataWith(finalResponseMetadata, terminalEvents, "pr") ?? finalResponseMetadata;
+  const pr = readRecord(metadata.pr);
+  const postflight = readRecord(metadata.postflight);
+  const githubPullRequest = readRecord(postflight?.githubPullRequest);
+  const checks =
+    readRecord(pr?.checks) ??
+    readRecord(githubPullRequest?.checks) ??
+    readRecord(postflight?.checkStatusSummary) ??
+    {};
+  const failure = terminalEvents.find((event) => event.type.startsWith("session.failed"));
+  const failureMetadata = failure ? readRecord(failure.metadata.failureReason) : null;
+  return {
+    url: readRedactedString(pr?.url) ?? readRedactedString(githubPullRequest?.url) ?? readRedactedString(metadata.pullRequestUrl),
+    branch: readRedactedString(pr?.branch) ?? readRedactedString(githubPullRequest?.branch) ?? readRedactedString(postflight?.branch),
+    finalCommitSha:
+      readRedactedString(pr?.finalCommitSha) ??
+      readRedactedString(githubPullRequest?.finalCommitSha) ??
+      readRedactedString(postflight?.headSha),
+    diffStat: readRedactedString(pr?.diffStat) ?? readRedactedString(postflight?.diffStat),
+    checkStatus: readRedactedString(checks.status),
+    checks: redactDiagnosticRecord(checks),
+    failureReason: failureMetadata
+      ? redactDiagnosticRecord(failureMetadata)
+      : failure?.errorMessage
+        ? { code: "session_failed", message: failure.errorMessage }
+        : null,
+  };
+}
+
+function summarizeTranscriptDiagnostics(input: {
+  readonly finalResponseMetadata: Readonly<Record<string, unknown>>;
+  readonly terminalEvents: readonly TerminalEventRecord[];
+  readonly securityEvents: readonly SecurityEventSummaryRecord[];
+  readonly cleanupObserved: boolean;
+  readonly runtimeSandbox: RuntimeSandboxStatusRecord | null;
+  readonly latestSnapshot: SnapshotStatusRecord | null;
+}): SmokeTranscriptDiagnosticRecord {
+  const metadata = firstMetadataWith(input.finalResponseMetadata, input.terminalEvents, "transcriptSummary") ?? {};
+  const transcript = readRecord(metadata.transcriptSummary) ?? {};
+  const egress = readRecord(transcript.egress);
+  const policy = readRecord(transcript.policy);
+  const credentialScrubStatus =
+    readRedactedString(transcript.credentialScrubStatus) ??
+    (hasSecurity(input.securityEvents, "credentials-scrub-succeeded")
+      ? "succeeded"
+      : hasSecurity(input.securityEvents, "credentials-scrub-failed")
+        ? "failed"
+        : "not_observed");
+  return {
+    bounded: true,
+    commandStarts: readNumber(transcript.commandStarts) ?? countSecurityCommands(input.securityEvents),
+    commandFinishes: readNumber(transcript.commandFinishes) ?? 0,
+    installAudits:
+      readNumber(transcript.installAudits) ??
+      input.securityEvents.filter((event) => event.securityKind === "package-install" || event.securityKind.startsWith("dependency-install")).reduce((sum, event) => sum + event.count, 0),
+    egressAllowed: readNumber(egress?.allowed) ?? countAllowedSecurity(input.securityEvents, "egress"),
+    egressDenied: readNumber(egress?.denied) ?? countDeniedSecurity(input.securityEvents, "egress"),
+    policyAllowed: readNumber(policy?.allowed) ?? countAllowedSecurity(input.securityEvents, "command-policy"),
+    policyDenied: readNumber(policy?.denied) ?? countDeniedSecurity(input.securityEvents, "command-policy"),
+    credentialScrubStatus,
+    cleanupObserved: input.cleanupObserved,
+    snapshotStatus: input.latestSnapshot?.status ?? input.runtimeSandbox?.snapshotStatus ?? null,
+    events: Array.isArray(transcript.events) ? transcript.events.slice(0, 24).map(redactDiagnosticValue) : [],
+    eventsTruncated: readNumber(transcript.eventsTruncated) ?? 0,
+  };
+}
+
+function firstMetadataWith(
+  finalResponseMetadata: Readonly<Record<string, unknown>>,
+  terminalEvents: readonly TerminalEventRecord[],
+  key: string,
+): Readonly<Record<string, unknown>> | null {
+  if (readRecord(finalResponseMetadata[key])) return finalResponseMetadata;
+  for (const event of terminalEvents) {
+    if (readRecord(event.metadata[key])) return event.metadata;
+  }
+  return null;
+}
+
+function countSecurityCommands(securityEvents: readonly SecurityEventSummaryRecord[]): number {
+  const commandPolicy = securityEvents.find((event) => event.securityKind === "command-policy");
+  return commandPolicy?.count ?? 0;
+}
+
+function countAllowedSecurity(securityEvents: readonly SecurityEventSummaryRecord[], securityKind: string): number {
+  return securityEvents
+    .filter((event) => event.securityKind === securityKind || event.securityKind.includes(`${securityKind}-`))
+    .reduce((sum, event) => sum + event.allowed, 0);
+}
+
+function countDeniedSecurity(securityEvents: readonly SecurityEventSummaryRecord[], securityKind: string): number {
+  return securityEvents
+    .filter((event) => event.securityKind === securityKind || event.securityKind.includes(`${securityKind}-`))
+    .reduce((sum, event) => sum + event.denied, 0);
 }
 
 function stage(
@@ -966,13 +1141,43 @@ function readJsonObject(value: string): Readonly<Record<string, unknown>> {
   }
 }
 
+function readRecord(value: unknown): Readonly<Record<string, unknown>> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Readonly<Record<string, unknown>> : null;
+}
+
+function parseMetadataRecord(value: unknown): Readonly<Record<string, unknown>> {
+  if (typeof value === "string") return redactDiagnosticRecord(readJsonObject(value));
+  return redactDiagnosticRecord(readRecord(value) ?? {});
+}
+
 function readString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function readNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function readRedactedString(value: unknown): string | null {
   const string = readString(value);
   return string ? truncate(redactDiagnosticText(string), 500) : null;
+}
+
+function redactDiagnosticRecord(value: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+  return redactDiagnosticValue(value) as Readonly<Record<string, unknown>>;
+}
+
+function redactDiagnosticValue(value: unknown): unknown {
+  if (typeof value === "string") return redactDiagnosticText(value);
+  if (Array.isArray(value)) return value.slice(0, 50).map(redactDiagnosticValue);
+  const record = readRecord(value);
+  if (!record) return value;
+  return Object.fromEntries(
+    Object.entries(record).map(([key, child]) => [
+      key,
+      /token|secret|password|privateKey|apiKey|proxyUrl|sessionToken/i.test(key) ? "[REDACTED]" : redactDiagnosticValue(child),
+    ]),
+  );
 }
 
 function readStageId(value: unknown): SmokeDiagnosticStageId | null {

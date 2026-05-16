@@ -2043,6 +2043,27 @@ describe("API service skeleton", () => {
           taskId: "compose-smoke-task-1",
           sessionId: "session_smoke",
           text: "Smoke result https://example.test/smoke",
+          metadata: {
+            runner: "codex",
+            pr: {
+              url: "https://github.com/example/tiny-fixture/pull/123",
+              branch: "agent-pool/task/task_1",
+              finalCommitSha: "abc123",
+              diffStat: "1 file changed",
+              checks: { status: "passed", total: 1, passed: 1, failed: 0 },
+            },
+            transcriptSummary: {
+              bounded: true,
+              commandStarts: 1,
+              commandFinishes: 1,
+              installAudits: 2,
+              egress: { allowed: 2, denied: 0 },
+              policy: { allowed: 1, denied: 0 },
+              credentialScrubStatus: "succeeded",
+              events: [{ kind: "command.started", stage: "codex", command: "bun run test" }],
+              eventsTruncated: 0,
+            },
+          },
         }),
       ).resolves.toMatchObject({ status: 200 });
       await expect(
@@ -2092,6 +2113,29 @@ describe("API service skeleton", () => {
         diagnostics: {
           currentStage: "snapshot",
           failedStage: null,
+          pr: {
+            url: "https://github.com/example/tiny-fixture/pull/123",
+            branch: "agent-pool/task/task_1",
+            finalCommitSha: "abc123",
+            diffStat: "1 file changed",
+            checkStatus: "passed",
+            checks: { status: "passed", total: 1, passed: 1 },
+            failureReason: null,
+          },
+          transcriptSummary: {
+            bounded: true,
+            commandStarts: 1,
+            commandFinishes: 1,
+            installAudits: 2,
+            egressAllowed: 2,
+            egressDenied: 0,
+            policyAllowed: 1,
+            policyDenied: 0,
+            credentialScrubStatus: "succeeded",
+            cleanupObserved: true,
+            snapshotStatus: "pending",
+            eventsTruncated: 0,
+          },
           runtimeSandbox: {
             provider: "fake",
             providerSandboxId: "runtime_smoke",

@@ -49,6 +49,7 @@ describe("Codex bridge runner", () => {
         expect(existsSync(join(input.env.CODEX_HOME, "rules", "agent-pool-bun-pr.rules"))).toBe(true);
         await writeFile(outputPath, "Opened PR https://github.com/example/tiny-fixture/pull/123", "utf8");
         await input.onStdout?.("{\"type\":\"command.started\",\"command\":\"bun run test\"}\n");
+        await input.onStdout?.("{\"type\":\"command.finished\",\"command\":\"bun run test\",\"exitCode\":0}\n");
         return { exitCode: 0, stdout: "", stderr: "" };
       }
       if (input.command === "git" && input.args[0] === "rev-parse" && input.args[1] === "--abbrev-ref") {
@@ -62,6 +63,20 @@ describe("Codex bridge runner", () => {
       }
       if (input.command === "git" && input.args[0] === "diff") {
         return { exitCode: 0, stdout: "1 file changed\n", stderr: "" };
+      }
+      if (input.command === "gh" && input.args.some((arg) => arg.includes("statusCheckRollup"))) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            url: "https://github.com/example/tiny-fixture/pull/123",
+            headRefName: "agent-pool/task/task_1",
+            headRefOid: "abc123",
+            statusCheckRollup: [
+              { name: "typecheck", status: "COMPLETED", conclusion: "SUCCESS", detailsUrl: "https://github.com/example/tiny-fixture/actions/runs/1" },
+            ],
+          }),
+          stderr: "",
+        };
       }
       if (input.command === "gh") {
         return { exitCode: 0, stdout: "https://github.com/example/tiny-fixture/pull/123\n", stderr: "" };
@@ -91,11 +106,96 @@ describe("Codex bridge runner", () => {
     expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("command-policy");
     expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("credentials-scrub-started");
     expect(events.filter((event) => event.kind === "output").map((event) => event.text).join("\n")).toContain("credentials-scrub-succeeded");
+    const finalResponse = events.find((event) => event.kind === "final_response") as Extract<BridgeCallbackEvent, { kind: "final_response" }> | undefined;
+    expect(finalResponse?.metadata).toMatchObject({
+      runner: "codex",
+      commandProfile: "agent-pool-bun-pr",
+      pr: {
+        url: "https://github.com/example/tiny-fixture/pull/123",
+        branch: "agent-pool/task/task_1",
+        finalCommitSha: "abc123",
+        checks: {
+          status: "passed",
+          total: 1,
+          passed: 1,
+        },
+      },
+      transcriptSummary: {
+        bounded: true,
+        commandStarts: 1,
+        commandFinishes: 1,
+        policy: {
+          denied: 0,
+        },
+        credentialScrubStatus: "succeeded",
+      },
+    });
+    const completion = events.find((event) => event.kind === "completion") as Extract<BridgeCallbackEvent, { kind: "completion" }> | undefined;
+    expect(completion?.metadata).toMatchObject({
+      pr: { url: "https://github.com/example/tiny-fixture/pull/123" },
+      transcriptSummary: { commandStarts: 1 },
+    });
+    const cleanup = events.find((event) => event.kind === "cleanup") as Extract<BridgeCallbackEvent, { kind: "cleanup" }> | undefined;
+    expect(cleanup?.metadata).toMatchObject({
+      credentialsScrubbed: true,
+      pr: { url: "https://github.com/example/tiny-fixture/pull/123" },
+    });
     expect(JSON.stringify(events)).not.toContain("short-lived-github-token");
     expect(JSON.stringify(events)).not.toContain("codex-secret");
     expect(JSON.stringify(events)).not.toContain("bridge-token");
     expect(existsSync("/tmp/agent-pool-codex/session_1/codex-home")).toBe(false);
     expect(commands.find((command) => command.command === "codex")?.args.join(" ")).toContain("A pull request URL is required for success");
+  });
+
+  test("captures PR check failure summary without treating PR metadata as missing", async () => {
+    const workspaceRoot = await tempDir("agent-pool-codex-check-failure-");
+    const events: BridgeCallbackEvent[] = [];
+    const executeProcess: CodexProcessExecutor = async (input) => {
+      if (input.command === "bun") return { exitCode: 0, stdout: "", stderr: "" };
+      if (input.command === "codex") {
+        await writeFile(readArgValue(input.args, "--output-last-message"), "Opened PR https://github.com/example/tiny-fixture/pull/456", "utf8");
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      if (input.command === "gh" && input.args.some((arg) => arg.includes("statusCheckRollup"))) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            url: "https://github.com/example/tiny-fixture/pull/456",
+            headRefName: "agent-pool/task/task_1",
+            headRefOid: "def456",
+            statusCheckRollup: [{ name: "test", status: "COMPLETED", conclusion: "FAILURE" }],
+          }),
+          stderr: "",
+        };
+      }
+      if (input.command === "gh") return { exitCode: 0, stdout: "https://github.com/example/tiny-fixture/pull/456\n", stderr: "" };
+      return { exitCode: 0, stdout: "agent-pool/task/task_1\n", stderr: "" };
+    };
+
+    const result = await runCodexBridgeSession({
+      session: bridgeSession(),
+      workspaceRoot,
+      env: runnerEnv({ HOME: workspaceRoot }),
+      fetch: collectBridgeEvents(events),
+      executeProcess,
+    });
+
+    expect(result.ok).toBe(true);
+    const finalResponse = events.find((event) => event.kind === "final_response") as Extract<BridgeCallbackEvent, { kind: "final_response" }> | undefined;
+    expect(finalResponse?.metadata).toMatchObject({
+      pr: {
+        url: "https://github.com/example/tiny-fixture/pull/456",
+        checks: {
+          status: "failed",
+          failed: 1,
+        },
+      },
+      postflight: {
+        checkStatusSummary: {
+          status: "failed",
+        },
+      },
+    });
   });
 
   test("reports untrusted repo metadata conflicts without weakening platform policy", async () => {
@@ -176,6 +276,15 @@ describe("Codex bridge runner", () => {
     expect(result.ok).toBe(false);
     expect(result.pullRequestUrl).toBeNull();
     expect(events).toContainEqual(expect.objectContaining({ kind: "failure", errorMessage: "codex runner completed without a pull request URL" }));
+    const failure = events.find((event) => event.kind === "failure") as Extract<BridgeCallbackEvent, { kind: "failure" }> | undefined;
+    expect(failure?.metadata).toMatchObject({
+      failureReason: {
+        code: "pull_request_missing",
+      },
+      transcriptSummary: {
+        bounded: true,
+      },
+    });
     expect(events).toContainEqual(expect.objectContaining({ kind: "cleanup" }));
   });
 
@@ -223,7 +332,7 @@ describe("Codex bridge runner", () => {
         return { exitCode: 0, stdout: "", stderr: "" };
       }
       if (input.command === "codex") {
-        await input.onStdout?.('{"type":"command.started","command":"curl https://example.test"}\n');
+        await input.onStdout?.('{"type":"command.started","command":"curl https://example.test?token=ghp_rawsecret123456789012345"}\n');
         return { exitCode: 0, stdout: "", stderr: "" };
       }
       return { exitCode: 0, stdout: "", stderr: "" };
@@ -245,7 +354,19 @@ describe("Codex bridge runner", () => {
     expect(output).toContain("command-policy");
     expect(output).toContain('"allowed":false');
     expect(output).toContain("curl_forbidden");
+    const failure = events.find((event) => event.kind === "failure") as Extract<BridgeCallbackEvent, { kind: "failure" }> | undefined;
+    expect(failure?.metadata).toMatchObject({
+      failureReason: {
+        code: "command_policy_denied",
+      },
+      transcriptSummary: {
+        policy: {
+          denied: 1,
+        },
+      },
+    });
     expect(JSON.stringify(events)).not.toContain("short-lived-github-token");
+    expect(JSON.stringify(events)).not.toContain("ghp_rawsecret");
   });
 
   test("scrubs Codex, GitHub CLI, and proxy credential files before snapshot cleanup", async () => {

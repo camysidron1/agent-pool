@@ -84,12 +84,45 @@ type DependencyInstallPhaseResult = {
   readonly changedFiles: readonly string[];
 };
 
+type CodexFailureReason = {
+  readonly code:
+    | "dependency_install_failed"
+    | "codex_exit_nonzero"
+    | "pull_request_missing"
+    | "command_policy_denied"
+    | "runner_exception";
+  readonly message: string;
+};
+
+type CodexTranscriptEvent = {
+  readonly kind: string;
+  readonly stage: string;
+  readonly command?: string;
+  readonly host?: string;
+  readonly allowed?: boolean;
+  readonly reason?: string;
+  readonly exitCode?: number | null;
+};
+
+type CodexTranscriptCollector = {
+  readonly recordChunk: (chunk: string) => void;
+  readonly recordSecurity: (securityKind: string, metadata: Readonly<Record<string, unknown>>) => void;
+  readonly snapshot: (input: {
+    readonly exitCode: number | null;
+    readonly pullRequestUrl: string | null;
+    readonly postflight?: Readonly<Record<string, unknown>> | null;
+    readonly failureReason?: CodexFailureReason | null;
+  }) => Readonly<Record<string, unknown>>;
+};
+
 const DEPENDENCY_INSTALL_COMMAND = ["bun", "install", "--frozen-lockfile"] as const;
+const MAX_TRANSCRIPT_EVENTS = 24;
 
 export async function runCodexBridgeSession(options: CodexBridgeSessionOptions): Promise<CodexBridgeSessionResult> {
   const env = options.env ?? readProcessEnv();
   const config = readCodexRunnerConfig(env, options.session, options.workspaceRoot);
   const executeProcess = options.executeProcess ?? executeNodeProcess;
+  const transcript = createCodexTranscriptCollector(env);
   const bridge = createBridgeRunner({
     session: options.session,
     workspaceRoot: options.workspaceRoot,
@@ -126,8 +159,8 @@ export async function runCodexBridgeSession(options: CodexBridgeSessionOptions):
         stream: "system",
         text: `codex runner starting with command profile ${config.commandProfile}`,
       },
-      securityOutput("codex-started", { allowed: true, policy: config.commandProfile }),
-      ...untrustedContext.findings.map((finding) => securityOutput("untrusted-context", untrustedContextMetadata(finding, config))),
+      securityOutput("codex-started", { allowed: true, policy: config.commandProfile }, transcript),
+      ...untrustedContext.findings.map((finding) => securityOutput("untrusted-context", untrustedContextMetadata(finding, config), transcript)),
     ],
   });
 
@@ -145,20 +178,34 @@ export async function runCodexBridgeSession(options: CodexBridgeSessionOptions):
       config,
       workspaceRoot: options.workspaceRoot,
       bridge,
+      transcript,
     });
     if (!installPhase.ok) {
       const scrubResult = await scrubAndReport({
         bridge,
         env,
         config,
+        transcript,
         verifyPaths: options.credentialScrubVerificationPaths,
+      });
+      const metadata = buildCodexTerminalMetadata({
+        config,
+        env,
+        transcript,
+        exitCode,
+        pullRequestUrl,
+        installPhase,
+        failureReason: {
+          code: "dependency_install_failed",
+          message: "dependency install phase failed before codex execution",
+        },
       });
       terminalPass = await bridge.runOnce({
         failure: {
           errorMessage: "dependency install phase failed before codex execution",
-          metadata: { runner: "codex", commandProfile: config.commandProfile, installPhase },
+          metadata,
         },
-        cleanup: cleanupMetadata("dependency install failed", config, { exitCode, pullRequestUrl, installPhase }, scrubResult),
+        cleanup: cleanupMetadata("dependency install failed", config, metadata, scrubResult, env),
       });
       return { ok: false, pullRequestUrl, exitCode, firstPass, terminalPass };
     }
@@ -170,91 +217,155 @@ export async function runCodexBridgeSession(options: CodexBridgeSessionOptions):
       env: buildCodexEnvironment(env, config),
       onStdout: async (chunk) => {
         stdout += chunk;
+        transcript.recordChunk(chunk);
         pullRequestUrl ??= extractPullRequestUrl(chunk);
         await enforceCommandSupervisorDecisions({
           decisions: commandSupervisor.inspectChunk(chunk),
           bridge,
           env,
+          transcript,
         });
         if (isPackageInstallOutput(chunk)) {
-          await bridge.runOnce({ output: [securityOutput("package-install", { allowed: true, policy: config.commandProfile })] });
+          await bridge.runOnce({ output: [securityOutput("package-install", { allowed: true, policy: config.commandProfile }, transcript)] });
         }
-        await bridge.runOnce({ output: [{ stream: "stdout", text: chunk }] });
+        await bridge.runOnce({ output: [{ stream: "stdout", text: redactKnownSecrets(chunk, env) }] });
       },
       onStderr: async (chunk) => {
         stderr += chunk;
+        transcript.recordChunk(chunk);
         pullRequestUrl ??= extractPullRequestUrl(chunk);
         await enforceCommandSupervisorDecisions({
           decisions: commandSupervisor.inspectChunk(chunk),
           bridge,
           env,
+          transcript,
         });
-        await bridge.runOnce({ output: [{ stream: "stderr", text: chunk }] });
+        await bridge.runOnce({ output: [{ stream: "stderr", text: redactKnownSecrets(chunk, env) }] });
       },
     });
 
     exitCode = result.exitCode;
+    if (result.stdout && !stdout.includes(result.stdout)) transcript.recordChunk(result.stdout);
+    if (result.stderr && !stderr.includes(result.stderr)) transcript.recordChunk(result.stderr);
     await enforceCommandSupervisorDecisions({
       decisions: commandSupervisor.flush(),
       bridge,
       env,
+      transcript,
     });
     stdout = mergeProcessText(stdout, result.stdout);
     stderr = mergeProcessText(stderr, result.stderr);
-    const finalText = await readFinalResponse(config.finalResponsePath, stdout, stderr);
+    const finalText = redactKnownSecrets(await readFinalResponse(config.finalResponsePath, stdout, stderr), env);
     pullRequestUrl ??= extractPullRequestUrl(finalText) ?? extractPullRequestUrl(stdout) ?? extractPullRequestUrl(stderr);
     pullRequestUrl ??= await readPullRequestUrlFromGh({ executeProcess, env, config, workspaceRoot: options.workspaceRoot });
     const postflight = await runCodexPostflight({ executeProcess, env, config, workspaceRoot: options.workspaceRoot, pullRequestUrl });
-    await bridge.runOnce({ output: [securityOutput("postflight", { ...postflight, installPhase })] });
+    await bridge.runOnce({ output: [securityOutput("postflight", { ...postflight, installPhase }, transcript)] });
     const scrubResult = await scrubAndReport({
       bridge,
       env,
       config,
+      transcript,
       verifyPaths: options.credentialScrubVerificationPaths,
     });
 
     if (exitCode !== 0) {
+      const metadata = buildCodexTerminalMetadata({
+        config,
+        env,
+        transcript,
+        exitCode,
+        pullRequestUrl,
+        postflight,
+        installPhase,
+        failureReason: {
+          code: "codex_exit_nonzero",
+          message: `codex exec exited ${exitCode}`,
+        },
+      });
       terminalPass = await bridge.runOnce({
         failure: {
           errorMessage: `codex exec exited ${exitCode}`,
-          metadata: { runner: "codex", commandProfile: config.commandProfile, stderr: truncate(stderr), installPhase },
+          metadata: { ...metadata, stderr: truncate(redactKnownSecrets(stderr, env)) },
         },
-        cleanup: cleanupMetadata("codex failed", config, { exitCode, pullRequestUrl, postflight }, scrubResult),
+        cleanup: cleanupMetadata("codex failed", config, metadata, scrubResult, env),
       });
       return { ok: false, pullRequestUrl, exitCode, firstPass, terminalPass };
     }
 
     if (!pullRequestUrl) {
+      const metadata = buildCodexTerminalMetadata({
+        config,
+        env,
+        transcript,
+        exitCode,
+        pullRequestUrl,
+        postflight,
+        installPhase,
+        finalResponseText: finalText,
+        failureReason: {
+          code: "pull_request_missing",
+          message: "codex runner completed without a pull request URL",
+        },
+      });
       terminalPass = await bridge.runOnce({
         failure: {
           errorMessage: "codex runner completed without a pull request URL",
-          metadata: { runner: "codex", commandProfile: config.commandProfile, postflight, installPhase },
+          metadata,
         },
-        cleanup: cleanupMetadata("codex missing pull request", config, { exitCode, pullRequestUrl, postflight }, scrubResult),
+        cleanup: cleanupMetadata("codex missing pull request", config, metadata, scrubResult, env),
       });
       return { ok: false, pullRequestUrl, exitCode, firstPass, terminalPass };
     }
 
+    const metadata = buildCodexTerminalMetadata({
+      config,
+      env,
+      transcript,
+      exitCode,
+      pullRequestUrl,
+      postflight,
+      installPhase,
+      finalResponseText: finalText,
+    });
     terminalPass = await bridge.runOnce({
       finalResponseText: finalText,
-      finalResponseMetadata: { runner: "codex", commandProfile: config.commandProfile, pullRequestUrl, postflight, installPhase },
-      completion: { metadata: { runner: "codex", commandProfile: config.commandProfile, pullRequestUrl, postflight, installPhase } },
-      cleanup: cleanupMetadata("codex completed", config, { exitCode, pullRequestUrl, postflight }, scrubResult),
+      finalResponseMetadata: metadata,
+      completion: { metadata },
+      cleanup: cleanupMetadata("codex completed", config, metadata, scrubResult, env),
     });
     return { ok: true, pullRequestUrl, exitCode, firstPass, terminalPass };
   } catch (error) {
+    const failureReason: CodexFailureReason = error instanceof CodexCommandPolicyViolationError
+      ? {
+          code: "command_policy_denied",
+          message: `command policy denied: ${error.decision.reason}`,
+        }
+      : {
+          code: "runner_exception",
+          message: redactKnownSecrets(errorMessage(error), env),
+        };
     const scrubResult = await scrubAndReport({
       bridge,
       env,
       config,
+      transcript,
       verifyPaths: options.credentialScrubVerificationPaths,
+    });
+    const metadata = buildCodexTerminalMetadata({
+      config,
+      env,
+      transcript,
+      exitCode,
+      pullRequestUrl,
+      installPhase,
+      failureReason,
     });
     terminalPass = await bridge.runOnce({
       failure: {
         errorMessage: `codex runner failed: ${redactKnownSecrets(errorMessage(error), env)}`,
-        metadata: { runner: "codex", commandProfile: config.commandProfile, installPhase },
+        metadata,
       },
-      cleanup: cleanupMetadata("codex runner failed", config, { exitCode, pullRequestUrl }, scrubResult),
+      cleanup: cleanupMetadata("codex runner failed", config, metadata, scrubResult, env),
     });
     return { ok: false, pullRequestUrl, exitCode, firstPass, terminalPass };
   }
@@ -266,6 +377,7 @@ async function runDependencyInstallPhase(input: {
   readonly config: CodexRunnerConfig;
   readonly workspaceRoot: string;
   readonly bridge: Pick<ReturnType<typeof createBridgeRunner>, "runOnce">;
+  readonly transcript: CodexTranscriptCollector;
 }): Promise<DependencyInstallPhaseResult> {
   await input.bridge.runOnce({
     output: [
@@ -274,7 +386,7 @@ async function runDependencyInstallPhase(input: {
         command: DEPENDENCY_INSTALL_COMMAND.join(" "),
         policy: input.config.commandProfile,
         allowed: true,
-      }),
+      }, input.transcript),
     ],
   });
 
@@ -294,7 +406,7 @@ async function runDependencyInstallPhase(input: {
                 command: DEPENDENCY_INSTALL_COMMAND.join(" "),
                 allowed: true,
                 policy: input.config.commandProfile,
-              }),
+              }, input.transcript),
             ],
           });
         }
@@ -325,7 +437,7 @@ async function runDependencyInstallPhase(input: {
         exitCode: result.exitCode,
         lockfileChanged,
         changedFiles,
-      }),
+      }, input.transcript),
     ],
   });
   return phaseResult;
@@ -374,6 +486,7 @@ async function scrubAndReport(input: {
   readonly bridge: Pick<ReturnType<typeof createBridgeRunner>, "runOnce">;
   readonly env: CodexRunnerEnvironment;
   readonly config: CodexRunnerConfig;
+  readonly transcript: CodexTranscriptCollector;
   readonly verifyPaths?: readonly string[];
 }): Promise<CodexCredentialScrubResult> {
   const targetCount = buildCredentialScrubPaths(input).length + (input.verifyPaths?.length ?? 0);
@@ -382,7 +495,7 @@ async function scrubAndReport(input: {
       securityOutput("credentials-scrub-started", {
         allowed: true,
         targetCount,
-      }),
+      }, input.transcript),
     ],
   });
   const result = await scrubCodexSandboxSecrets({
@@ -403,7 +516,7 @@ async function scrubAndReport(input: {
               reason: "scrub-incomplete",
               errorMessage: redactKnownSecrets(result.errorMessage ?? "credential scrub verification failed", input.env),
             }),
-      }),
+      }, input.transcript),
     ],
   });
   return result;
@@ -614,10 +727,11 @@ async function enforceCommandSupervisorDecisions(input: {
   readonly decisions: readonly CodexCommandSupervisorDecision[];
   readonly bridge: Pick<ReturnType<typeof createBridgeRunner>, "runOnce">;
   readonly env: CodexRunnerEnvironment;
+  readonly transcript: CodexTranscriptCollector;
 }): Promise<void> {
   for (const decision of input.decisions) {
     const metadata = commandDecisionMetadata(decision, input.env);
-    await input.bridge.runOnce({ output: [securityOutput("command-policy", metadata)] });
+    await input.bridge.runOnce({ output: [securityOutput("command-policy", metadata, input.transcript)] });
     if (decision.kind === "denied") {
       throw new CodexCommandPolicyViolationError(decision);
     }
@@ -678,6 +792,7 @@ async function runCodexPostflight(input: {
     .split("\n")
     .map((value) => value.trim())
     .filter(Boolean);
+  const githubPullRequest = await readPullRequestMetadataFromGh(input);
 
   return {
     pullRequestUrl: input.pullRequestUrl,
@@ -687,7 +802,134 @@ async function runCodexPostflight(input: {
     diffStat: cleanProcessOutput(diffStat.stdout),
     changedFiles: changedFileList,
     lockfileChanged: changedFileList.some((path) => path === "bun.lock" || path.endsWith("/bun.lock")),
+    githubPullRequest,
+    checkStatusSummary: githubPullRequest.checks,
     postflightOk: Boolean(input.pullRequestUrl) && branch.exitCode === 0 && headSha.exitCode === 0,
+  };
+}
+
+async function readPullRequestMetadataFromGh(input: {
+  readonly executeProcess: CodexProcessExecutor;
+  readonly env: CodexRunnerEnvironment;
+  readonly config: CodexRunnerConfig;
+  readonly workspaceRoot: string;
+  readonly pullRequestUrl: string | null;
+}): Promise<Readonly<Record<string, unknown>>> {
+  if (!input.pullRequestUrl) {
+    return {
+      observed: false,
+      url: null,
+      checks: emptyCheckStatusSummary("missing_pr_url"),
+    };
+  }
+  const result = await input
+    .executeProcess({
+      command: "gh",
+      args: ["pr", "view", "--json", "url,headRefName,headRefOid,statusCheckRollup"],
+      cwd: input.workspaceRoot,
+      env: buildCodexEnvironment(input.env, input.config),
+    })
+    .catch((error) => ({ exitCode: 1, stdout: "", stderr: errorMessage(error) }));
+  if (result.exitCode !== 0) {
+    return {
+      observed: false,
+      url: input.pullRequestUrl,
+      checks: emptyCheckStatusSummary("gh_pr_view_failed"),
+      errorMessage: truncate(redactKnownSecrets(result.stderr || result.stdout || "gh pr view failed", input.env)),
+    };
+  }
+
+  const parsed = readJsonObject(result.stdout);
+  if (!parsed) {
+    return {
+      observed: true,
+      url: extractPullRequestUrl(result.stdout) ?? input.pullRequestUrl,
+      checks: emptyCheckStatusSummary("gh_pr_view_unstructured"),
+    };
+  }
+
+  const statusCheckRollup = Array.isArray(parsed.statusCheckRollup) ? parsed.statusCheckRollup : [];
+  return {
+    observed: true,
+    url: readString(parsed.url) ?? input.pullRequestUrl,
+    branch: readString(parsed.headRefName),
+    finalCommitSha: readString(parsed.headRefOid),
+    checks: summarizeStatusCheckRollup(statusCheckRollup),
+  };
+}
+
+function summarizeStatusCheckRollup(values: readonly unknown[]): Readonly<Record<string, unknown>> {
+  const checks = values
+    .map(readCheckRecord)
+    .filter((value): value is { readonly name: string; readonly status: string; readonly conclusion: string | null; readonly url: string | null } => value !== null)
+    .slice(0, 12);
+  const counts = { passed: 0, failed: 0, pending: 0, skipped: 0, unknown: 0 };
+  for (const check of checks) {
+    const state = classifyCheckState(check);
+    counts[state] += 1;
+  }
+  const total = values.length;
+  const status = total === 0
+    ? "none"
+    : counts.failed > 0
+      ? "failed"
+      : counts.pending > 0
+        ? "pending"
+        : counts.unknown > 0
+          ? "unknown"
+          : "passed";
+  return {
+    status,
+    total,
+    passed: counts.passed,
+    failed: counts.failed,
+    pending: counts.pending,
+    skipped: counts.skipped,
+    unknown: counts.unknown,
+    checks,
+    truncated: values.length > checks.length,
+  };
+}
+
+function readCheckRecord(value: unknown): { readonly name: string; readonly status: string; readonly conclusion: string | null; readonly url: string | null } | null {
+  const record = readJsonRecord(value);
+  if (!record) return null;
+  const name =
+    readString(record.name) ??
+    readString(record.workflowName) ??
+    readString(record.context) ??
+    readString(record.__typename) ??
+    "unnamed check";
+  const status = readString(record.status) ?? readString(record.state) ?? readString(record.conclusion) ?? "UNKNOWN";
+  return {
+    name,
+    status,
+    conclusion: readString(record.conclusion) ?? readString(record.state),
+    url: readString(record.detailsUrl) ?? readString(record.targetUrl) ?? readString(record.link),
+  };
+}
+
+function classifyCheckState(check: { readonly status: string; readonly conclusion: string | null }): "passed" | "failed" | "pending" | "skipped" | "unknown" {
+  const value = `${check.status} ${check.conclusion ?? ""}`.toUpperCase();
+  if (/\b(SUCCESS|PASSED|PASS)\b/.test(value)) return "passed";
+  if (/\b(FAILURE|FAILED|ERROR|TIMED_OUT|ACTION_REQUIRED|CANCELLED|CANCELED)\b/.test(value)) return "failed";
+  if (/\b(PENDING|EXPECTED|QUEUED|IN_PROGRESS|WAITING|REQUESTED)\b/.test(value)) return "pending";
+  if (/\b(SKIPPED|NEUTRAL)\b/.test(value)) return "skipped";
+  return "unknown";
+}
+
+function emptyCheckStatusSummary(reason: string): Readonly<Record<string, unknown>> {
+  return {
+    status: "unknown",
+    total: 0,
+    passed: 0,
+    failed: 0,
+    pending: 0,
+    skipped: 0,
+    unknown: 0,
+    checks: [],
+    reason,
+    truncated: false,
   };
 }
 
@@ -716,7 +958,181 @@ function isLockfilePath(path: string): boolean {
   return path === "bun.lock" || path === "bun.lockb" || path.endsWith("/bun.lock") || path.endsWith("/bun.lockb");
 }
 
-function securityOutput(securityKind: string, metadata: Readonly<Record<string, unknown>>): BridgeRunnerOutputInput {
+function createCodexTranscriptCollector(env: CodexRunnerEnvironment): CodexTranscriptCollector {
+  const events: CodexTranscriptEvent[] = [];
+  let truncated = 0;
+  let commandStarts = 0;
+  let commandFinishes = 0;
+  let installAudits = 0;
+  let egressAllowed = 0;
+  let egressDenied = 0;
+  let policyAllowed = 0;
+  let policyDenied = 0;
+  let credentialScrubStatus: "not_observed" | "started" | "succeeded" | "failed" = "not_observed";
+
+  const push = (event: CodexTranscriptEvent) => {
+    if (events.length >= MAX_TRANSCRIPT_EVENTS) {
+      truncated += 1;
+      return;
+    }
+    events.push(sanitizeTranscriptEvent(event, env));
+  };
+
+  const recordSecurity = (securityKind: string, metadata: Readonly<Record<string, unknown>>) => {
+    const allowed = metadata.allowed === true ? true : metadata.allowed === false ? false : undefined;
+    if (securityKind === "package-install" || securityKind.startsWith("dependency-install")) installAudits += 1;
+    if (securityKind === "command-policy") {
+      if (allowed === false) policyDenied += 1;
+      else if (allowed === true) policyAllowed += 1;
+    }
+    if (securityKind.includes("egress")) {
+      if (allowed === false) egressDenied += 1;
+      else if (allowed === true) egressAllowed += 1;
+    }
+    if (securityKind === "credentials-scrub-started") credentialScrubStatus = "started";
+    if (securityKind === "credentials-scrub-succeeded") credentialScrubStatus = "succeeded";
+    if (securityKind === "credentials-scrub-failed") credentialScrubStatus = "failed";
+    push({
+      kind: securityKind,
+      stage: securityStageForKind(securityKind),
+      command: readString(metadata.command) ?? undefined,
+      host: readString(metadata.host) ?? undefined,
+      allowed,
+      reason: readString(metadata.reason) ?? undefined,
+      exitCode: typeof metadata.exitCode === "number" ? metadata.exitCode : null,
+    });
+  };
+
+  const recordChunk = (chunk: string) => {
+    for (const line of chunk.split("\n")) {
+      const parsed = readJsonObject(line);
+      if (!parsed) continue;
+      const type = readString(parsed.type);
+      const securityKind = readString(parsed.securityKind);
+      if (type?.startsWith("security") && securityKind) {
+        recordSecurity(securityKind, parsed);
+        continue;
+      }
+      if (type === "command.started") {
+        commandStarts += 1;
+        push({
+          kind: "command.started",
+          stage: "codex",
+          command: readString(parsed.command) ?? "<unknown>",
+        });
+      }
+      if (type === "command.finished" || type === "command.completed") {
+        commandFinishes += 1;
+        push({
+          kind: "command.finished",
+          stage: "codex",
+          command: readString(parsed.command) ?? "<unknown>",
+          exitCode: typeof parsed.exitCode === "number" ? parsed.exitCode : null,
+        });
+      }
+    }
+  };
+
+  return {
+    recordChunk,
+    recordSecurity,
+    snapshot(input) {
+      return redactMetadataDeep({
+        bounded: true,
+        maxEvents: MAX_TRANSCRIPT_EVENTS,
+        eventsTruncated: truncated,
+        commandStarts,
+        commandFinishes,
+        installAudits,
+        egress: {
+          allowed: egressAllowed,
+          denied: egressDenied,
+        },
+        policy: {
+          allowed: policyAllowed,
+          denied: policyDenied,
+        },
+        credentialScrubStatus,
+        exitCode: input.exitCode,
+        pullRequestUrl: input.pullRequestUrl,
+        failureReason: input.failureReason ?? null,
+        checkStatusSummary: readJsonRecord(input.postflight?.checkStatusSummary) ?? null,
+        events,
+      }, env) as Readonly<Record<string, unknown>>;
+    },
+  };
+}
+
+function sanitizeTranscriptEvent(event: CodexTranscriptEvent, env: CodexRunnerEnvironment): CodexTranscriptEvent {
+  return {
+    kind: event.kind,
+    stage: event.stage,
+    ...(event.command ? { command: truncate(redactKnownSecrets(event.command, env)) } : {}),
+    ...(event.host ? { host: truncate(redactKnownSecrets(event.host, env)) } : {}),
+    ...(event.allowed === undefined ? {} : { allowed: event.allowed }),
+    ...(event.reason ? { reason: truncate(redactKnownSecrets(event.reason, env)) } : {}),
+    ...(event.exitCode === undefined ? {} : { exitCode: event.exitCode }),
+  };
+}
+
+function buildCodexTerminalMetadata(input: {
+  readonly config: CodexRunnerConfig;
+  readonly env: CodexRunnerEnvironment;
+  readonly transcript: CodexTranscriptCollector;
+  readonly exitCode: number | null;
+  readonly pullRequestUrl: string | null;
+  readonly postflight?: Readonly<Record<string, unknown>> | null;
+  readonly installPhase?: DependencyInstallPhaseResult | null;
+  readonly finalResponseText?: string | null;
+  readonly failureReason?: CodexFailureReason | null;
+}): Readonly<Record<string, unknown>> {
+  const finalResponseText = input.finalResponseText ?? null;
+  const metadata = {
+    runner: "codex",
+    commandProfile: input.config.commandProfile,
+    pullRequestUrl: input.pullRequestUrl,
+    pr: normalizePullRequestLifecycle(input.pullRequestUrl, input.postflight ?? null),
+    postflight: input.postflight ?? null,
+    installPhase: input.installPhase ?? null,
+    finalResponse: finalResponseText
+      ? {
+          captured: true,
+          length: finalResponseText.length,
+          pullRequestUrl: extractPullRequestUrl(finalResponseText),
+        }
+      : { captured: false },
+    failureReason: input.failureReason ?? null,
+    transcriptSummary: input.transcript.snapshot({
+      exitCode: input.exitCode,
+      pullRequestUrl: input.pullRequestUrl,
+      postflight: input.postflight ?? null,
+      failureReason: input.failureReason ?? null,
+    }),
+  };
+  return redactMetadataDeep(metadata, input.env) as Readonly<Record<string, unknown>>;
+}
+
+function normalizePullRequestLifecycle(
+  pullRequestUrl: string | null,
+  postflight: Readonly<Record<string, unknown>> | null,
+): Readonly<Record<string, unknown>> {
+  const githubPullRequest = readJsonRecord(postflight?.githubPullRequest);
+  return {
+    url: readString(githubPullRequest?.url) ?? pullRequestUrl,
+    branch: readString(githubPullRequest?.branch) ?? readString(postflight?.branch),
+    finalCommitSha: readString(githubPullRequest?.finalCommitSha) ?? readString(postflight?.headSha),
+    diffStat: readString(postflight?.diffStat),
+    changedFiles: Array.isArray(postflight?.changedFiles) ? postflight.changedFiles.slice(0, 30) : [],
+    checks: readJsonRecord(githubPullRequest?.checks) ?? readJsonRecord(postflight?.checkStatusSummary) ?? emptyCheckStatusSummary("not_observed"),
+  };
+}
+
+function securityOutput(
+  securityKind: string,
+  metadata: Readonly<Record<string, unknown>>,
+  transcript?: CodexTranscriptCollector,
+): BridgeRunnerOutputInput {
+  transcript?.recordSecurity(securityKind, metadata);
   return {
     stream: "system",
     text: `${JSON.stringify({ type: "security", securityKind, stage: securityStageForKind(securityKind), ...redactMetadata(metadata) })}\n`,
@@ -735,7 +1151,7 @@ function redactMetadata(metadata: Readonly<Record<string, unknown>>): Readonly<R
   return Object.fromEntries(
     Object.entries(metadata).map(([key, value]) => [
       key,
-      /token|secret|password|key|proxy/i.test(key) ? "[REDACTED]" : value,
+      /token|secret|password|key|proxy/i.test(key) ? "[REDACTED]" : redactMetadataDeep(value, {}),
     ]),
   );
 }
@@ -749,10 +1165,11 @@ function cleanupMetadata(
   config: Pick<CodexRunnerConfig, "commandProfile">,
   metadata: Readonly<Record<string, unknown>>,
   scrubResult: CodexCredentialScrubResult,
+  env: CodexRunnerEnvironment,
 ): { readonly reason: string; readonly metadata: Readonly<Record<string, unknown>> } {
   return {
     reason,
-    metadata: {
+    metadata: redactMetadataDeep({
       runner: "codex",
       commandProfile: config.commandProfile,
       credentialsScrubbed: scrubResult.ok,
@@ -764,7 +1181,7 @@ function cleanupMetadata(
             credentialScrubRemainingCount: scrubResult.remainingPaths.length,
           }),
       ...metadata,
-    },
+    }, env) as Readonly<Record<string, unknown>>,
   };
 }
 
@@ -862,13 +1279,51 @@ function truncate(value: string): string {
   return value.length <= 2000 ? value : `${value.slice(0, 2000)}...`;
 }
 
+function readJsonObject(value: string): Readonly<Record<string, unknown>> | null {
+  try {
+    const parsed = JSON.parse(value);
+    return readJsonRecord(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function readJsonRecord(value: unknown): Readonly<Record<string, unknown>> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Readonly<Record<string, unknown>> : null;
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function redactMetadataDeep(value: unknown, env: CodexRunnerEnvironment): unknown {
+  if (typeof value === "string") return redactKnownSecrets(value, env);
+  if (Array.isArray(value)) return value.slice(0, 50).map((item) => redactMetadataDeep(item, env));
+  const record = readJsonRecord(value);
+  if (!record) return value;
+  return Object.fromEntries(
+    Object.entries(record).map(([key, child]) => [
+      key,
+      /token|secret|password|privateKey|apiKey|proxyUrl|sessionToken/i.test(key) ? "[REDACTED]" : redactMetadataDeep(child, env),
+    ]),
+  );
+}
+
 function redactKnownSecrets(message: string, env: CodexRunnerEnvironment): string {
   let redacted = message;
   for (const [name, value] of Object.entries(env)) {
     if (!/(TOKEN|SECRET|PASSWORD|KEY|PROXY)/i.test(name) || !value || value.length < 6) continue;
     redacted = redacted.split(value).join("[REDACTED]");
   }
-  return redacted;
+  return redacted
+    .replace(/~\/\.agent-pool\/data\/agent-pool\.db/g, "[REDACTED_DB_PATH]")
+    .replace(/\/Users\/[^\s"']+\/\.agent-pool\/data\/agent-pool\.db/g, "[REDACTED_DB_PATH]")
+    .replace(/\/var\/lib\/agent-pool\/web-sandbox\.db/g, "[REDACTED_DB_PATH]")
+    .replace(/\b(?:ghp|ghs|github_pat)_[A-Za-z0-9_]+/g, "[REDACTED_GITHUB_TOKEN]")
+    .replace(/\be2b_[A-Za-z0-9_-]{10,}/g, "[REDACTED_E2B_KEY]")
+    .replace(/\bsk-[A-Za-z0-9_-]{10,}/g, "[REDACTED_CODEX_KEY]")
+    .replace(/(https?:\/\/)([^/\s:@]+):([^@\s/]+)@/g, "$1[REDACTED]@")
+    .replace(/\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|KEY|PROXY)[A-Z0-9_]*)=([^\s"']+)/gi, "$1=[REDACTED]");
 }
 
 function errorMessage(error: unknown): string {
