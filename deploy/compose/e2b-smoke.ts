@@ -243,11 +243,42 @@ export type E2BLiveSmokeDoctorReport = {
   readonly checks: readonly E2BReadinessCheck[];
 };
 
+export type E2BSmokeCleanupActionStatus = "completed" | "already_clean" | "skipped" | "blocked" | "failed";
+
+export type E2BSmokeCleanupAction = {
+  readonly id: string;
+  readonly status: E2BSmokeCleanupActionStatus;
+  readonly detail: string;
+  readonly target?: string;
+  readonly httpStatus?: number | null;
+};
+
+export type E2BSmokeCleanupResult = {
+  readonly ok: boolean;
+  readonly kind: "agent-pool-e2b-smoke-cleanup";
+  readonly runId: string;
+  readonly apiUrl: string;
+  readonly orchestratorUrl: string;
+  readonly actions: readonly E2BSmokeCleanupAction[];
+  readonly before: unknown;
+  readonly after: unknown;
+  readonly redaction: {
+    readonly containsNoServiceToken: true;
+    readonly containsNoGithubToken: true;
+    readonly containsNoE2BApiKey: true;
+    readonly containsNoCodexApiKey: true;
+    readonly containsNoProxyCredentials: true;
+    readonly containsNoBridgeOrSessionToken: true;
+  };
+};
+
 type ParsedE2BSmokeArgs = {
   readonly dryRun: boolean;
   readonly readiness: boolean;
   readonly doctor: boolean;
+  readonly cleanup: boolean;
   readonly apiUrl: string;
+  readonly orchestratorUrl: string;
   readonly serviceToken?: string;
   readonly timeoutMs: number;
   readonly repositoryUrl: string;
@@ -262,9 +293,13 @@ type ParsedE2BSmokeArgs = {
   readonly callbackTimeoutMs: number;
   readonly evidence: boolean;
   readonly validateEvidencePath?: string;
+  readonly cleanupPr: boolean;
+  readonly cleanupBranch: boolean;
+  readonly cleanupSnapshots: boolean;
 };
 
 const DEFAULT_API_URL = "http://127.0.0.1:3000";
+const DEFAULT_ORCHESTRATOR_URL = "http://127.0.0.1:3001";
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_REPOSITORY_URL = "https://github.com/example/tiny-fixture.git";
 const DEFAULT_BASE_REF = "main";
@@ -1282,6 +1317,19 @@ export async function runE2BSmokeCli(args: readonly string[] = process.argv.slic
   const env = options.env ?? await loadLocalEnv({ cwd: options.cwd });
   const generatedAt = new Date(options.now?.() ?? Date.now()).toISOString();
 
+  if (parsed.cleanup) {
+    const plan = createE2BSmokePlan({ ...parsed, env });
+    const serviceToken = parsed.serviceToken ?? loadConfig(buildE2BSmokeConfigEnv(env, readAgentRunnerMode(parsed.agentRunnerMode ?? env.AGENT_RUNNER_MODE))).serviceToken.token;
+    const result = await runE2BSmokeCleanup({
+      plan,
+      parsed,
+      serviceToken,
+      fetch: options.fetch ?? fetch,
+    });
+    write(`${JSON.stringify(result, null, 2)}\n`);
+    return result.ok ? 0 : 1;
+  }
+
   if (parsed.doctor) {
     const report = createE2BLiveSmokeDoctorReport({ ...parsed, env });
     write(`${JSON.stringify(report, null, 2)}\n`);
@@ -1447,7 +1495,9 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
   let dryRun = false;
   let readiness = false;
   let doctor = false;
+  let cleanup = false;
   let apiUrl = DEFAULT_API_URL;
+  let orchestratorUrl = DEFAULT_ORCHESTRATOR_URL;
   let serviceToken: string | undefined;
   let timeoutMs = DEFAULT_TIMEOUT_MS;
   let repositoryUrl = DEFAULT_REPOSITORY_URL;
@@ -1462,6 +1512,9 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
   let callbackTimeoutMs = DEFAULT_CALLBACK_REACHABILITY_TIMEOUT_MS;
   let evidence = false;
   let validateEvidencePath: string | undefined;
+  let cleanupPr = false;
+  let cleanupBranch = false;
+  let cleanupSnapshots = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -1476,8 +1529,14 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
       case "--doctor":
         doctor = true;
         break;
+      case "--cleanup":
+        cleanup = true;
+        break;
       case "--api-url":
         apiUrl = readFlagValue(args, (index += 1), arg);
+        break;
+      case "--orchestrator-url":
+        orchestratorUrl = readFlagValue(args, (index += 1), arg);
         break;
       case "--service-token":
         serviceToken = readFlagValue(args, (index += 1), arg);
@@ -1521,6 +1580,18 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
       case "--validate-evidence":
         validateEvidencePath = readFlagValue(args, (index += 1), arg);
         break;
+      case "--cleanup-pr":
+      case "--close-pr":
+        cleanupPr = true;
+        break;
+      case "--cleanup-branch":
+      case "--delete-branch":
+        cleanupBranch = true;
+        break;
+      case "--cleanup-snapshots":
+      case "--delete-snapshots":
+        cleanupSnapshots = true;
+        break;
       default:
         throw new Error(`unknown smoke:e2b argument: ${arg}`);
     }
@@ -1530,7 +1601,9 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
     dryRun,
     readiness,
     doctor,
-    apiUrl,
+    cleanup,
+    apiUrl: trimTrailingSlash(apiUrl),
+    orchestratorUrl: trimTrailingSlash(orchestratorUrl),
     serviceToken,
     timeoutMs,
     repositoryUrl,
@@ -1545,6 +1618,9 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
     callbackTimeoutMs,
     evidence,
     ...(validateEvidencePath ? { validateEvidencePath } : {}),
+    cleanupPr,
+    cleanupBranch,
+    cleanupSnapshots,
   };
 }
 
@@ -1744,6 +1820,307 @@ async function verifyGitHubAppReadiness(plan: E2BSmokePlan, serviceToken: string
     };
   }
   return body;
+}
+
+async function runE2BSmokeCleanup(input: {
+  readonly plan: E2BSmokePlan;
+  readonly parsed: ParsedE2BSmokeArgs;
+  readonly serviceToken: string;
+  readonly fetch: typeof fetch;
+}): Promise<E2BSmokeCleanupResult> {
+  const before = await fetchSmokeStatusForCleanup(input.plan, input.serviceToken, input.fetch);
+  const actions: E2BSmokeCleanupAction[] = [];
+  const beforeDiagnostics = readRecord(readRecord(before)?.diagnostics);
+  const beforeRuntimeSandbox = readRecord(beforeDiagnostics?.runtimeSandbox);
+  const beforeSnapshot = readRecord(beforeDiagnostics?.latestSnapshot);
+  const needsFinalizer =
+    cleanupStatusForRuntimeSandbox(beforeRuntimeSandbox).status === "blocked" ||
+    (input.parsed.cleanupSnapshots && cleanupStatusForSnapshot(beforeSnapshot).status === "blocked");
+
+  if (needsFinalizer) {
+    actions.push(await tickOrchestratorFinalizer(input.parsed, input.plan.serviceTokenHeaderName, input.serviceToken, input.fetch));
+  } else {
+    actions.push({ id: "orchestrator-finalizer", status: "skipped", detail: "Runtime sandbox and snapshot status do not require a finalizer tick." });
+  }
+
+  const after = needsFinalizer ? await fetchSmokeStatusForCleanup(input.plan, input.serviceToken, input.fetch) : before;
+  const afterDiagnostics = readRecord(readRecord(after)?.diagnostics);
+  const runtimeSandbox = readRecord(afterDiagnostics?.runtimeSandbox);
+  const latestSnapshot = readRecord(afterDiagnostics?.latestSnapshot);
+  actions.push(cleanupStatusForRuntimeSandbox(runtimeSandbox));
+
+  if (input.parsed.cleanupSnapshots) {
+    actions.push(cleanupStatusForSnapshot(latestSnapshot));
+  } else {
+    actions.push({ id: "snapshot-delete", status: "skipped", detail: "Snapshot deletion was not requested." });
+  }
+
+  if (input.parsed.cleanupPr || input.parsed.cleanupBranch) {
+    actions.push(...await cleanupGitHubSmokeRefs({
+      plan: input.plan,
+      status: after,
+      closePr: input.parsed.cleanupPr,
+      deleteBranch: input.parsed.cleanupBranch,
+      serviceToken: input.serviceToken,
+      fetch: input.fetch,
+    }));
+  } else {
+    actions.push({ id: "github-pr-close", status: "skipped", detail: "Draft PR close was not requested." });
+    actions.push({ id: "github-branch-delete", status: "skipped", detail: "Smoke branch deletion was not requested." });
+  }
+
+  const result = {
+    ok: actions.every((action) => ["completed", "already_clean", "skipped"].includes(action.status)),
+    kind: "agent-pool-e2b-smoke-cleanup" as const,
+    runId: input.plan.runId,
+    apiUrl: redactUrlCredentials(input.plan.apiUrl),
+    orchestratorUrl: redactUrlCredentials(input.parsed.orchestratorUrl),
+    actions,
+    before: redactEvidenceValue(before),
+    after: redactEvidenceValue(after),
+    redaction: {
+      containsNoServiceToken: true as const,
+      containsNoGithubToken: true as const,
+      containsNoE2BApiKey: true as const,
+      containsNoCodexApiKey: true as const,
+      containsNoProxyCredentials: true as const,
+      containsNoBridgeOrSessionToken: true as const,
+    },
+  };
+  return redactEvidenceValue(result) as E2BSmokeCleanupResult;
+}
+
+async function fetchSmokeStatusForCleanup(plan: E2BSmokePlan, serviceToken: string, fetchImpl: typeof fetch): Promise<unknown> {
+  const response = await fetchImpl(plan.requests.status.url, {
+    headers: {
+      [plan.serviceTokenHeaderName]: serviceToken,
+    },
+  });
+  const body = await response.json().catch(() => null);
+  if (!response.ok) {
+    return { ok: false, status: response.status, error: "smoke_status_unavailable", body: redactEvidenceValue(body) };
+  }
+  return body;
+}
+
+async function tickOrchestratorFinalizer(
+  parsed: ParsedE2BSmokeArgs,
+  serviceTokenHeaderName: string,
+  serviceToken: string,
+  fetchImpl: typeof fetch,
+): Promise<E2BSmokeCleanupAction> {
+  const url = `${parsed.orchestratorUrl}/internal/finalizer/tick`;
+  const response = await fetchImpl(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      [serviceTokenHeaderName]: serviceToken,
+    },
+    body: JSON.stringify({ reason: "smoke-cleanup" }),
+  });
+  const body = await response.json().catch(() => null);
+  if (response.status === 404 || response.status === 503) {
+    return {
+      id: "orchestrator-finalizer",
+      status: "blocked",
+      httpStatus: response.status,
+      detail: "Orchestrator finalizer tick is unavailable; ensure the orchestrator is running with worker loops.",
+    };
+  }
+  if (!response.ok || readRecord(body)?.ok !== true) {
+    return {
+      id: "orchestrator-finalizer",
+      status: "failed",
+      httpStatus: response.status,
+      detail: redactEvidenceString(`Finalizer tick failed: ${JSON.stringify(body)}`),
+    };
+  }
+  return {
+    id: "orchestrator-finalizer",
+    status: "completed",
+    httpStatus: response.status,
+    detail: "Orchestrator finalizer tick completed.",
+  };
+}
+
+function cleanupStatusForRuntimeSandbox(runtimeSandbox: Readonly<Record<string, unknown>> | null): E2BSmokeCleanupAction {
+  if (!runtimeSandbox) {
+    return { id: "provider-sandbox", status: "already_clean", detail: "No runtime sandbox is recorded for the smoke task." };
+  }
+  const status = readString(runtimeSandbox.status);
+  const sandboxId = readString(runtimeSandbox.providerSandboxId) ?? readString(runtimeSandbox.provider_sandbox_id) ?? "<unknown>";
+  if (status === "cleanup_succeeded") {
+    return { id: "provider-sandbox", status: "completed", target: sandboxId, detail: "Provider sandbox teardown is recorded as succeeded." };
+  }
+  if (status === "cleanup_failed") {
+    return { id: "provider-sandbox", status: "failed", target: sandboxId, detail: "Provider sandbox cleanup previously failed; rerun finalizer after fixing provider access." };
+  }
+  return { id: "provider-sandbox", status: "blocked", target: sandboxId, detail: `Provider sandbox is not yet cleaned up: ${status ?? "unknown"}.` };
+}
+
+function cleanupStatusForSnapshot(snapshot: Readonly<Record<string, unknown>> | null): E2BSmokeCleanupAction {
+  if (!snapshot) {
+    return { id: "snapshot-delete", status: "already_clean", detail: "No snapshot is recorded for the smoke task." };
+  }
+  const status = readString(snapshot.status);
+  const deletedAt = readString(snapshot.deletedAt);
+  const target = readString(snapshot.id) ?? "<unknown>";
+  if (status === "deleted" || deletedAt) {
+    return { id: "snapshot-delete", status: "completed", target, detail: "Smoke snapshot deletion is recorded." };
+  }
+  return { id: "snapshot-delete", status: "blocked", target, detail: `Snapshot is still present with status ${status ?? "unknown"}; run finalizer until deletion is recorded.` };
+}
+
+async function cleanupGitHubSmokeRefs(input: {
+  readonly plan: E2BSmokePlan;
+  readonly status: unknown;
+  readonly closePr: boolean;
+  readonly deleteBranch: boolean;
+  readonly serviceToken: string;
+  readonly fetch: typeof fetch;
+}): Promise<readonly E2BSmokeCleanupAction[]> {
+  const diagnostics = readRecord(readRecord(input.status)?.diagnostics);
+  const pr = readRecord(diagnostics?.pr);
+  const prUrl = readString(pr?.url);
+  const branch = readString(pr?.branch);
+  const latestSession = readRecord(readRecord(readRecord(input.status)?.sessions)?.latest);
+  const sessionId = readString(latestSession?.id);
+  const projectId = readString(readRecord(input.status)?.projectId) ?? input.plan.launchSpec.session.projectId;
+  const repository = parseGithubRepository(input.plan.runtimeSource.repositoryUrl);
+  const actions: E2BSmokeCleanupAction[] = [];
+
+  if (!sessionId) {
+    const blocked = { status: "blocked" as const, detail: "No latest smoke session is available for brokered GitHub App cleanup." };
+    if (input.closePr) actions.push({ id: "github-pr-close", ...blocked });
+    if (input.deleteBranch) actions.push({ id: "github-branch-delete", ...blocked });
+    return actions;
+  }
+
+  const token = await mintCleanupGitHubToken({
+    apiUrl: input.plan.apiUrl,
+    serviceTokenHeaderName: input.plan.serviceTokenHeaderName,
+    serviceToken: input.serviceToken,
+    projectId,
+    sessionId,
+    fetch: input.fetch,
+  });
+  if (!token.ok) {
+    const failed = { status: "failed" as const, detail: token.detail, httpStatus: token.httpStatus };
+    if (input.closePr) actions.push({ id: "github-pr-close", ...failed });
+    if (input.deleteBranch) actions.push({ id: "github-branch-delete", ...failed });
+    return actions;
+  }
+
+  if (input.closePr) {
+    actions.push(await closeSmokePullRequest({ repository, prUrl, token: token.value, fetch: input.fetch }));
+  }
+  if (input.deleteBranch) {
+    actions.push(await deleteSmokeBranch({ repository, branch, token: token.value, fetch: input.fetch }));
+  }
+  return actions;
+}
+
+async function mintCleanupGitHubToken(input: {
+  readonly apiUrl: string;
+  readonly serviceTokenHeaderName: string;
+  readonly serviceToken: string;
+  readonly projectId: string;
+  readonly sessionId: string;
+  readonly fetch: typeof fetch;
+}): Promise<{ readonly ok: true; readonly value: string } | { readonly ok: false; readonly detail: string; readonly httpStatus: number | null }> {
+  const response = await input.fetch(`${input.apiUrl}/internal/orchestrator/sessions/${encodeURIComponent(input.sessionId)}/github-token`, {
+    method: "POST",
+    headers: {
+      [input.serviceTokenHeaderName]: input.serviceToken,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ projectId: input.projectId }),
+  });
+  const body = await response.json().catch(() => null);
+  const tokenValue = readString(readRecord(readRecord(body)?.token)?.value);
+  if (!response.ok || !tokenValue) {
+    return {
+      ok: false,
+      httpStatus: response.status,
+      detail: "Brokered GitHub App token was unavailable for smoke cleanup.",
+    };
+  }
+  return { ok: true, value: tokenValue };
+}
+
+async function closeSmokePullRequest(input: {
+  readonly repository: { readonly owner: string; readonly repo: string } | null;
+  readonly prUrl: string | null;
+  readonly token: string;
+  readonly fetch: typeof fetch;
+}): Promise<E2BSmokeCleanupAction> {
+  const pullNumber = readPullRequestNumber(input.prUrl);
+  if (!input.repository || !pullNumber) {
+    return { id: "github-pr-close", status: "blocked", detail: "PR URL or repository metadata is missing from smoke diagnostics." };
+  }
+  const response = await input.fetch(`https://api.github.com/repos/${input.repository.owner}/${input.repository.repo}/pulls/${pullNumber}`, {
+    method: "PATCH",
+    headers: githubCleanupHeaders(input.token),
+    body: JSON.stringify({ state: "closed" }),
+  });
+  if (response.status === 404) {
+    return { id: "github-pr-close", status: "already_clean", target: input.prUrl ?? undefined, httpStatus: response.status, detail: "Smoke PR is already absent or inaccessible." };
+  }
+  if (!response.ok) {
+    return { id: "github-pr-close", status: "failed", target: input.prUrl ?? undefined, httpStatus: response.status, detail: "Failed to close smoke PR with brokered GitHub App token." };
+  }
+  return { id: "github-pr-close", status: "completed", target: input.prUrl ?? undefined, httpStatus: response.status, detail: "Smoke draft PR closed." };
+}
+
+async function deleteSmokeBranch(input: {
+  readonly repository: { readonly owner: string; readonly repo: string } | null;
+  readonly branch: string | null;
+  readonly token: string;
+  readonly fetch: typeof fetch;
+}): Promise<E2BSmokeCleanupAction> {
+  if (!input.repository || !input.branch) {
+    return { id: "github-branch-delete", status: "blocked", detail: "Smoke branch metadata is missing from diagnostics." };
+  }
+  const response = await input.fetch(
+    `https://api.github.com/repos/${input.repository.owner}/${input.repository.repo}/git/refs/heads/${encodeURIComponent(input.branch)}`,
+    {
+      method: "DELETE",
+      headers: githubCleanupHeaders(input.token),
+    },
+  );
+  if (response.status === 404) {
+    return { id: "github-branch-delete", status: "already_clean", target: input.branch, httpStatus: response.status, detail: "Smoke branch is already deleted." };
+  }
+  if (response.status === 204 || response.ok) {
+    return { id: "github-branch-delete", status: "completed", target: input.branch, httpStatus: response.status, detail: "Smoke branch deleted." };
+  }
+  return { id: "github-branch-delete", status: "failed", target: input.branch, httpStatus: response.status, detail: "Failed to delete smoke branch with brokered GitHub App token." };
+}
+
+function githubCleanupHeaders(token: string): HeadersInit {
+  return {
+    authorization: `Bearer ${token}`,
+    accept: "application/vnd.github+json",
+    "content-type": "application/json",
+    "x-github-api-version": "2022-11-28",
+  };
+}
+
+function parseGithubRepository(repositoryUrl: string): { readonly owner: string; readonly repo: string } | null {
+  try {
+    const url = new URL(repositoryUrl);
+    const [owner, rawRepo] = url.pathname.replace(/^\/+|\/+$/g, "").split("/");
+    const repo = rawRepo?.replace(/\.git$/, "");
+    return url.hostname === "github.com" && owner && repo ? { owner, repo } : null;
+  } catch {
+    return null;
+  }
+}
+
+function readPullRequestNumber(prUrl: string | null): string | null {
+  if (!prUrl) return null;
+  const match = /\/pull\/(\d+)(?:\b|$)/.exec(prUrl);
+  return match?.[1] ?? null;
 }
 
 async function waitForE2BSmokeCompletion(
@@ -1946,6 +2323,10 @@ function trimTrailingSlash(value: string): string {
 
 function readRecord(value: unknown): Readonly<Record<string, unknown>> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Readonly<Record<string, unknown>>) : null;
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 async function readFileText(path: string): Promise<string> {

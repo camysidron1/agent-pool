@@ -13,7 +13,7 @@ describe("orchestrator service skeleton", () => {
   test("health exposes configured backend internal URL", async () => {
     const config = loadConfig({ AUTH_MODE: "test", ORCHESTRATOR_BACKEND_INTERNAL_URL: "http://api.internal.test:3000" });
     const handler = createOrchestratorFetchHandler({ config });
-    const response = handler(new Request("http://orchestrator.test/health"));
+    const response = await handler(new Request("http://orchestrator.test/health"));
     const body = await response.json();
 
     expect(response.status).toBe(200);
@@ -59,7 +59,7 @@ describe("orchestrator service skeleton", () => {
     queue.publishProjectTaskHint("project_a", { taskId: "task_1" });
     const workerLoops = fakeWorkerLoops();
     const handler = createOrchestratorFetchHandler({ config: loadConfig({ AUTH_MODE: "test" }), queue, capacityLimiter, metrics, workerLoops });
-    const response = handler(new Request("http://orchestrator.test/metrics"));
+    const response = await handler(new Request("http://orchestrator.test/metrics"));
     const text = await response.text();
 
     expect(response.status).toBe(200);
@@ -239,9 +239,42 @@ describe("orchestrator service skeleton", () => {
     expect(requests[4]?.body).toEqual({ projectId: "project_a", errorMessage: "boom" });
     expect(requests[7]?.body).toEqual({ projectId: "project_a", observedAt: "2026-01-01T00:00:00.000Z" });
   });
+
+  test("internal finalizer tick requires service-token auth and runs worker loop once", async () => {
+    const config = loadConfig({ AUTH_MODE: "test" });
+    let ticks = 0;
+    const workerLoops = fakeWorkerLoops({
+      tickFinalizer: async () => {
+        ticks += 1;
+        return {
+          ok: true,
+          finalizationClaimed: false,
+          snapshotCreated: false,
+          snapshotFailed: false,
+          cleanupSucceeded: false,
+          cleanupFailed: false,
+          expiredSnapshotClaimed: false,
+          expiredSnapshotDeleted: false,
+          expiredSnapshotDeleteFailed: false,
+          noWork: true,
+        };
+      },
+    });
+    const handler = createOrchestratorFetchHandler({ config, workerLoops });
+
+    const missing = await handler(new Request("http://orchestrator.test/internal/finalizer/tick", { method: "POST" }));
+    const invalid = await handler(new Request("http://orchestrator.test/internal/finalizer/tick", { method: "POST", headers: { [config.serviceToken.headerName]: "wrong" } }));
+    const valid = await handler(new Request("http://orchestrator.test/internal/finalizer/tick", { method: "POST", headers: { [config.serviceToken.headerName]: config.serviceToken.token } }));
+
+    expect(missing.status).toBe(401);
+    expect(invalid.status).toBe(403);
+    expect(valid.status).toBe(200);
+    expect(await valid.json()).toMatchObject({ ok: true, result: { ok: true, noWork: true } });
+    expect(ticks).toBe(1);
+  });
 });
 
-function fakeWorkerLoops(): OrchestratorWorkerLoops {
+function fakeWorkerLoops(overrides: Partial<Pick<OrchestratorWorkerLoops, "tickFinalizer">> = {}): OrchestratorWorkerLoops {
   return {
     state: {
       task: {
@@ -268,10 +301,19 @@ function fakeWorkerLoops(): OrchestratorWorkerLoops {
         lastError: null,
         lastResult: { ok: true },
       },
+      finalizer: {
+        running: false,
+        ticks: 5,
+        failures: 0,
+        inFlight: false,
+        lastError: null,
+        lastResult: { noWork: true },
+      },
     },
     tickTask: async () => null,
     tickControl: async () => null,
     tickReconcile: async () => null,
+    tickFinalizer: overrides.tickFinalizer ?? (async () => null),
     start() {},
     stop() {},
   };

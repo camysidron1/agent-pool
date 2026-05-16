@@ -23,13 +23,13 @@ export type BunServe = (options: {
 
 export function createOrchestratorFetchHandler(
   options: OrchestratorServerOptions = {},
-): (request: Request) => Response {
+): (request: Request) => Response | Promise<Response> {
   const config = options.config ?? loadConfig();
   const queue = options.queue ?? createRabbitMqAdapter(config.rabbitmq);
   const storage = options.storage ?? createStorageAdapter(config.storage);
   const metrics = options.metrics ?? createOrchestratorMetrics();
 
-  return (request: Request): Response => {
+  return (request: Request): Response | Promise<Response> => {
     const url = new URL(request.url);
 
     if (url.pathname === "/health") {
@@ -73,6 +73,25 @@ export function createOrchestratorFetchHandler(
             "content-type": "text/plain; charset=utf-8",
           },
         },
+      );
+    }
+
+    if (url.pathname === "/internal/finalizer/tick" && request.method === "POST") {
+      const token = request.headers.get(config.serviceToken.headerName);
+      if (!token) {
+        return Response.json({ ok: false, error: "missing_service_token" }, { status: 401 });
+      }
+      if (token !== config.serviceToken.token) {
+        return Response.json({ ok: false, error: "invalid_service_token" }, { status: 403 });
+      }
+      if (!options.workerLoops) {
+        return Response.json({ ok: false, error: "worker_loops_unavailable" }, { status: 503 });
+      }
+      return options.workerLoops.tickFinalizer().then((result) =>
+        Response.json({
+          ok: true,
+          result,
+        }),
       );
     }
 

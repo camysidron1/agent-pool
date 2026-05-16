@@ -1607,13 +1607,139 @@ describe("compose smoke runner", () => {
     ]);
   });
 
+  test("cleans up live smoke provider status, snapshots, PRs, and branches through service-token APIs", async () => {
+    const writes: string[] = [];
+    const requests: Array<{ readonly url: string; readonly method: string; readonly auth: string | null; readonly serviceToken: string | null }> = [];
+    let statusCalls = 0;
+    const code = await runE2BSmokeCli(
+      [
+        "--cleanup",
+        "--cleanup-pr",
+        "--cleanup-branch",
+        "--cleanup-snapshots",
+        "--api-url",
+        "http://api.local",
+        "--orchestrator-url",
+        "http://orchestrator.local",
+        "--service-token",
+        "service-secret",
+        "--repository-url",
+        "https://github.com/example/tiny-fixture.git",
+      ],
+      {
+        env: { AUTH_MODE: "test", E2B_TEMPLATE_ID: "template-1" },
+        write: (text) => writes.push(text),
+        fetch: async (input, init) => {
+          const url = String(input);
+          const headers = new Headers(init?.headers);
+          requests.push({
+            url,
+            method: init?.method ?? "GET",
+            auth: headers.get("authorization"),
+            serviceToken: headers.get("x-agent-pool-service-token"),
+          });
+          if (url === "http://api.local/internal/smoke/status") {
+            statusCalls += 1;
+            return Response.json(statusCalls === 1 ? smokeCleanupStatus("terminal", "ready") : smokeCleanupStatus("cleanup_succeeded", "deleted"));
+          }
+          if (url === "http://orchestrator.local/internal/finalizer/tick") {
+            return Response.json({ ok: true, result: { ok: true, cleanupSucceeded: true, expiredSnapshotDeleted: true } });
+          }
+          if (url === "http://api.local/internal/orchestrator/sessions/session_smoke/github-token") {
+            return Response.json({ ok: true, token: { value: "ghs_cleanup_secret", repositoryUrl: "https://github.com/example/tiny-fixture.git" } });
+          }
+          if (url === "https://api.github.com/repos/example/tiny-fixture/pulls/123") {
+            return Response.json({ state: "closed" });
+          }
+          if (url === "https://api.github.com/repos/example/tiny-fixture/git/refs/heads/agent-pool%2Fe2b-smoke%2Frun-1%2Fcompose-smoke-task-1") {
+            return new Response(null, { status: 204 });
+          }
+          return Response.json({ ok: false, url }, { status: 404 });
+        },
+      },
+    );
+    const cleanup = JSON.parse(writes.join(""));
+
+    expect(code).toBe(0);
+    expect(cleanup).toMatchObject({
+      ok: true,
+      kind: "agent-pool-e2b-smoke-cleanup",
+      actions: expect.arrayContaining([
+        expect.objectContaining({ id: "orchestrator-finalizer", status: "completed" }),
+        expect.objectContaining({ id: "provider-sandbox", status: "completed", target: "sandbox_1" }),
+        expect.objectContaining({ id: "snapshot-delete", status: "completed", target: "snapshot_1" }),
+        expect.objectContaining({ id: "github-pr-close", status: "completed" }),
+        expect.objectContaining({ id: "github-branch-delete", status: "completed" }),
+      ]),
+    });
+    expect(requests.map((request) => [request.method, request.url, request.serviceToken])).toEqual([
+      ["GET", "http://api.local/internal/smoke/status", "service-secret"],
+      ["POST", "http://orchestrator.local/internal/finalizer/tick", "service-secret"],
+      ["GET", "http://api.local/internal/smoke/status", "service-secret"],
+      ["POST", "http://api.local/internal/orchestrator/sessions/session_smoke/github-token", "service-secret"],
+      ["PATCH", "https://api.github.com/repos/example/tiny-fixture/pulls/123", null],
+      ["DELETE", "https://api.github.com/repos/example/tiny-fixture/git/refs/heads/agent-pool%2Fe2b-smoke%2Frun-1%2Fcompose-smoke-task-1", null],
+    ]);
+    expect(requests.at(-1)?.auth).toBe("Bearer ghs_cleanup_secret");
+    expect(JSON.stringify(cleanup)).not.toContain("service-secret");
+    expect(JSON.stringify(cleanup)).not.toContain("ghs_cleanup_secret");
+  });
+
+  test("treats already-clean smoke PR and branch cleanup as idempotent success", async () => {
+    const writes: string[] = [];
+    const code = await runE2BSmokeCli(
+      ["--cleanup", "--cleanup-pr", "--cleanup-branch", "--cleanup-snapshots", "--api-url", "http://api.local", "--service-token", "service-secret"],
+      {
+        env: { AUTH_MODE: "test", E2B_TEMPLATE_ID: "template-1" },
+        write: (text) => writes.push(text),
+        fetch: async (input, init) => {
+          const url = String(input);
+          if (url === "http://api.local/internal/smoke/status") {
+            return Response.json({
+              ok: true,
+              projectId: "compose-smoke",
+              sessions: { latest: { id: "session_smoke" } },
+              diagnostics: {
+                runtimeSandbox: null,
+                latestSnapshot: null,
+                pr: {
+                  url: "https://github.com/example/tiny-fixture/pull/123",
+                  branch: "agent-pool/e2b-smoke/run-1/compose-smoke-task-1",
+                },
+              },
+            });
+          }
+          if (url === "http://api.local/internal/orchestrator/sessions/session_smoke/github-token") {
+            expect(new Headers(init?.headers).get("x-agent-pool-service-token")).toBe("service-secret");
+            return Response.json({ ok: true, token: { value: "ghs_cleanup_secret" } });
+          }
+          if (url.startsWith("https://api.github.com/")) return Response.json({ message: "not found" }, { status: 404 });
+          return Response.json({ ok: false }, { status: 404 });
+        },
+      },
+    );
+    const cleanup = JSON.parse(writes.join(""));
+
+    expect(code).toBe(0);
+    expect(cleanup.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "provider-sandbox", status: "already_clean" }),
+      expect.objectContaining({ id: "snapshot-delete", status: "already_clean" }),
+      expect.objectContaining({ id: "github-pr-close", status: "already_clean" }),
+      expect.objectContaining({ id: "github-branch-delete", status: "already_clean" }),
+    ]));
+    expect(JSON.stringify(cleanup)).not.toContain("ghs_cleanup_secret");
+  });
+
   test("parses E2B smoke flags for local execution", () => {
     expect(
       parseE2BSmokeArgs([
         "--plan",
         "--doctor",
+        "--cleanup",
         "--api-url",
         "http://api.local",
+        "--orchestrator-url",
+        "http://orchestrator.local",
         "--service-token",
         "token",
         "--timeout-ms",
@@ -1633,12 +1759,17 @@ describe("compose smoke runner", () => {
         "--evidence",
         "--validate-evidence",
         "evidence.json",
+        "--cleanup-pr",
+        "--cleanup-branch",
+        "--cleanup-snapshots",
       ]),
     ).toEqual({
       dryRun: true,
       readiness: false,
       doctor: true,
+      cleanup: true,
       apiUrl: "http://api.local",
+      orchestratorUrl: "http://orchestrator.local",
       serviceToken: "token",
       timeoutMs: 5000,
       repositoryUrl: "https://github.com/example/tiny-fixture.git",
@@ -1651,6 +1782,9 @@ describe("compose smoke runner", () => {
       callbackTimeoutMs: 250,
       evidence: true,
       validateEvidencePath: "evidence.json",
+      cleanupPr: true,
+      cleanupBranch: true,
+      cleanupSnapshots: true,
     });
 
     expect(
@@ -1673,3 +1807,29 @@ describe("compose smoke runner", () => {
     });
   });
 });
+
+function smokeCleanupStatus(runtimeSandboxStatus: string, snapshotStatus: string): unknown {
+  return {
+    ok: true,
+    projectId: "compose-smoke",
+    sessions: { latest: { id: "session_smoke" } },
+    diagnostics: {
+      runtimeSandbox: {
+        id: "runtime_sandbox_1",
+        provider: "e2b",
+        providerSandboxId: "sandbox_1",
+        status: runtimeSandboxStatus,
+      },
+      latestSnapshot: {
+        id: "snapshot_1",
+        provider: "e2b",
+        status: snapshotStatus,
+        deletedAt: snapshotStatus === "deleted" ? "2026-05-16T00:00:00.000Z" : null,
+      },
+      pr: {
+        url: "https://github.com/example/tiny-fixture/pull/123",
+        branch: "agent-pool/e2b-smoke/run-1/compose-smoke-task-1",
+      },
+    },
+  };
+}
