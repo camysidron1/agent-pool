@@ -1750,6 +1750,162 @@ describe("API service skeleton", () => {
     }
   });
 
+  test("internal smoke evidence persists redacted evidence as a public task artifact", async () => {
+    const { baseUrl, config, close } = await startTestApi();
+
+    try {
+      const headers = {
+        "content-type": "application/json",
+        [config.serviceToken.headerName]: config.serviceToken.token,
+      };
+      await fetch(`${baseUrl}/internal/smoke/seed`, { method: "POST", headers });
+      await fetch(`${baseUrl}/internal/orchestrator/tasks/claim-next`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ projectId: "compose-smoke", sessionId: "session_evidence", runtimeProvider: "fake" }),
+      });
+
+      const response = await fetch(`${baseUrl}/internal/smoke/evidence`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          projectId: "compose-smoke",
+          taskId: "compose-smoke-task-1",
+          sessionId: "session_evidence",
+          evidence: validSmokeEvidence({ status: "blocked", blockers: [{ field: "callback", reason: "tunnel unavailable" }] }),
+        }),
+      });
+      const body = await response.json();
+      const storageKey = body.storage.key;
+
+      expect(response.status).toBe(200);
+      expect(storageKey).toContain("projects/compose-smoke/tasks/compose-smoke-task-1/sessions/session_evidence/evidence/blocked-sha256-");
+      expect(body).toMatchObject({
+        ok: true,
+        validation: { status: "blocked" },
+        artifact: {
+          projectId: "compose-smoke",
+          taskId: "compose-smoke-task-1",
+          sessionId: "session_evidence",
+          kind: "file",
+          title: "E2B smoke evidence blocked",
+        },
+        storage: {
+          adapter: "local",
+          bucket: "agent-pool-web-sandbox",
+          key: storageKey,
+        },
+      });
+      expect(body.artifact.uri).toBe(`storage://agent-pool-web-sandbox/${storageKey}`);
+
+      const detail = await fetch(`${baseUrl}/api/public/projects/compose-smoke/tasks/compose-smoke-task-1`, {
+        headers: publicHeaders(config),
+      });
+      const detailBody = await detail.json();
+      const evidenceArtifact = detailBody.task.artifacts.find((artifact: { readonly id: string }) => artifact.id === body.artifact.id);
+
+      expect(detail.status).toBe(200);
+      expect(evidenceArtifact).toMatchObject({
+        kind: "file",
+        uri: body.artifact.uri,
+        metadata: {
+          source: "smoke:e2b",
+          evidenceKind: "agent-pool-e2b-live-readiness-evidence",
+          evidenceStatus: "blocked",
+          validationStatus: "blocked",
+          launchSpecHash: `sha256:${"a".repeat(64)}`,
+          evidence: {
+            status: "blocked",
+            redaction: {
+              containsNoServiceToken: true,
+              containsNoApiDbPath: true,
+            },
+          },
+        },
+      });
+      expect(JSON.stringify(detailBody)).not.toContain("~/.agent-pool/data/agent-pool.db");
+      expect(JSON.stringify(detailBody)).not.toContain("web-sandbox.db");
+      expect(JSON.stringify(detailBody)).not.toContain("ghp_");
+    } finally {
+      await close();
+    }
+  });
+
+  test("internal smoke evidence rejects secret and database path leaks before artifact persistence", async () => {
+    const { baseUrl, config, database, close } = await startTestApi();
+
+    try {
+      const headers = {
+        "content-type": "application/json",
+        [config.serviceToken.headerName]: config.serviceToken.token,
+      };
+      await fetch(`${baseUrl}/internal/smoke/seed`, { method: "POST", headers });
+
+      const response = await fetch(`${baseUrl}/internal/smoke/evidence`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          taskId: "compose-smoke-task-1",
+          evidence: validSmokeEvidence({
+            status: "failed",
+            stageDiagnostics: {
+              token: "ghp_raw_token",
+              databasePath: "~/.agent-pool/data/agent-pool.db",
+            },
+          }),
+        }),
+      });
+      const body = await response.json();
+
+      expect(response.status).toBe(400);
+      expect(body).toMatchObject({
+        ok: false,
+        error: "invalid_smoke_evidence",
+        validation: {
+          status: "invalid",
+          redactionViolations: expect.arrayContaining([
+            "evidence contains a token-like or credential-bearing value",
+            "evidence contains a backend or legacy database path",
+          ]),
+        },
+      });
+      expect(database.sqlite.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM artifacts").get()?.count).toBe(0);
+    } finally {
+      await close();
+    }
+  });
+
+  test("internal smoke evidence reports missing backend services without mutating state", async () => {
+    const config = loadConfig({ AUTH_MODE: "test" });
+    const app = createApiApp({ config });
+    const server = app.listen(0);
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("test API server did not bind to a TCP port");
+    }
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${address.port}/internal/smoke/evidence`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+        body: JSON.stringify({ evidence: validSmokeEvidence() }),
+      });
+
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ ok: false, error: "database_unavailable" });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error?: Error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
+    }
+  });
+
   test("internal smoke fixture seed is idempotent and status reports control-plane progress", async () => {
     const { baseUrl, config, database, queue, close } = await startTestApi();
 
@@ -3081,6 +3237,54 @@ function strictCodexSmokeEnv(overrides: Readonly<Record<string, string | undefin
     GITHUB_APP_INSTALLATION_ID: "67890",
     AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
     AGENT_POOL_SMOKE_FIXTURE_REPOSITORIES: "https://github.com/example/tiny-fixture.git",
+    ...overrides,
+  };
+}
+
+function validSmokeEvidence(overrides: Readonly<Record<string, unknown>> = {}): Readonly<Record<string, unknown>> {
+  return {
+    kind: "agent-pool-e2b-live-readiness-evidence",
+    schemaVersion: 1,
+    generatedAt: "2026-05-15T12:00:00.000Z",
+    status: "pass",
+    readinessSummary: {
+      status: "ready",
+      missingCredentials: [],
+      missingSettings: [],
+      blockedChecks: [],
+    },
+    launchSpecHash: `sha256:${"a".repeat(64)}`,
+    redactedLaunchSpec: {
+      provider: "e2b",
+      environment: { secrets: { GITHUB_TOKEN: "[REDACTED]", CODEX_API_KEY: "[REDACTED]" } },
+    },
+    runtimeSource: {
+      repositoryUrl: "https://github.com/example/tiny-fixture.git",
+      baseRef: "main",
+      taskBranchPrefix: "agent-pool/e2b-smoke/test-run",
+      allowedEgressDomains: ["github.com", "api.github.com", "registry.npmjs.org", "api.openai.com"],
+      commandProfile: "agent-pool-bun-pr",
+    },
+    securityReadiness: {
+      network: { egressMode: "proxy", proxyOnly: true },
+      credentials: { github: "brokered-github-app-installation-token", rawSecretsPresent: false },
+    },
+    smokeRequests: {},
+    statusResult: null,
+    stageDiagnostics: null,
+    cleanup: { provider: "e2b", sandboxId: "<runtime-session-id>", action: "destroy sandbox through RuntimeProvider.stopSession" },
+    snapshotDecision: { status: "snapshot-created", reasons: [] },
+    blockers: [],
+    redaction: {
+      containsNoServiceToken: true,
+      containsNoGithubToken: true,
+      containsNoE2BApiKey: true,
+      containsNoCodexApiKey: true,
+      containsNoProxyCredentials: true,
+      containsNoBridgeOrSessionToken: true,
+      containsNoLegacyTuiDbPath: true,
+      containsNoApiDbPath: true,
+    },
     ...overrides,
   };
 }

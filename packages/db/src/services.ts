@@ -601,12 +601,14 @@ export type RecordFinalAssistantResponseInput = {
   readonly urlCandidates?: readonly string[];
 };
 
+export type ArtifactKind = "final_response_url" | "document" | "log" | "file" | "link";
+
 export type ArtifactRecord = {
   readonly id: string;
   readonly projectId: string;
   readonly taskId: string | null;
   readonly sessionId: string | null;
-  readonly kind: "final_response_url" | "document";
+  readonly kind: ArtifactKind;
   readonly uri: string;
   readonly title: string | null;
 };
@@ -634,6 +636,25 @@ export type RecordDocumentArtifactResult =
       readonly idempotent: boolean;
     }
   | { readonly ok: false; readonly error: { readonly code: "not_found" | "invalid_state"; readonly message: string } };
+
+export type RecordSmokeEvidenceArtifactInput = {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId?: string | null;
+  readonly uri: string;
+  readonly title: string;
+  readonly metadata: Readonly<Record<string, unknown>>;
+};
+
+export type RecordSmokeEvidenceArtifactResult =
+  | {
+      readonly ok: true;
+      readonly artifact: ArtifactRecord;
+      readonly event: EventRecord;
+      readonly outbox: OutboxRecord;
+      readonly idempotent: boolean;
+    }
+  | { readonly ok: false; readonly error: { readonly code: "not_found"; readonly message: string } };
 
 export type ReadBridgeSessionCallbackConfigInput = {
   readonly projectId: string;
@@ -1576,6 +1597,63 @@ export function createCanonicalStateServices(database: WebSandboxSqliteDatabase)
       });
     },
 
+    recordSmokeEvidenceArtifact(input: RecordSmokeEvidenceArtifactInput): RecordSmokeEvidenceArtifactResult {
+      const task = database
+        .query<{ id: string }, [string, string]>("SELECT id FROM tasks WHERE project_id = ? AND id = ?")
+        .get(input.projectId, input.taskId);
+      if (!task) {
+        return { ok: false, error: { code: "not_found", message: `task not found: ${input.taskId}` } };
+      }
+      const sessionId = input.sessionId?.trim() || null;
+      if (sessionId) {
+        const session = database
+          .query<{ id: string }, [string, string, string]>(
+            "SELECT id FROM sessions WHERE project_id = ? AND task_id = ? AND id = ?",
+          )
+          .get(input.projectId, input.taskId, sessionId);
+        if (!session) {
+          return { ok: false, error: { code: "not_found", message: `session not found: ${sessionId}` } };
+        }
+      }
+
+      return transaction(database, () => {
+        const artifactResult = ensureArtifact(database, {
+          projectId: input.projectId,
+          taskId: input.taskId,
+          sessionId,
+          kind: "file",
+          uri: input.uri,
+          title: input.title,
+          metadata: input.metadata,
+        });
+        const event = appendEvent(database, {
+          projectId: input.projectId,
+          taskId: input.taskId,
+          sessionId,
+          type: artifactResult.created ? "artifact.smoke_evidence.registered" : "artifact.smoke_evidence.idempotent",
+          payload: {
+            artifactId: artifactResult.artifact.id,
+            uri: input.uri,
+            validationStatus: readMetadataString(input.metadata, "validationStatus"),
+          },
+        });
+        const outbox = enqueueOutbox(database, {
+          projectId: input.projectId,
+          eventId: event.id,
+          routingKey: projectRoutingKey(input.projectId, "events"),
+          payload: { eventId: event.id, artifactId: artifactResult.artifact.id, type: event.type },
+        });
+
+        return {
+          ok: true,
+          artifact: artifactResult.artifact,
+          event,
+          outbox,
+          idempotent: !artifactResult.created,
+        } as const;
+      });
+    },
+
     readBridgeSessionCallbackConfig(input: ReadBridgeSessionCallbackConfigInput): ReadBridgeSessionCallbackConfigResult {
       const row = database
         .query<
@@ -2070,7 +2148,7 @@ function ensureArtifact(
     readonly projectId: string;
     readonly taskId: string | null;
     readonly sessionId: string | null;
-    readonly kind: "final_response_url" | "document";
+    readonly kind: ArtifactKind;
     readonly uri: string;
     readonly title: string | null;
     readonly metadata: Readonly<Record<string, unknown>>;
@@ -2078,7 +2156,7 @@ function ensureArtifact(
 ): { readonly artifact: ArtifactRecord; readonly created: boolean } {
   const existing = database
     .query<
-      { id: string; project_id: string; task_id: string | null; session_id: string | null; kind: "final_response_url" | "document"; uri: string; title: string | null },
+      { id: string; project_id: string; task_id: string | null; session_id: string | null; kind: ArtifactKind; uri: string; title: string | null },
       [string, string | null, string | null, string, string]
     >(
       "SELECT id, project_id, task_id, session_id, kind, uri, title FROM artifacts WHERE project_id = ? AND task_id IS ? AND session_id IS ? AND kind = ? AND uri = ? ORDER BY created_at ASC, id ASC LIMIT 1",
@@ -2125,6 +2203,11 @@ function ensureArtifact(
     );
 
   return { artifact, created: true };
+}
+
+function readMetadataString(metadata: Readonly<Record<string, unknown>>, key: string): string | null {
+  const value = metadata[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function isAllowedBridgeDocumentPath(path: string): boolean {

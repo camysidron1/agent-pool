@@ -132,6 +132,70 @@ describe("artifact, event, and outbox schema", () => {
     }
   });
 
+  test("records smoke evidence as idempotent task/session file artifacts", () => {
+    const database = createSeededMemoryDatabase();
+
+    try {
+      const services = createCanonicalStateServices(database);
+      const result = services.recordSmokeEvidenceArtifact({
+        projectId: "project_a",
+        taskId: "task_a_1",
+        sessionId: "session_1",
+        uri: "storage://bucket/projects/project_a/tasks/task_a_1/evidence/pass.json",
+        title: "E2B smoke evidence pass",
+        metadata: {
+          source: "smoke:e2b",
+          validationStatus: "pass",
+          evidenceStatus: "pass",
+        },
+      });
+      const duplicate = services.recordSmokeEvidenceArtifact({
+        projectId: "project_a",
+        taskId: "task_a_1",
+        sessionId: "session_1",
+        uri: "storage://bucket/projects/project_a/tasks/task_a_1/evidence/pass.json",
+        title: "E2B smoke evidence pass",
+        metadata: {
+          source: "smoke:e2b",
+          validationStatus: "pass",
+          evidenceStatus: "pass",
+        },
+      });
+      const missingSession = services.recordSmokeEvidenceArtifact({
+        projectId: "project_a",
+        taskId: "task_a_1",
+        sessionId: "session_missing",
+        uri: "storage://bucket/projects/project_a/tasks/task_a_1/evidence/missing.json",
+        title: "missing",
+        metadata: {},
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        idempotent: false,
+        artifact: { kind: "file", uri: "storage://bucket/projects/project_a/tasks/task_a_1/evidence/pass.json" },
+        event: { type: "artifact.smoke_evidence.registered" },
+        outbox: { routingKey: "project.project_a.events" },
+      });
+      expect(duplicate).toMatchObject({
+        ok: true,
+        idempotent: true,
+        event: { type: "artifact.smoke_evidence.idempotent" },
+      });
+      expect(missingSession).toEqual({
+        ok: false,
+        error: { code: "not_found", message: "session not found: session_missing" },
+      });
+      expect(
+        database
+          .query<{ count: number }, []>("SELECT COUNT(*) AS count FROM artifacts WHERE kind = 'file' AND uri LIKE 'storage://bucket/%'")
+          .get()?.count,
+      ).toBe(1);
+    } finally {
+      database.close();
+    }
+  });
+
   test("stores append-only events and outbox records without per-session queues", () => {
     const database = createSeededMemoryDatabase();
 

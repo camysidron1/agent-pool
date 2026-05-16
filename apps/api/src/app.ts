@@ -12,6 +12,7 @@ import { createGitHubAppTokenBroker, type GitHubTokenBroker } from "./github-tok
 import { createOutboxPublisher, type OutboxPublisher } from "./outbox-publisher";
 import type { OutboxPublisherLoop } from "./outbox-publisher-loop";
 import { registerPublicApiRoutes, type PublicSseHub } from "./public-api";
+import { persistSmokeEvidenceArtifact } from "./smoke-evidence";
 import {
   isSmokeFixtureEnabled,
   isSmokeFixtureValidationError,
@@ -156,6 +157,43 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
     }
 
     response.status(200).json({ ok: true, ...readSmokeFixtureStatus({ config, database }) });
+  });
+
+  app.post("/internal/smoke/evidence", requireInternalServiceToken, (request, response) => {
+    if (!services || !database) {
+      response.status(503).json({ ok: false, error: "database_unavailable" });
+      return;
+    }
+    if (!storage) {
+      response.status(503).json({ ok: false, error: "storage_unavailable" });
+      return;
+    }
+    if (!isSmokeFixtureEnabled(config)) {
+      response.status(404).json({ ok: false, error: "smoke_disabled" });
+      return;
+    }
+
+    const body = parseObjectBody(request.body);
+    const result = persistSmokeEvidenceArtifact({
+      config,
+      services,
+      storage,
+      projectId: readOptionalString(body.projectId),
+      taskId: readOptionalString(body.taskId),
+      sessionId: readOptionalString(body.sessionId),
+      evidence: body.evidence,
+    });
+
+    if (!result.ok) {
+      response.status(result.status).json({
+        ok: false,
+        error: result.error,
+        validation: result.validation,
+      });
+      return;
+    }
+
+    response.status(200).json(result);
   });
 
   app.post("/internal/orchestrator/tasks/claim-next", requireInternalServiceToken, (request, response) => {
