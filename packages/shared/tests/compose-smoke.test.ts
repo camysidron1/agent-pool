@@ -430,7 +430,9 @@ describe("compose smoke runner", () => {
   test("builds an opt-in E2B dry-run plan without credentials, network, Docker, or DB access", async () => {
     const writes: string[] = [];
     let fetches = 0;
-    const code = await runE2BSmokeCli(["--dry-run", "--api-url", "http://api.local/", "--repository-url", "https://github.com/example/tiny-fixture.git"], {
+    const code = await runE2BSmokeCli(
+      ["--dry-run", "--run-id", "dry-run-1", "--api-url", "http://api.local/", "--repository-url", "https://github.com/example/tiny-fixture.git"],
+      {
       env: {
         AUTH_MODE: "test",
         E2B_TEMPLATE_ID: "template-1",
@@ -440,7 +442,8 @@ describe("compose smoke runner", () => {
         fetches += 1;
         return Response.json({ ok: true });
       },
-    });
+      },
+    );
     const plan = JSON.parse(writes.join(""));
     const source = await readFile(join(process.cwd(), "deploy", "compose", "e2b-smoke.ts"), "utf8");
 
@@ -454,7 +457,7 @@ describe("compose smoke runner", () => {
       runtimeSource: {
         repositoryUrl: "https://github.com/example/tiny-fixture.git",
         baseRef: "main",
-        taskBranchPrefix: "agent-pool/e2b-smoke",
+        taskBranchPrefix: "agent-pool/e2b-smoke/dry-run-1",
       },
       requests: {
         seed: {
@@ -543,6 +546,7 @@ describe("compose smoke runner", () => {
         EGRESS_PROXY_URL: "http://proxy-user:proxy-secret@egress-gateway.internal:8080",
         EGRESS_PROXY_ALLOW_OUT: "10.0.10.25/32",
         AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+        AGENT_POOL_SMOKE_FIXTURE_REPOSITORIES: "https://github.com/example/tiny-fixture.git",
       },
       write: (text) => writes.push(text),
     });
@@ -744,6 +748,7 @@ describe("compose smoke runner", () => {
         GITHUB_APP_PRIVATE_KEY: "github-app-private-key",
         GITHUB_APP_INSTALLATION_ID: "67890",
         AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+        AGENT_POOL_SMOKE_FIXTURE_REPOSITORIES: "https://github.com/example/tiny-fixture.git",
       },
       write: (text) => writes.push(text),
     });
@@ -787,6 +792,7 @@ describe("compose smoke runner", () => {
         EGRESS_PROXY_URL: "http://proxy-user:proxy-secret@egress-gateway.internal:8080",
         EGRESS_PROXY_ALLOW_OUT: "10.0.10.25/32",
         AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+        AGENT_POOL_SMOKE_FIXTURE_REPOSITORIES: "https://github.com/example/tiny-fixture.git",
       },
       write: (text) => writes.push(text),
     });
@@ -869,6 +875,7 @@ describe("compose smoke runner", () => {
       missingSettings: [
         "E2B_TEMPLATE_ID or E2B_SANDBOX_IMAGE_ID",
         "EGRESS_PROXY_URL and EGRESS_PROXY_ALLOW_OUT or E2B_LOCAL_ALLOW_DIRECT_EGRESS=true",
+        "AGENT_POOL_SMOKE_FIXTURE_REPOSITORIES",
       ],
     });
     expect(report.checks).toContainEqual(
@@ -900,6 +907,7 @@ describe("compose smoke runner", () => {
         EGRESS_PROXY_URL: "http://proxy-user:proxy-secret@egress-gateway.internal:8080",
         EGRESS_PROXY_ALLOW_OUT: "10.0.10.25/32",
         AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+        AGENT_POOL_SMOKE_FIXTURE_REPOSITORIES: "https://github.com/example/tiny-fixture.git",
       },
     });
 
@@ -925,6 +933,8 @@ describe("compose smoke runner", () => {
     const code = await runE2BSmokeCli(
       [
         "--doctor",
+        "--run-id",
+        "doctor-run-1",
         "--agent-runner-mode",
         "codex",
         "--api-url",
@@ -947,6 +957,7 @@ describe("compose smoke runner", () => {
           EGRESS_PROXY_URL: "http://proxy-user:proxy-secret@egress-gateway.internal:8080",
           EGRESS_PROXY_ALLOW_OUT: "10.0.10.25/32",
           AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+          AGENT_POOL_SMOKE_FIXTURE_REPOSITORIES: "https://github.com/example/tiny-fixture.git",
         },
         write: (text) => writes.push(text),
         fetch: async () => {
@@ -972,9 +983,10 @@ describe("compose smoke runner", () => {
         statusUrl: expect.stringContaining("/internal/smoke/status"),
       },
       fixture: {
+        runId: "doctor-run-1",
         repositoryUrl: "https://github.com/example/tiny-fixture.git",
         baseRef: "main",
-        taskBranchPrefix: "agent-pool/e2b-smoke",
+        taskBranchPrefix: "agent-pool/e2b-smoke/doctor-run-1",
         commandProfile: "agent-pool-bun-pr",
       },
     });
@@ -1019,9 +1031,10 @@ describe("compose smoke runner", () => {
     expect(JSON.stringify(report)).not.toContain("dry-run-codex-api-key");
   });
 
-  test("warns in the doctor for direct egress and non-namespaced fixture branches", () => {
+  test("blocks in the doctor for unsafe fixture branches and still reports direct egress", () => {
     const report = createE2BLiveSmokeDoctorReport({
       agentRunnerMode: "codex",
+      runId: "doctor-run-unsafe",
       taskBranchPrefix: "smoke/task",
       env: {
         AUTH_MODE: "test",
@@ -1034,13 +1047,15 @@ describe("compose smoke runner", () => {
         GITHUB_APP_ID: "12345",
         GITHUB_APP_PRIVATE_KEY: "github-app-private-key",
         GITHUB_APP_INSTALLATION_ID: "67890",
+        AGENT_POOL_SMOKE_FIXTURE_REPOSITORIES: "https://github.com/example/tiny-fixture.git",
       },
     });
 
-    expect(report.status).toBe("warning");
-    expect(report.ok).toBe(true);
+    expect(report.status).toBe("blocked");
+    expect(report.ok).toBe(false);
     expect(report.checks).toContainEqual(expect.objectContaining({ id: "egress-policy", status: "warn" }));
     expect(report.checks).toContainEqual(expect.objectContaining({ id: "doctor-fixture-branch-prefix", status: "warn" }));
+    expect(report.checks).toContainEqual(expect.objectContaining({ id: "fixture-repository-safety", status: "block" }));
     expect(JSON.stringify(report)).not.toContain("e2b-secret");
     expect(JSON.stringify(report)).not.toContain("codex-secret");
     expect(JSON.stringify(report)).not.toContain("github-app-private-key");
@@ -1060,6 +1075,7 @@ describe("compose smoke runner", () => {
         GITHUB_APP_ID: "12345",
         GITHUB_APP_PRIVATE_KEY: "github-app-private-key",
         GITHUB_APP_INSTALLATION_ID: "67890",
+        AGENT_POOL_SMOKE_FIXTURE_REPOSITORIES: "https://github.com/example/tiny-fixture.git",
       },
     });
 
@@ -1089,6 +1105,7 @@ describe("compose smoke runner", () => {
       EGRESS_PROXY_URL: "http://proxy-user:proxy-secret@egress-gateway.internal:8080",
       EGRESS_PROXY_ALLOW_OUT: "10.0.10.25/32",
       AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+      AGENT_POOL_SMOKE_FIXTURE_REPOSITORIES: "https://github.com/example/tiny-fixture.git",
     };
     const run = async (response: Response | Error): Promise<{ readonly code: number; readonly report: Record<string, unknown>; readonly requests: readonly string[] }> => {
       const writes: string[] = [];
@@ -1157,6 +1174,7 @@ describe("compose smoke runner", () => {
       EGRESS_PROXY_URL: "http://proxy-user:proxy-secret@egress-gateway.internal:8080",
       EGRESS_PROXY_ALLOW_OUT: "10.0.10.25/32",
       AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+      AGENT_POOL_SMOKE_FIXTURE_REPOSITORIES: "https://github.com/example/tiny-fixture.git",
     };
     const run = async (callbackBaseUrl: string) => {
       const writes: string[] = [];
@@ -1219,7 +1237,7 @@ describe("compose smoke runner", () => {
       readonly contentType: string | null;
       readonly body: unknown;
     }> = [];
-    const code = await runE2BSmokeCli(["--api-url", "http://api.local", "--service-token", "service-secret", "--timeout-ms", "1000"], {
+    const code = await runE2BSmokeCli(["--api-url", "http://api.local", "--service-token", "service-secret", "--timeout-ms", "1000", "--run-id", "bridge-run-1"], {
       env: {
         AUTH_MODE: "test",
         E2B_API_KEY: "e2b-secret",
@@ -1259,13 +1277,22 @@ describe("compose smoke runner", () => {
         method: "POST",
         serviceToken: "service-secret",
         contentType: "application/json",
-        body: {
+        body: expect.objectContaining({
           runtimeSource: {
             repositoryUrl: "https://github.com/example/tiny-fixture.git",
             baseRef: "main",
-            taskBranchPrefix: "agent-pool/e2b-smoke",
+            taskBranchPrefix: "agent-pool/e2b-smoke/bridge-run-1",
           },
-        },
+          runId: "bridge-run-1",
+          pullRequest: expect.objectContaining({
+            draft: true,
+            title: "Agent Pool E2B smoke bridge-run-1",
+            repositoryUrl: "https://github.com/example/tiny-fixture.git",
+            baseRef: "main",
+            taskBranchPrefix: "agent-pool/e2b-smoke/bridge-run-1",
+          }),
+          forceUnsafeRepository: false,
+        }),
       },
       {
         url: "http://api.local/internal/smoke/status",
@@ -1361,6 +1388,7 @@ describe("compose smoke runner", () => {
         EGRESS_PROXY_URL: "http://proxy-user:proxy-secret@egress-gateway.internal:8080",
         EGRESS_PROXY_ALLOW_OUT: "10.0.10.25/32",
         AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+        AGENT_POOL_SMOKE_FIXTURE_REPOSITORIES: "https://github.com/example/tiny-fixture.git",
       },
       write: (text) => writes.push(text),
       fetch: async (input, init) => {
@@ -1398,6 +1426,143 @@ describe("compose smoke runner", () => {
         error: "github_app_permissions_insufficient",
         repositoryUrl: "https://github.com/example/tiny-fixture.git",
         missingPermissions: ["contents:write"],
+      },
+    });
+    expect(JSON.stringify(payload)).not.toContain("github-app-private-key");
+    expect(JSON.stringify(payload)).not.toContain("codex-secret");
+    expect(JSON.stringify(payload)).not.toContain("service-secret");
+  });
+
+  test("seeds live Codex smoke only after fixture and GitHub App readiness pass", async () => {
+    const writes: string[] = [];
+    const requests: Array<{ readonly url: string; readonly body: unknown }> = [];
+    const code = await runE2BSmokeCli(
+      ["--api-url", "http://api.local", "--service-token", "service-secret", "--agent-runner-mode", "codex", "--run-id", "fixture-run-1"],
+      {
+        env: {
+          AUTH_MODE: "test",
+          BRIDGE_CALLBACK_BASE_URL: "https://callback.agentpool.app",
+          E2B_API_KEY: "e2b-secret",
+          E2B_TEMPLATE_ID: "template-1",
+          E2B_TEMPLATE_COMPATIBILITY_MANIFEST_JSON: JSON.stringify(AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST),
+          E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN,CODEX_API_KEY",
+          CODEX_API_KEY: "codex-secret",
+          GITHUB_APP_ID: "12345",
+          GITHUB_APP_PRIVATE_KEY: "github-app-private-key",
+          GITHUB_APP_INSTALLATION_ID: "67890",
+          EGRESS_PROXY_URL: "http://proxy-user:proxy-secret@egress-gateway.internal:8080",
+          EGRESS_PROXY_ALLOW_OUT: "10.0.10.25/32",
+          AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+          AGENT_POOL_SMOKE_FIXTURE_REPOSITORIES: "https://github.com/example/tiny-fixture.git",
+        },
+        write: (text) => writes.push(text),
+        fetch: async (input, init) => {
+          requests.push({ url: String(input), body: init?.body ? JSON.parse(String(init.body)) : null });
+          if (String(input).endsWith("/internal/orchestrator/github-app/verify")) {
+            return Response.json({
+              ok: true,
+              repositoryUrl: "https://github.com/example/tiny-fixture.git",
+              token: { envName: "GITHUB_TOKEN", expiresAt: "2026-05-15T12:10:00.000Z" },
+              permissions: { contents: "write", pull_requests: "write" },
+            });
+          }
+          if (String(input).endsWith("/internal/smoke/seed")) {
+            return Response.json({ ok: true, projectId: "compose-smoke", taskId: "compose-smoke-task-1" });
+          }
+          return Response.json({
+            ok: true,
+            finalResponse: { recorded: true },
+            completion: { completed: true },
+            cleanup: { completed: true },
+          });
+        },
+      },
+    );
+    const payload = JSON.parse(writes.join(""));
+
+    expect(code).toBe(0);
+    expect(requests.map((request) => request.url)).toEqual([
+      "http://api.local/internal/orchestrator/github-app/verify",
+      "http://api.local/internal/smoke/seed",
+      "http://api.local/internal/smoke/status",
+    ]);
+    expect(requests[1]?.body).toMatchObject({
+      runId: "fixture-run-1",
+      forceUnsafeRepository: false,
+      runtimeSource: {
+        repositoryUrl: "https://github.com/example/tiny-fixture.git",
+        baseRef: "main",
+        taskBranchPrefix: "agent-pool/e2b-smoke/fixture-run-1",
+        allowedEgressDomains: ["github.com", "api.github.com", "registry.npmjs.org", "api.openai.com"],
+        commandProfile: "agent-pool-bun-pr",
+      },
+      pullRequest: {
+        draft: true,
+        title: "Agent Pool E2B smoke fixture-run-1",
+        repositoryUrl: "https://github.com/example/tiny-fixture.git",
+        baseRef: "main",
+        taskBranchPrefix: "agent-pool/e2b-smoke/fixture-run-1",
+      },
+    });
+    expect(payload).toMatchObject({ ok: true, stage: "complete" });
+    expect(JSON.stringify(payload)).not.toContain("github-app-private-key");
+    expect(JSON.stringify(payload)).not.toContain("codex-secret");
+    expect(JSON.stringify(payload)).not.toContain("service-secret");
+  });
+
+  test("rejects non-fixture live Codex smoke repositories before provider or GitHub side effects", async () => {
+    const writes: string[] = [];
+    let fetches = 0;
+    const code = await runE2BSmokeCli(
+      [
+        "--api-url",
+        "http://api.local",
+        "--service-token",
+        "service-secret",
+        "--agent-runner-mode",
+        "codex",
+        "--run-id",
+        "fixture-run-2",
+        "--repository-url",
+        "https://github.com/example/not-a-fixture.git",
+      ],
+      {
+        env: {
+          AUTH_MODE: "test",
+          BRIDGE_CALLBACK_BASE_URL: "https://callback.agentpool.app",
+          E2B_API_KEY: "e2b-secret",
+          E2B_TEMPLATE_ID: "template-1",
+          E2B_TEMPLATE_COMPATIBILITY_MANIFEST_JSON: JSON.stringify(AGENT_POOL_E2B_TEMPLATE_COMPATIBILITY_MANIFEST),
+          E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN,CODEX_API_KEY",
+          CODEX_API_KEY: "codex-secret",
+          GITHUB_APP_ID: "12345",
+          GITHUB_APP_PRIVATE_KEY: "github-app-private-key",
+          GITHUB_APP_INSTALLATION_ID: "67890",
+          EGRESS_PROXY_URL: "http://proxy-user:proxy-secret@egress-gateway.internal:8080",
+          EGRESS_PROXY_ALLOW_OUT: "10.0.10.25/32",
+          AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+          AGENT_POOL_SMOKE_FIXTURE_REPOSITORIES: "https://github.com/example/tiny-fixture.git",
+        },
+        write: (text) => writes.push(text),
+        fetch: async () => {
+          fetches += 1;
+          throw new Error("unsafe fixture must fail before fetch");
+        },
+      },
+    );
+    const payload = JSON.parse(writes.join(""));
+
+    expect(code).toBe(1);
+    expect(fetches).toBe(0);
+    expect(payload).toMatchObject({
+      ok: false,
+      stage: "readiness",
+      error: "unsafe_live_fixture",
+      diagnostics: {
+        fixtureSafety: {
+          ok: false,
+          errors: ["runtimeSource.repositoryUrl is outside the fixture repository allowlist"],
+        },
       },
     });
     expect(JSON.stringify(payload)).not.toContain("github-app-private-key");
@@ -1459,6 +1624,9 @@ describe("compose smoke runner", () => {
         "feature/ref",
         "--task-branch-prefix",
         "agent-pool/task",
+        "--run-id",
+        "run-123",
+        "--force-non-fixture-repository",
         "--verify-callback",
         "--callback-timeout-ms",
         "250",
@@ -1476,6 +1644,8 @@ describe("compose smoke runner", () => {
       repositoryUrl: "https://github.com/example/tiny-fixture.git",
       baseRef: "feature/ref",
       taskBranchPrefix: "agent-pool/task",
+      runId: "run-123",
+      forceUnsafeRepository: true,
       maliciousFixtures: false,
       verifyCallback: true,
       callbackTimeoutMs: 250,

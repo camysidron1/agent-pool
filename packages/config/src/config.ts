@@ -90,6 +90,7 @@ export type ControlPlaneRuntimeConfig = {
   readonly runtimeProvider: RuntimeProviderName;
   readonly smokeEnabled: boolean;
   readonly smokeProjectId: string;
+  readonly smokeFixtureRepositoryAllowlist: readonly string[];
   readonly workerPollIntervalMs: number;
   readonly outboxPublishIntervalMs: number;
   readonly reconcileIntervalMs: number;
@@ -234,6 +235,7 @@ export function loadConfig(env: EnvSource = readProcessEnv()): AppConfig {
         DEFAULT_CONTROL_PLANE_SMOKE_PROJECT_ID,
         "COMPOSE_SMOKE_PROJECT_ID",
       ),
+      smokeFixtureRepositoryAllowlist: readStringList(env.AGENT_POOL_SMOKE_FIXTURE_REPOSITORIES),
       workerPollIntervalMs: readPositiveInteger(
         env.CONTROL_PLANE_WORKER_POLL_INTERVAL_MS,
         DEFAULT_CONTROL_PLANE_WORKER_POLL_INTERVAL_MS,

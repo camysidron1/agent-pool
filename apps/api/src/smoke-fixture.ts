@@ -15,6 +15,7 @@ export type SmokeSeedFixtureOptions = SmokeFixtureOptions & {
   readonly queue: RabbitMqAdapter;
   readonly services: ApiBackendServices;
   readonly runtimeSource?: SmokeRuntimeSourceInput | null;
+  readonly forceUnsafeRepository?: boolean;
 };
 
 export type SmokeRuntimeSourceInput = {
@@ -24,6 +25,17 @@ export type SmokeRuntimeSourceInput = {
   readonly allowedEgressDomains?: readonly string[];
   readonly commandProfile?: string | null;
 };
+
+export class SmokeFixtureValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SmokeFixtureValidationError";
+  }
+}
+
+export function isSmokeFixtureValidationError(error: unknown): error is SmokeFixtureValidationError {
+  return error instanceof SmokeFixtureValidationError;
+}
 
 export type SmokeFixtureIds = {
   readonly projectId: string;
@@ -241,6 +253,8 @@ export function smokeFixtureIds(config: AppConfig): SmokeFixtureIds {
 }
 
 export async function seedSmokeFixture(options: SmokeSeedFixtureOptions): Promise<SmokeSeedResult> {
+  validateSmokeRuntimeSource(options);
+
   const ids = smokeFixtureIds(options.config);
   let project = readProject(options.database, ids.projectId);
   let queues: readonly ProjectQueueDeclaration[];
@@ -294,6 +308,98 @@ export async function seedSmokeFixture(options: SmokeSeedFixtureOptions): Promis
     },
     outbox: readOutboxStatus(options.database, ids.projectId),
   };
+}
+
+function validateSmokeRuntimeSource(options: SmokeSeedFixtureOptions): void {
+  const runtimeSource = options.runtimeSource;
+  if (!runtimeSource) return;
+  if (options.config.controlPlane.runtimeProvider !== "e2b" || options.config.controlPlane.e2b.agentRunnerMode !== "codex") {
+    return;
+  }
+
+  if (!options.config.githubApp.configured) {
+    throw new SmokeFixtureValidationError("GitHub App broker is required for live Codex E2B smoke; static GITHUB_TOKEN fallback is not allowed");
+  }
+
+  const repositoryUrl = normalizeGithubRepositoryUrl(runtimeSource.repositoryUrl);
+  if (!repositoryUrl) {
+    throw new SmokeFixtureValidationError("runtimeSource.repositoryUrl must be an HTTPS GitHub repository URL without credentials");
+  }
+  if (isProtectedProductionRepository(repositoryUrl)) {
+    throw new SmokeFixtureValidationError("runtimeSource.repositoryUrl points at a protected production repository");
+  }
+
+  const allowlist = options.config.controlPlane.smokeFixtureRepositoryAllowlist
+    .map(normalizeGithubRepositoryUrl)
+    .filter((value): value is string => Boolean(value));
+  if (!allowlist.includes(repositoryUrl) && options.forceUnsafeRepository !== true) {
+    throw new SmokeFixtureValidationError("runtimeSource.repositoryUrl is outside the smoke fixture repository allowlist");
+  }
+
+  if (!isSafeGitRef(runtimeSource.baseRef)) {
+    throw new SmokeFixtureValidationError("runtimeSource.baseRef is invalid");
+  }
+  if (!isSafeGitRef(runtimeSource.taskBranchPrefix) || !runtimeSource.taskBranchPrefix.startsWith("agent-pool/")) {
+    throw new SmokeFixtureValidationError("runtimeSource.taskBranchPrefix must be a safe agent-pool/* branch prefix");
+  }
+  if (runtimeSource.commandProfile !== options.config.controlPlane.e2b.codexCommandProfile) {
+    throw new SmokeFixtureValidationError(`runtimeSource.commandProfile must be ${options.config.controlPlane.e2b.codexCommandProfile}`);
+  }
+
+  const declaredEgress = new Set((runtimeSource.allowedEgressDomains ?? []).map((domain) => domain.trim().toLowerCase()).filter(Boolean));
+  for (const domain of ["github.com", "api.github.com", "registry.npmjs.org", "api.openai.com"]) {
+    if (!declaredEgress.has(domain)) {
+      throw new SmokeFixtureValidationError(`runtimeSource.allowedEgressDomains must include ${domain}`);
+    }
+  }
+  for (const domain of declaredEgress) {
+    if (!options.config.controlPlane.e2b.allowedEgressDomains.includes(domain)) {
+      throw new SmokeFixtureValidationError(`runtimeSource.allowedEgressDomains contains a domain outside the global allowlist: ${domain}`);
+    }
+  }
+  if (hasTokenLikeRuntimeSourceValue(runtimeSource)) {
+    throw new SmokeFixtureValidationError("runtimeSource must not contain token-like values");
+  }
+}
+
+function normalizeGithubRepositoryUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
+    const parts = url.pathname.replace(/^\/+|\/+$/g, "").split("/");
+    if (url.protocol !== "https:" || url.hostname !== "github.com" || url.username || url.password || parts.length !== 2) {
+      return null;
+    }
+    const owner = parts[0]?.trim();
+    const repo = parts[1]?.replace(/\.git$/, "").trim();
+    if (!owner || !repo || !/^[A-Za-z0-9_.-]+$/.test(owner) || !/^[A-Za-z0-9_.-]+$/.test(repo)) {
+      return null;
+    }
+    return `https://github.com/${owner}/${repo}.git`;
+  } catch {
+    return null;
+  }
+}
+
+function isProtectedProductionRepository(repositoryUrl: string): boolean {
+  return new Set([
+    "https://github.com/camysidron1/agent-pool.git",
+    "https://github.com/nebariai/nebari-mvp.git",
+  ]).has(repositoryUrl.toLowerCase());
+}
+
+function isSafeGitRef(value: string): boolean {
+  return /^[A-Za-z0-9._/-]+$/.test(value) && !value.includes("..") && !value.startsWith("/") && !value.endsWith("/");
+}
+
+function hasTokenLikeRuntimeSourceValue(runtimeSource: SmokeRuntimeSourceInput): boolean {
+  const values = [
+    runtimeSource.repositoryUrl,
+    runtimeSource.baseRef,
+    runtimeSource.taskBranchPrefix,
+    runtimeSource.commandProfile ?? "",
+    ...(runtimeSource.allowedEgressDomains ?? []),
+  ];
+  return values.some((value) => /(?:github_pat_|ghp_|ghs_|token=|password=|secret=)/i.test(value));
 }
 
 export function readSmokeFixtureStatus(options: SmokeFixtureOptions): SmokeStatusResult {

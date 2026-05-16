@@ -1637,6 +1637,119 @@ describe("API service skeleton", () => {
     }
   });
 
+  test("internal smoke fixture enforces disposable Codex E2B repository rails before queue publication", async () => {
+    const { baseUrl, config, database, close } = await startTestApi({
+      env: strictCodexSmokeEnv(),
+    });
+
+    try {
+      const headers = {
+        "content-type": "application/json",
+        [config.serviceToken.headerName]: config.serviceToken.token,
+      };
+      const safeRuntimeSource = {
+        repositoryUrl: "https://github.com/example/tiny-fixture.git",
+        baseRef: "main",
+        taskBranchPrefix: "agent-pool/e2b-smoke/api-run-1",
+        allowedEgressDomains: ["github.com", "api.github.com", "registry.npmjs.org", "api.openai.com"],
+        commandProfile: "agent-pool-bun-pr",
+      };
+      const rejectedRepository = await fetch(`${baseUrl}/internal/smoke/seed`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          runtimeSource: {
+            ...safeRuntimeSource,
+            repositoryUrl: "https://github.com/example/not-a-fixture.git",
+          },
+        }),
+      });
+      const rejectedBase = await fetch(`${baseUrl}/internal/smoke/seed`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          runtimeSource: {
+            ...safeRuntimeSource,
+            baseRef: "../main",
+          },
+        }),
+      });
+      const rejectedSecret = await fetch(`${baseUrl}/internal/smoke/seed`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          runtimeSource: {
+            ...safeRuntimeSource,
+            taskBranchPrefix: "agent-pool/e2b-smoke/ghp_secret",
+          },
+        }),
+      });
+
+      expect(rejectedRepository.status).toBe(400);
+      expect(await rejectedRepository.json()).toEqual({
+        ok: false,
+        error: "runtimeSource.repositoryUrl is outside the smoke fixture repository allowlist",
+      });
+      expect(rejectedBase.status).toBe(400);
+      expect(await rejectedBase.json()).toEqual({ ok: false, error: "runtimeSource.baseRef is invalid" });
+      expect(rejectedSecret.status).toBe(400);
+      expect(await rejectedSecret.json()).toEqual({ ok: false, error: "runtimeSource must not contain token-like values" });
+      expect(database.sqlite.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM tasks").get()?.count).toBe(0);
+
+      const allowed = await fetch(`${baseUrl}/internal/smoke/seed`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ runtimeSource: safeRuntimeSource }),
+      });
+      expect(allowed.status).toBe(200);
+      expect(await allowed.json()).toMatchObject({
+        ok: true,
+        task: { id: "compose-smoke-task-1", status: "queued" },
+      });
+    } finally {
+      await close();
+    }
+  });
+
+  test("internal smoke fixture rejects static GitHub token fallback for Codex E2B smoke", async () => {
+    const { baseUrl, config, database, close } = await startTestApi({
+      env: strictCodexSmokeEnv({
+        GITHUB_APP_ID: undefined,
+        GITHUB_APP_PRIVATE_KEY: undefined,
+        GITHUB_APP_INSTALLATION_ID: undefined,
+        GITHUB_TOKEN: "ghp_static_token_must_not_work",
+      }),
+    });
+
+    try {
+      const response = await fetch(`${baseUrl}/internal/smoke/seed`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [config.serviceToken.headerName]: config.serviceToken.token,
+        },
+        body: JSON.stringify({
+          runtimeSource: {
+            repositoryUrl: "https://github.com/example/tiny-fixture.git",
+            baseRef: "main",
+            taskBranchPrefix: "agent-pool/e2b-smoke/api-run-1",
+            allowedEgressDomains: ["github.com", "api.github.com", "registry.npmjs.org", "api.openai.com"],
+            commandProfile: "agent-pool-bun-pr",
+          },
+        }),
+      });
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        ok: false,
+        error: "GitHub App broker is required for live Codex E2B smoke; static GITHUB_TOKEN fallback is not allowed",
+      });
+      expect(database.sqlite.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM tasks").get()?.count).toBe(0);
+    } finally {
+      await close();
+    }
+  });
+
   test("internal smoke fixture seed is idempotent and status reports control-plane progress", async () => {
     const { baseUrl, config, database, queue, close } = await startTestApi();
 
@@ -2951,6 +3064,24 @@ function publicHeaders(config: ReturnType<typeof loadConfig>): HeadersInit {
   return {
     "content-type": "application/json",
     "x-agent-pool-operator-id": config.operator.id,
+  };
+}
+
+function strictCodexSmokeEnv(overrides: Readonly<Record<string, string | undefined>> = {}): Readonly<Record<string, string | undefined>> {
+  return {
+    RUNTIME_PROVIDER: "e2b",
+    AGENT_RUNNER_MODE: "codex",
+    E2B_API_KEY: "e2b-secret",
+    E2B_TEMPLATE_ID: "template-1",
+    E2B_ALLOWED_SECRET_ENV_NAMES: "GITHUB_TOKEN,CODEX_API_KEY",
+    E2B_LOCAL_ALLOW_DIRECT_EGRESS: "true",
+    CODEX_API_KEY: "codex-secret",
+    GITHUB_APP_ID: "12345",
+    GITHUB_APP_PRIVATE_KEY: "github-app-private-key",
+    GITHUB_APP_INSTALLATION_ID: "67890",
+    AGENT_POOL_ALLOWED_EGRESS_DOMAINS: "github.com,api.github.com,registry.npmjs.org,api.openai.com",
+    AGENT_POOL_SMOKE_FIXTURE_REPOSITORIES: "https://github.com/example/tiny-fixture.git",
+    ...overrides,
   };
 }
 

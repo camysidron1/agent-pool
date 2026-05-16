@@ -23,12 +23,15 @@ export type E2BSmokeRequest = {
 export type E2BSmokePlan = {
   readonly runtimeProvider: "e2b";
   readonly apiUrl: string;
+  readonly runId: string;
   readonly timeoutMs: number;
   readonly serviceTokenHeaderName: string;
   readonly serviceToken: "[REDACTED]" | "[MISSING]";
   readonly missingCredentials: readonly string[];
   readonly missingSettings: readonly string[];
   readonly runtimeSource: RuntimeTaskSourceMetadata;
+  readonly fixtureSafety: E2BSmokeFixtureSafety;
+  readonly pullRequest: E2BSmokePullRequestPlan;
   readonly launchSpec: RedactedE2BLaunchSpec;
   readonly bootstrap: ReturnType<typeof buildGitHubBootstrapPlan>;
   readonly bridgeStartup: ReturnType<typeof buildSandboxBridgeStartupPlan>["redactedEnv"];
@@ -50,6 +53,24 @@ export type E2BSmokePlan = {
     readonly seed: E2BSmokeRequest;
     readonly status: E2BSmokeRequest;
   };
+};
+
+export type E2BSmokeFixtureSafety = {
+  readonly ok: boolean;
+  readonly forced: boolean;
+  readonly repositoryAllowed: boolean;
+  readonly fixtureAllowlist: readonly string[];
+  readonly errors: readonly string[];
+  readonly warnings: readonly string[];
+};
+
+export type E2BSmokePullRequestPlan = {
+  readonly draft: true;
+  readonly title: string;
+  readonly body: string;
+  readonly repositoryUrl: string;
+  readonly baseRef: string;
+  readonly taskBranchPrefix: string;
 };
 
 export type E2BSmokeSecurityReadiness = {
@@ -209,11 +230,14 @@ export type E2BLiveSmokeDoctorReport = {
     readonly evidenceCommand: readonly string[];
   };
   readonly fixture: {
+    readonly runId: string;
     readonly repositoryUrl: string;
     readonly baseRef: string;
     readonly taskBranchPrefix: string;
     readonly allowedEgressDomains: readonly string[];
     readonly commandProfile: string | null;
+    readonly safety: E2BSmokeFixtureSafety;
+    readonly pullRequest: E2BSmokePullRequestPlan;
   };
   readonly readiness: E2BReadinessReport;
   readonly checks: readonly E2BReadinessCheck[];
@@ -229,6 +253,8 @@ type ParsedE2BSmokeArgs = {
   readonly repositoryUrl: string;
   readonly baseRef: string;
   readonly taskBranchPrefix: string;
+  readonly runId: string;
+  readonly forceUnsafeRepository: boolean;
   readonly agentRunnerMode?: "bridge-smoke" | "codex";
   readonly allowedEgressDomains?: readonly string[];
   readonly maliciousFixtures: boolean;
@@ -243,6 +269,7 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_REPOSITORY_URL = "https://github.com/example/tiny-fixture.git";
 const DEFAULT_BASE_REF = "main";
 const DEFAULT_TASK_BRANCH_PREFIX = "agent-pool/e2b-smoke";
+const SMOKE_FIXTURE_REPOSITORIES_ENV = "AGENT_POOL_SMOKE_FIXTURE_REPOSITORIES";
 const DEFAULT_ALLOWED_EGRESS_DOMAINS = ["github.com", "api.github.com", "registry.npmjs.org", "api.openai.com"] as const;
 const DRY_RUN_TEMPLATE_ID = "dry-run-template";
 const DRY_RUN_GITHUB_TOKEN = "dry-run-github-token";
@@ -281,10 +308,14 @@ export function createE2BSmokePlan(input: Partial<ParsedE2BSmokeArgs> & { readon
   const config = loadConfig(buildE2BSmokeConfigEnv(env, agentRunnerMode));
   const e2b = config.controlPlane.e2b;
   const allowedEgressDomains = input.allowedEgressDomains ?? readAllowedEgressDomains(env.AGENT_POOL_ALLOWED_EGRESS_DOMAINS);
+  const runId = readSmokeRunId(input.runId ?? env.AGENT_POOL_SMOKE_RUN_ID);
+  const repositoryUrl = input.repositoryUrl ?? DEFAULT_REPOSITORY_URL;
+  const baseRef = input.baseRef ?? DEFAULT_BASE_REF;
+  const taskBranchPrefix = input.taskBranchPrefix ?? `${DEFAULT_TASK_BRANCH_PREFIX}/${runId}`;
   const runtimeSource = {
-    repositoryUrl: input.repositoryUrl ?? DEFAULT_REPOSITORY_URL,
-    baseRef: input.baseRef ?? DEFAULT_BASE_REF,
-    taskBranchPrefix: input.taskBranchPrefix ?? DEFAULT_TASK_BRANCH_PREFIX,
+    repositoryUrl,
+    baseRef,
+    taskBranchPrefix,
     ...(agentRunnerMode === "codex"
       ? {
           allowedEgressDomains,
@@ -294,8 +325,18 @@ export function createE2BSmokePlan(input: Partial<ParsedE2BSmokeArgs> & { readon
   };
   const apiUrl = trimTrailingSlash(input.apiUrl ?? DEFAULT_API_URL);
   const serviceToken = input.serviceToken ?? config.serviceToken.token;
+  const fixtureAllowlist = readFixtureRepositoryAllowlist(env[SMOKE_FIXTURE_REPOSITORIES_ENV]);
+  const fixtureSafety = buildFixtureSafety({
+    runtimeSource,
+    fixtureAllowlist,
+    forceUnsafeRepository: input.forceUnsafeRepository === true,
+    requiredCommandProfile: e2b.codexCommandProfile,
+    requiredEgressDomains: agentRunnerMode === "codex" ? DEFAULT_ALLOWED_EGRESS_DOMAINS : [],
+    runId,
+  });
+  const pullRequest = buildPullRequestPlan({ runtimeSource, runId });
   const missingCredentials = readMissingCredentials(env, e2b, agentRunnerMode);
-  const missingSettings = readMissingSettings(e2b, agentRunnerMode, allowedEgressDomains);
+  const missingSettings = readMissingSettings(e2b, agentRunnerMode, allowedEgressDomains, fixtureAllowlist);
   const allowedSecretEnvNames = [
     ...new Set([
       ...e2b.allowedSecretEnvNames,
@@ -338,7 +379,7 @@ export function createE2BSmokePlan(input: Partial<ParsedE2BSmokeArgs> & { readon
         workspaceRoot: e2b.workingDirectory,
       },
       secretEnvironment: {
-        [e2b.githubTokenEnvName]: env[e2b.githubTokenEnvName]?.trim() || DRY_RUN_GITHUB_TOKEN,
+        [e2b.githubTokenEnvName]: agentRunnerMode === "codex" ? DRY_RUN_GITHUB_TOKEN : env[e2b.githubTokenEnvName]?.trim() || DRY_RUN_GITHUB_TOKEN,
         ...(agentRunnerMode === "codex"
           ? { [e2b.codexApiKeyEnvName]: env[e2b.codexApiKeyEnvName]?.trim() || DRY_RUN_CODEX_API_KEY }
           : {}),
@@ -348,7 +389,7 @@ export function createE2BSmokePlan(input: Partial<ParsedE2BSmokeArgs> & { readon
       config: launchConfig,
       env: {
         ...env,
-        [e2b.githubTokenEnvName]: env[e2b.githubTokenEnvName]?.trim() || DRY_RUN_GITHUB_TOKEN,
+        [e2b.githubTokenEnvName]: agentRunnerMode === "codex" ? DRY_RUN_GITHUB_TOKEN : env[e2b.githubTokenEnvName]?.trim() || DRY_RUN_GITHUB_TOKEN,
         ...(agentRunnerMode === "codex"
           ? { [e2b.codexApiKeyEnvName]: env[e2b.codexApiKeyEnvName]?.trim() || DRY_RUN_CODEX_API_KEY }
           : {}),
@@ -385,12 +426,15 @@ export function createE2BSmokePlan(input: Partial<ParsedE2BSmokeArgs> & { readon
   return {
     runtimeProvider: "e2b",
     apiUrl,
+    runId,
     timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     serviceTokenHeaderName: config.serviceToken.headerName,
     serviceToken: serviceToken.trim() ? "[REDACTED]" : "[MISSING]",
     missingCredentials,
     missingSettings,
     runtimeSource,
+    fixtureSafety,
+    pullRequest,
     launchSpec: redactedLaunchSpec,
     bootstrap,
     bridgeStartup: bridgeStartup.redactedEnv,
@@ -419,6 +463,9 @@ export function createE2BSmokePlan(input: Partial<ParsedE2BSmokeArgs> & { readon
         url: `${apiUrl}/internal/smoke/seed`,
         body: {
           runtimeSource,
+          runId,
+          pullRequest,
+          forceUnsafeRepository: input.forceUnsafeRepository === true,
         },
       },
       status: {
@@ -478,11 +525,14 @@ export function createE2BLiveSmokeDoctorReport(input: Partial<ParsedE2BSmokeArgs
       evidenceCommand: buildSmokeCommand(plan, agentRunnerMode, ["--evidence"]),
     },
     fixture: {
+      runId: plan.runId,
       repositoryUrl: plan.runtimeSource.repositoryUrl,
       baseRef: plan.runtimeSource.baseRef,
       taskBranchPrefix: plan.runtimeSource.taskBranchPrefix,
       allowedEgressDomains: plan.runtimeSource.allowedEgressDomains ?? [],
       commandProfile: plan.runtimeSource.commandProfile ?? null,
+      safety: plan.fixtureSafety,
+      pullRequest: plan.pullRequest,
     },
     readiness: {
       ...readiness,
@@ -866,6 +916,15 @@ function buildReadinessChecks(plan: E2BSmokePlan, agentRunnerMode: "bridge-smoke
             : "Runtime source is missing the supported command profile.",
         nextAction: plan.runtimeSource.commandProfile === "agent-pool-bun-pr" ? null : "Use command profile agent-pool-bun-pr.",
       },
+      {
+        id: "fixture-repository-safety",
+        label: "Disposable fixture repository safety",
+        status: plan.fixtureSafety.ok ? (plan.fixtureSafety.warnings.length > 0 ? "warn" : "pass") : "block",
+        detail: plan.fixtureSafety.ok
+          ? plan.fixtureSafety.warnings[0] ?? "Fixture repository, branch, PR, and egress settings are bounded for disposable smoke."
+          : plan.fixtureSafety.errors[0] ?? "Fixture repository safety check failed.",
+        nextAction: plan.fixtureSafety.ok ? null : `Set ${SMOKE_FIXTURE_REPOSITORIES_ENV} to a disposable fixture repository or fix the runtime source.`,
+      },
     );
   }
 
@@ -971,6 +1030,149 @@ function buildDoctorChecks(plan: E2BSmokePlan, agentRunnerMode: "bridge-smoke" |
   ];
 }
 
+function buildFixtureSafety(input: {
+  readonly runtimeSource: RuntimeTaskSourceMetadata;
+  readonly fixtureAllowlist: readonly string[];
+  readonly forceUnsafeRepository: boolean;
+  readonly requiredCommandProfile: string;
+  readonly requiredEgressDomains: readonly string[];
+  readonly runId: string;
+}): E2BSmokeFixtureSafety {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const repositoryUrl = normalizeGithubRepositoryUrl(input.runtimeSource.repositoryUrl);
+  const repositoryAllowed = Boolean(repositoryUrl && input.fixtureAllowlist.includes(repositoryUrl));
+
+  if (!repositoryUrl) {
+    errors.push("runtimeSource.repositoryUrl must be an HTTPS GitHub repository URL");
+  } else if (isLikelyProductionRepository(repositoryUrl)) {
+    errors.push("runtimeSource.repositoryUrl points at a protected production repository");
+  } else if (input.fixtureAllowlist.length === 0) {
+    if (input.forceUnsafeRepository) {
+      warnings.push(`${SMOKE_FIXTURE_REPOSITORIES_ENV} is empty; force flag is allowing this disposable smoke run`);
+    } else {
+      errors.push(`${SMOKE_FIXTURE_REPOSITORIES_ENV} must include the disposable fixture repository`);
+    }
+  } else if (!repositoryAllowed) {
+    if (input.forceUnsafeRepository) {
+      warnings.push("runtimeSource.repositoryUrl is outside the fixture allowlist; force flag is allowing this disposable smoke run");
+    } else {
+      errors.push("runtimeSource.repositoryUrl is outside the fixture repository allowlist");
+    }
+  }
+
+  if (!isSafeGitRef(input.runtimeSource.baseRef)) {
+    errors.push("runtimeSource.baseRef must be a safe branch or tag name");
+  }
+  if (!isSafeGitRef(input.runtimeSource.taskBranchPrefix)) {
+    errors.push("runtimeSource.taskBranchPrefix must be a safe branch prefix");
+  }
+  if (!input.runtimeSource.taskBranchPrefix.startsWith("agent-pool/")) {
+    errors.push("runtimeSource.taskBranchPrefix must stay under the agent-pool/* namespace");
+  }
+  if (!input.runtimeSource.taskBranchPrefix.split("/").includes(input.runId)) {
+    errors.push("runtimeSource.taskBranchPrefix must include the run id as its own path segment");
+  }
+  if (input.runtimeSource.commandProfile !== input.requiredCommandProfile) {
+    errors.push(`runtimeSource.commandProfile must be ${input.requiredCommandProfile}`);
+  }
+
+  const declaredEgressDomains = new Set((input.runtimeSource.allowedEgressDomains ?? []).map((domain) => domain.toLowerCase()));
+  const missingEgressDomains = input.requiredEgressDomains.filter((domain) => !declaredEgressDomains.has(domain));
+  if (missingEgressDomains.length > 0) {
+    errors.push(`runtimeSource.allowedEgressDomains is missing: ${missingEgressDomains.join(", ")}`);
+  }
+  if (hasTokenLikeRuntimeSourceValue(input.runtimeSource)) {
+    errors.push("runtimeSource must not contain token-like values or URL credentials");
+  }
+
+  return {
+    ok: errors.length === 0,
+    forced: input.forceUnsafeRepository,
+    repositoryAllowed,
+    fixtureAllowlist: input.fixtureAllowlist,
+    errors,
+    warnings,
+  };
+}
+
+function buildPullRequestPlan(input: {
+  readonly runtimeSource: RuntimeTaskSourceMetadata;
+  readonly runId: string;
+}): E2BSmokePullRequestPlan {
+  return {
+    draft: true,
+    title: `Agent Pool E2B smoke ${input.runId}`,
+    body: [
+      "Disposable Agent Pool live E2B smoke PR.",
+      "",
+      `Run id: ${input.runId}`,
+      "Expected cleanup: close the draft PR and delete the smoke branch after evidence capture.",
+    ].join("\n"),
+    repositoryUrl: input.runtimeSource.repositoryUrl,
+    baseRef: input.runtimeSource.baseRef,
+    taskBranchPrefix: input.runtimeSource.taskBranchPrefix,
+  };
+}
+
+function readFixtureRepositoryAllowlist(value: string | undefined): readonly string[] {
+  const raw = value?.trim();
+  if (!raw) return [];
+  return [
+    ...new Set(
+      raw
+        .split(",")
+        .map((part) => normalizeGithubRepositoryUrl(part.trim()))
+        .filter((part): part is string => Boolean(part)),
+    ),
+  ];
+}
+
+function normalizeGithubRepositoryUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
+    const parts = url.pathname.replace(/^\/+|\/+$/g, "").split("/");
+    if (url.protocol !== "https:" || url.hostname !== "github.com" || url.username || url.password || parts.length !== 2) {
+      return null;
+    }
+    const owner = parts[0]?.trim();
+    const repo = parts[1]?.replace(/\.git$/, "").trim();
+    if (!owner || !repo || !/^[A-Za-z0-9_.-]+$/.test(owner) || !/^[A-Za-z0-9_.-]+$/.test(repo)) {
+      return null;
+    }
+    return `https://github.com/${owner}/${repo}.git`;
+  } catch {
+    return null;
+  }
+}
+
+function isLikelyProductionRepository(repositoryUrl: string): boolean {
+  return new Set([
+    "https://github.com/camysidron1/agent-pool.git",
+    "https://github.com/nebariai/nebari-mvp.git",
+  ]).has(repositoryUrl.toLowerCase());
+}
+
+function hasTokenLikeRuntimeSourceValue(runtimeSource: RuntimeTaskSourceMetadata): boolean {
+  const repositoryUrl = (() => {
+    try {
+      return new URL(runtimeSource.repositoryUrl);
+    } catch {
+      return null;
+    }
+  })();
+  if (repositoryUrl?.username || repositoryUrl?.password) return true;
+
+  const values = [
+    runtimeSource.repositoryUrl,
+    runtimeSource.baseRef,
+    runtimeSource.taskBranchPrefix,
+    runtimeSource.commandProfile ?? "",
+    ...(runtimeSource.allowedEgressDomains ?? []),
+  ];
+  return values.some((value) => /(?:github_pat_|ghp_|ghs_|token=|password=|secret=)/i.test(value));
+}
+
 function nextReadinessAction(status: E2BReadinessStatus): string {
   switch (status) {
     case "ready":
@@ -1013,6 +1215,8 @@ function buildSmokeCommand(
     plan.runtimeSource.baseRef,
     "--task-branch-prefix",
     plan.runtimeSource.taskBranchPrefix,
+    "--run-id",
+    plan.runId,
   ];
 }
 
@@ -1151,6 +1355,30 @@ export async function runE2BSmokeCli(args: readonly string[] = process.argv.slic
     return 1;
   }
 
+  if (plan.launchSpec.runner.mode === "codex" && !plan.fixtureSafety.ok) {
+    const diagnostics = {
+      failedStage: "readiness",
+      detail: "Live Codex E2B smoke fixture safety checks failed before queue publication.",
+      fixtureSafety: plan.fixtureSafety,
+    };
+    const error = "unsafe_live_fixture";
+    write(
+      `${JSON.stringify(
+        parsed.evidence
+          ? createE2BEvidenceBundle({ plan, status: "blocked", generatedAt, stageDiagnostics: diagnostics, error })
+          : {
+              ok: false,
+              stage: "readiness",
+              error,
+              diagnostics,
+            },
+        null,
+        2,
+      )}\n`,
+    );
+    return 1;
+  }
+
   const fetchImpl = options.fetch ?? fetch;
   const serviceToken = parsed.serviceToken ?? loadConfig(buildE2BSmokeConfigEnv(env, readAgentRunnerMode(parsed.agentRunnerMode ?? env.AGENT_RUNNER_MODE))).serviceToken.token;
 
@@ -1224,7 +1452,9 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
   let timeoutMs = DEFAULT_TIMEOUT_MS;
   let repositoryUrl = DEFAULT_REPOSITORY_URL;
   let baseRef = DEFAULT_BASE_REF;
-  let taskBranchPrefix = DEFAULT_TASK_BRANCH_PREFIX;
+  let runId = readSmokeRunId(undefined);
+  let taskBranchPrefix: string | undefined;
+  let forceUnsafeRepository = false;
   let agentRunnerMode: "bridge-smoke" | "codex" | undefined;
   let allowedEgressDomains: readonly string[] | undefined;
   let maliciousFixtures = false;
@@ -1264,6 +1494,12 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
       case "--task-branch-prefix":
         taskBranchPrefix = readFlagValue(args, (index += 1), arg);
         break;
+      case "--run-id":
+        runId = readSmokeRunId(readFlagValue(args, (index += 1), arg));
+        break;
+      case "--force-non-fixture-repository":
+        forceUnsafeRepository = true;
+        break;
       case "--agent-runner-mode":
         agentRunnerMode = readAgentRunnerMode(readFlagValue(args, (index += 1), arg));
         break;
@@ -1299,7 +1535,9 @@ export function parseE2BSmokeArgs(args: readonly string[]): ParsedE2BSmokeArgs {
     timeoutMs,
     repositoryUrl,
     baseRef,
-    taskBranchPrefix,
+    taskBranchPrefix: taskBranchPrefix ?? `${DEFAULT_TASK_BRANCH_PREFIX}/${runId}`,
+    runId,
+    forceUnsafeRepository,
     ...(agentRunnerMode ? { agentRunnerMode } : {}),
     ...(allowedEgressDomains ? { allowedEgressDomains } : {}),
     maliciousFixtures,
@@ -1595,7 +1833,9 @@ function isE2BSmokeDiagnosticStage(value: string): value is E2BSmokeDiagnosticSt
 }
 
 function isSuccessfulVerification(body: unknown): boolean {
-  return readRecord(body)?.ok === true;
+  const record = readRecord(body);
+  const permissions = readRecord(record?.permissions);
+  return record?.ok === true && permissions?.contents === "write" && permissions?.pull_requests === "write";
 }
 
 function readVerificationError(body: unknown): string {
@@ -1631,6 +1871,7 @@ function readMissingSettings(
   e2b: ReturnType<typeof loadConfig>["controlPlane"]["e2b"],
   agentRunnerMode: "bridge-smoke" | "codex",
   allowedEgressDomains: readonly string[],
+  fixtureRepositoryAllowlist: readonly string[],
 ): readonly string[] {
   const missing = [...(e2b.templateId || e2b.sandboxImageId ? [] : ["E2B_TEMPLATE_ID or E2B_SANDBOX_IMAGE_ID"])];
   if (agentRunnerMode === "codex") {
@@ -1639,6 +1880,9 @@ function readMissingSettings(
     }
     if (allowedEgressDomains.length === 0) {
       missing.push("AGENT_POOL_ALLOWED_EGRESS_DOMAINS");
+    }
+    if (fixtureRepositoryAllowlist.length === 0) {
+      missing.push(SMOKE_FIXTURE_REPOSITORIES_ENV);
     }
   }
   return missing;
@@ -1658,6 +1902,15 @@ function readAgentRunnerMode(value: string | undefined): "bridge-smoke" | "codex
   const mode = value?.trim() || "bridge-smoke";
   if (mode === "bridge-smoke" || mode === "codex") return mode;
   throw new Error("agent runner mode must be bridge-smoke or codex");
+}
+
+function readSmokeRunId(value: string | undefined): string {
+  const raw = value?.trim() || `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const normalized = raw.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!normalized || normalized.length > 64 || normalized.includes("..") || /(?:github_pat_|ghp_|ghs_|token|secret|password)/i.test(normalized)) {
+    throw new Error("smoke run id must be a safe non-secret identifier");
+  }
+  return normalized;
 }
 
 function readAllowedEgressDomains(value: string | undefined): readonly string[] {

@@ -12,7 +12,13 @@ import { createGitHubAppTokenBroker, type GitHubTokenBroker } from "./github-tok
 import { createOutboxPublisher, type OutboxPublisher } from "./outbox-publisher";
 import type { OutboxPublisherLoop } from "./outbox-publisher-loop";
 import { registerPublicApiRoutes, type PublicSseHub } from "./public-api";
-import { isSmokeFixtureEnabled, readSmokeFixtureStatus, seedSmokeFixture, type SmokeRuntimeSourceInput } from "./smoke-fixture";
+import {
+  isSmokeFixtureEnabled,
+  isSmokeFixtureValidationError,
+  readSmokeFixtureStatus,
+  seedSmokeFixture,
+  type SmokeRuntimeSourceInput,
+} from "./smoke-fixture";
 
 type ApiBackendServices = ReturnType<typeof createApiBackendServices>;
 
@@ -117,14 +123,25 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
     }
 
     let runtimeSource: SmokeRuntimeSourceInput | null;
+    let forceUnsafeRepository = false;
     try {
       runtimeSource = readSmokeRuntimeSource(request.body);
+      forceUnsafeRepository = readSmokeForceUnsafeRepository(request.body);
     } catch (error) {
       response.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
       return;
     }
 
-    const result = await seedSmokeFixture({ config, database, queue, services, runtimeSource });
+    let result;
+    try {
+      result = await seedSmokeFixture({ config, database, queue, services, runtimeSource, forceUnsafeRepository });
+    } catch (error) {
+      if (isSmokeFixtureValidationError(error)) {
+        response.status(400).json({ ok: false, error: error.message });
+        return;
+      }
+      throw error;
+    }
     response.status(200).json({ ok: true, ...result });
   });
 
@@ -334,6 +351,16 @@ function readSmokeRuntimeSource(body: unknown): SmokeRuntimeSourceInput | null {
     allowedEgressDomains: readOptionalRecordStringArray(runtimeSource, "allowedEgressDomains", "runtimeSource"),
     commandProfile: readOptionalRecordString(runtimeSource, "commandProfile", "runtimeSource"),
   };
+}
+
+function readSmokeForceUnsafeRepository(body: unknown): boolean {
+  const record = readOptionalRecord(body);
+  const value = record?.forceUnsafeRepository;
+  if (value === undefined || value === null) return false;
+  if (typeof value !== "boolean") {
+    throw new Error("forceUnsafeRepository must be a boolean");
+  }
+  return value;
 }
 
 function readOptionalRecord(value: unknown): Readonly<Record<string, unknown>> | null {
