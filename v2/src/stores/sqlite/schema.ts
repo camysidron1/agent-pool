@@ -158,6 +158,58 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE tasks ADD COLUMN branch TEXT;
   `,
+
+  // v9: Add review_requested task status for human review workflows
+  `
+  CREATE TABLE tasks_new (
+    id TEXT PRIMARY KEY,
+    project_name TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+    prompt TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+      CHECK(status IN ('pending','in_progress','completed','blocked','backlogged','cancelled','review_requested')),
+    claimed_by TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    priority INTEGER NOT NULL DEFAULT 0,
+    timeout_minutes INTEGER,
+    retry_max INTEGER NOT NULL DEFAULT 1,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    retry_strategy TEXT NOT NULL DEFAULT 'same'
+      CHECK(retry_strategy IN ('same','augmented','escalate')),
+    result TEXT,
+    pipeline_id TEXT REFERENCES pipelines(id) ON DELETE SET NULL,
+    pipeline_step_id TEXT,
+    workspace_ref TEXT DEFAULT '',
+    branch TEXT
+  );
+  INSERT INTO tasks_new (
+    id, project_name, prompt, status, claimed_by, created_at, started_at, completed_at,
+    priority, timeout_minutes, retry_max, retry_count, retry_strategy, result,
+    pipeline_id, pipeline_step_id, workspace_ref, branch
+  )
+  SELECT
+    id, project_name, prompt, status, claimed_by, created_at, started_at, completed_at,
+    priority, timeout_minutes, retry_max, retry_count, retry_strategy, result,
+    pipeline_id, pipeline_step_id, workspace_ref, branch
+  FROM tasks;
+  DROP TABLE tasks;
+  ALTER TABLE tasks_new RENAME TO tasks;
+
+  CREATE INDEX idx_tasks_project_status ON tasks(project_name, status);
+  CREATE INDEX idx_tasks_priority ON tasks(project_name, status, priority DESC);
+  CREATE INDEX idx_tasks_pipeline ON tasks(pipeline_id);
+  CREATE INDEX idx_tasks_workspace ON tasks(project_name, workspace_ref, status);
+
+  CREATE TABLE IF NOT EXISTS task_dependencies_new (
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    depends_on TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    PRIMARY KEY (task_id, depends_on)
+  );
+  INSERT OR IGNORE INTO task_dependencies_new SELECT * FROM task_dependencies;
+  DROP TABLE task_dependencies;
+  ALTER TABLE task_dependencies_new RENAME TO task_dependencies;
+  `,
 ];
 
 /**

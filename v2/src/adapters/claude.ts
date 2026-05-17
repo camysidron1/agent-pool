@@ -17,7 +17,7 @@ import {
 
 const FINISH_COMMAND = `---
 description: "Mark the current agent-pool task with a status and end the session"
-argument-hint: "[completed|blocked|pending|backlogged]"
+argument-hint: "[completed|blocked|pending|backlogged|review_requested]"
 allowed-tools: ["Bash"]
 ---
 
@@ -25,7 +25,7 @@ allowed-tools: ["Bash"]
 
 Run the finish-task script to mark this task and end the session. The status defaults to \`completed\` if not specified.
 
-**Valid statuses:** \`completed\`, \`blocked\`, \`pending\` (retry), \`backlogged\`
+**Valid statuses:** \`completed\`, \`blocked\`, \`pending\` (retry), \`backlogged\`, \`review_requested\`
 
 ## Steps
 

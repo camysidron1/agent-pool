@@ -1,4 +1,4 @@
-import { Database } from 'bun:sqlite';
+import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import type { Project, ProjectInput, ProjectStore } from '../interfaces.js';
 
 interface ProjectRow {
@@ -109,7 +109,7 @@ export class SqliteProjectStore implements ProjectStore {
     };
 
     const sets: string[] = [];
-    const values: unknown[] = [];
+    const values: SQLQueryBindings[] = [];
 
     for (const [key, value] of Object.entries(fields)) {
       const col = columnMap[key];
@@ -122,7 +122,7 @@ export class SqliteProjectStore implements ProjectStore {
       } else if (key === 'envVars') {
         values.push(value === null ? null : JSON.stringify(value));
       } else {
-        values.push(value);
+        values.push(value as SQLQueryBindings);
       }
     }
 

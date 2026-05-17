@@ -1,4 +1,4 @@
-import { Database } from 'bun:sqlite';
+import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import type { Task, TaskInput, TaskLog, TaskStatus, TaskStore } from '../interfaces.js';
 import { generateUniqueWordId } from '../../util/word-id.js';
 
@@ -130,7 +130,7 @@ export class SqliteTaskStore implements TaskStore {
   private findNextClaimable(projectName: string, workspaceRef?: string): TaskRow | null {
     // When workspaceRef is provided, only consider tasks matching that workspace.
     const wsFilter = workspaceRef !== undefined ? ' AND t.workspace_ref = ?' : '';
-    const params: unknown[] = [projectName];
+    const params: SQLQueryBindings[] = [projectName];
     if (workspaceRef !== undefined) params.push(workspaceRef);
 
     return this.db.query(`
@@ -183,10 +183,10 @@ export class SqliteTaskStore implements TaskStore {
 
   mark(id: string, status: TaskStatus, fields?: Partial<Task>): void {
     const sets: string[] = ['status = ?'];
-    const values: unknown[] = [status];
+    const values: SQLQueryBindings[] = [status];
 
-    // Set completed_at for terminal/blocked/cancelled statuses
-    if (status === 'completed' || status === 'blocked' || status === 'cancelled') {
+    // Set completed_at for terminal/blocked/review statuses
+    if (status === 'completed' || status === 'blocked' || status === 'cancelled' || status === 'review_requested') {
       sets.push('completed_at = ?');
       values.push(new Date().toISOString());
     }
@@ -211,9 +211,9 @@ export class SqliteTaskStore implements TaskStore {
         const col = columnMap[key];
         if (!col) continue;
         // Don't duplicate completed_at if we already set it
-        if (col === 'completed_at' && (status === 'completed' || status === 'blocked' || status === 'cancelled')) continue;
+        if (col === 'completed_at' && (status === 'completed' || status === 'blocked' || status === 'cancelled' || status === 'review_requested')) continue;
         sets.push(`${col} = ?`);
-        values.push(value);
+        values.push(value as SQLQueryBindings);
       }
     }
 
@@ -233,13 +233,13 @@ export class SqliteTaskStore implements TaskStore {
     };
 
     const sets: string[] = [];
-    const values: unknown[] = [];
+    const values: SQLQueryBindings[] = [];
 
     for (const [key, value] of Object.entries(fields)) {
       const col = columnMap[key];
       if (!col) continue;
       sets.push(`${col} = ?`);
-      values.push(value);
+      values.push(value as SQLQueryBindings);
     }
 
     if (sets.length === 0) return;
@@ -284,7 +284,7 @@ export class SqliteTaskStore implements TaskStore {
 
   getLogs(filter: { taskId?: string; agentId?: string; limit?: number }): TaskLog[] {
     const conditions: string[] = [];
-    const values: unknown[] = [];
+    const values: SQLQueryBindings[] = [];
 
     if (filter.taskId) {
       conditions.push('task_id = ?');

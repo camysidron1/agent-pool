@@ -267,6 +267,14 @@ describe('TaskService', () => {
       expect(store.get('t-1')!.status).toBe('in_progress');
     });
 
+    test('sets to review_requested with completedAt', () => {
+      service.add({ projectName: 'proj', prompt: 'a' });
+      service.setStatus('t-1', 'review_requested');
+      const task = store.get('t-1')!;
+      expect(task.status).toBe('review_requested');
+      expect(task.completedAt).not.toBeNull();
+    });
+
     test('throws if task not found', () => {
       expect(() => service.setStatus('t-999', 'pending')).toThrow("Task 't-999' not found");
     });
@@ -289,13 +297,16 @@ describe('TaskService', () => {
       store.mark(t4.id, 'blocked');
       const t5 = service.add({ projectName: 'proj', prompt: 'e' });
       store.mark(t5.id, 'completed');
+      const t6 = service.add({ projectName: 'proj', prompt: 'f' });
+      store.mark(t6.id, 'review_requested');
 
       const summary = service.getQueueSummary('proj');
-      expect(summary.total).toBe(5);
+      expect(summary.total).toBe(6);
       expect(summary.pending).toBe(2);
       expect(summary.claimable).toBe(2);
       expect(summary.inProgress).toBe(1);
       expect(summary.blocked).toBe(1);
+      expect(summary.reviewRequested).toBe(1);
       expect(summary.completed).toBe(1);
       expect(summary.waitingOnDeps).toBe(0);
     });

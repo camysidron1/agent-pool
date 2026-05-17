@@ -28,6 +28,8 @@ When your task is complete:
 \`\`\`bash
 bun run "${toolDir}/src/finish-task.ts" completed
 \`\`\`
+
+Use \`review_requested\` instead of \`completed\` when a human should review the result before it is accepted.
 `;
 
 export class CodexAdapter implements AgentAdapter {

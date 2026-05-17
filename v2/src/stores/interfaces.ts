@@ -1,6 +1,6 @@
 // Store interfaces and domain types
 
-export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'blocked' | 'backlogged' | 'cancelled';
+export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'blocked' | 'backlogged' | 'cancelled' | 'review_requested';
 
 export type RetryStrategy = 'same' | 'augmented' | 'escalate';
 

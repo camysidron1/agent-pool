@@ -19,6 +19,7 @@ export const statusColor = (status: string): ((s: string) => string) => {
     case 'in_progress': return cyan;
     case 'completed': return green;
     case 'blocked': return red;
+    case 'review_requested': return blue;
     case 'backlogged': return gray;
     case 'cancelled': return gray;
     default: return (s: string) => s;

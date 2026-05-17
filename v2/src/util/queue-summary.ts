@@ -9,6 +9,7 @@ export function formatQueueSummary(summary: QueueSummary): string {
   // Counts line
   const parts: string[] = [];
   if (summary.inProgress > 0) parts.push(cyan(`${summary.inProgress} running`));
+  if (summary.reviewRequested > 0) parts.push(yellow(`${summary.reviewRequested} review requested`));
   if (summary.claimable > 0) parts.push(green(`${summary.claimable} claimable`));
   if (summary.waitingOnDeps > 0) parts.push(yellow(`${summary.waitingOnDeps} waiting on deps`));
   if (summary.blocked > 0) parts.push(red(`${summary.blocked} blocked`));
@@ -28,7 +29,7 @@ export function formatQueueSummary(summary: QueueSummary): string {
     lines.push(`  ${red('No claimable tasks — unblock stuck tasks to resume')}`);
   } else if (summary.claimable === 0 && summary.waitingOnDeps > 0) {
     lines.push(`  ${yellow('No claimable tasks — all pending are waiting on deps')}`);
-  } else if (summary.pending === 0 && summary.inProgress === 0) {
+  } else if (summary.pending === 0 && summary.inProgress === 0 && summary.reviewRequested === 0) {
     lines.push(`  ${dim('All tasks completed or idle — add more work')}`);
   }
 

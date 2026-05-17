@@ -1,7 +1,32 @@
 {
-  "name": "agent-pool",
+  "name": "@agent-pool/tui",
   "version": "2.0.0",
   "type": "module",
+  "publishConfig": {
+    "access": "restricted"
+  },
+  "files": [
+    "src",
+    "commands",
+    "package.json"
+  ],
+  "exports": {
+    ".": {
+      "types": "./src/server.ts",
+      "import": "./src/server.ts",
+      "default": "./src/server.ts"
+    },
+    "./server": {
+      "types": "./src/server.ts",
+      "import": "./src/server.ts",
+      "default": "./src/server.ts"
+    },
+    "./ag-ui": {
+      "types": "./src/ag-ui.ts",
+      "import": "./src/ag-ui.ts",
+      "default": "./src/ag-ui.ts"
+    }
+  },
   "bin": {
     "agent-pool": "./src/index.ts"
   },

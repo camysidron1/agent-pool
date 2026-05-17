@@ -5,6 +5,7 @@ export interface QueueSummary {
   pending: number;
   inProgress: number;
   blocked: number;
+  reviewRequested: number;
   waitingOnDeps: number;
   claimable: number;
   completed: number;
@@ -84,7 +85,7 @@ export class TaskService {
     }
     if (status === 'pending' || status === 'backlogged') {
       this.store.mark(id, status, { claimedBy: null, startedAt: null, completedAt: null });
-    } else if (status === 'completed' || status === 'blocked' || status === 'cancelled') {
+    } else if (status === 'completed' || status === 'blocked' || status === 'cancelled' || status === 'review_requested') {
       this.store.mark(id, status, { completedAt: new Date().toISOString() });
     } else {
       this.store.mark(id, status);
@@ -98,6 +99,7 @@ export class TaskService {
       pending: 0,
       inProgress: 0,
       blocked: 0,
+      reviewRequested: 0,
       waitingOnDeps: 0,
       claimable: 0,
       completed: 0,
@@ -113,6 +115,7 @@ export class TaskService {
       switch (task.status) {
         case 'in_progress': summary.inProgress++; break;
         case 'blocked': summary.blocked++; break;
+        case 'review_requested': summary.reviewRequested++; break;
         case 'completed': summary.completed++; break;
         case 'backlogged': summary.backlogged++; break;
         case 'cancelled': summary.cancelled++; break;

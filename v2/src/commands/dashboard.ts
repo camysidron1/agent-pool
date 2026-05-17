@@ -53,13 +53,14 @@ const dim = code(2);
 const red = code(31);
 const green = code(32);
 const yellow = code(33);
+const blue = code(34);
 const cyan = code(36);
 const white = code(37);
 const gray = code(90);
 const bgBlue = (s: string) => enabled ? `\x1b[44;37m${s}\x1b[0m` : `> ${s}`;
 
-function statusColor(s: string) { return s === 'pending' ? yellow : s === 'in_progress' ? cyan : s === 'completed' ? green : s === 'blocked' ? red : gray; }
-function statusIcon(s: string) { return s === 'completed' ? green('✓') : s === 'in_progress' ? cyan('⟳') : s === 'blocked' ? red('✗') : s === 'pending' ? yellow('◦') : gray('·'); }
+function statusColor(s: string) { return s === 'pending' ? yellow : s === 'in_progress' ? cyan : s === 'completed' ? green : s === 'blocked' ? red : s === 'review_requested' ? blue : gray; }
+function statusIcon(s: string) { return s === 'completed' ? green('✓') : s === 'in_progress' ? cyan('⟳') : s === 'blocked' ? red('✗') : s === 'review_requested' ? blue('?') : s === 'pending' ? yellow('◦') : gray('·'); }
 
 // === Helpers ===
 function fmtDuration(s: string | null, e: string | null): string {

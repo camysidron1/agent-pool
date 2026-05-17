@@ -7,6 +7,8 @@
  */
 import { createProductionContext } from './container.js';
 import type { TaskStatus } from './stores/interfaces.js';
+import { appendFileSync, mkdirSync } from 'fs';
+import { dirname, join } from 'path';
 
 const taskId = process.env.AGENT_POOL_TASK_ID;
 const dataDir = process.env.AGENT_POOL_DATA_DIR;
@@ -19,6 +21,7 @@ const validStatuses: TaskStatus[] = [
   'pending',
   'backlogged',
   'cancelled',
+  'review_requested',
 ];
 
 if (!taskId || !dataDir || !status || !validStatuses.includes(status)) {
@@ -36,5 +39,15 @@ const ctx = createProductionContext({
 });
 
 ctx.stores.tasks.mark(taskId, status);
+const eventType = status === 'review_requested' ? 'task.review_requested' : `task.${status}`;
+if (['task.completed', 'task.blocked', 'task.cancelled', 'task.review_requested'].includes(eventType)) {
+  const eventsFile = join(dataDir, 'events.jsonl');
+  mkdirSync(dirname(eventsFile), { recursive: true });
+  appendFileSync(eventsFile, JSON.stringify({
+    type: eventType,
+    timestamp: new Date().toISOString(),
+    payload: { taskId, status },
+  }) + '\n');
+}
 console.log(`Task ${taskId} marked as ${status}`);
 ctx.db.close();

@@ -34,6 +34,7 @@ function baseSummary(overrides: Partial<QueueSummary> = {}): QueueSummary {
     pending: 0,
     inProgress: 0,
     blocked: 0,
+    reviewRequested: 0,
     waitingOnDeps: 0,
     claimable: 0,
     completed: 0,
@@ -76,6 +77,14 @@ describe('formatQueueSummary', () => {
     })));
     expect(output).toContain('blocked');
     expect(output).toContain('unblock');
+  });
+
+  test('shows review requested count without idle message', () => {
+    const output = strip(formatQueueSummary(baseSummary({
+      total: 1, reviewRequested: 1,
+    })));
+    expect(output).toContain('1 review requested');
+    expect(output).not.toContain('idle');
   });
 
   test('shows priority badge on next claimable', () => {

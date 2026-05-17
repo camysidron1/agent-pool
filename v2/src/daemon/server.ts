@@ -214,8 +214,8 @@ export class DaemonServer {
       case "task.mark": {
         await taskStore.update(req.params?.id, req.params?.fields);
         const status = req.params?.fields?.status;
-        if (status === "completed" || status === "blocked" || status === "cancelled") {
-          const eventType = `task.${status}` as const;
+        if (status === "completed" || status === "blocked" || status === "cancelled" || status === "review_requested") {
+          const eventType = status === "review_requested" ? "task.review_requested" : `task.${status}` as const;
           this.eventBus.emit({ type: eventType, timestamp: new Date().toISOString(), payload: { taskId: req.params?.id, status } });
         }
         return { ok: true };

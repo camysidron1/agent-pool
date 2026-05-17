@@ -68,7 +68,7 @@ function createTaskTool(ctx: ToolContext): ToolDefinition {
 // --- list_tasks ---
 
 const ListTasksParams = Type.Object({
-  status: Type.Optional(Type.String({ description: 'Filter by status: pending, in_progress, completed, blocked, backlogged, cancelled' })),
+  status: Type.Optional(Type.String({ description: 'Filter by status: pending, in_progress, completed, blocked, backlogged, cancelled, review_requested' })),
 });
 
 function listTasksTool(ctx: ToolContext): ToolDefinition {
@@ -146,10 +146,10 @@ function getTaskStatusTool(ctx: ToolContext): ToolDefinition {
 
 // --- finish_task ---
 
-const VALID_FINISH_STATUSES = new Set<string>(['completed', 'blocked', 'pending', 'backlogged']);
+const VALID_FINISH_STATUSES = new Set<string>(['completed', 'blocked', 'pending', 'backlogged', 'review_requested']);
 
 const FinishTaskParams = Type.Object({
-  status: Type.String({ description: 'Final status: completed, blocked, pending (retry), or backlogged' }),
+  status: Type.String({ description: 'Final status: completed, blocked, pending (retry), backlogged, or review_requested' }),
   result: Type.Optional(Type.String({ description: 'Optional result message or notes' })),
 });
 
@@ -157,7 +157,7 @@ function finishTaskTool(ctx: ToolContext): ToolDefinition {
   return {
     name: 'finish_task',
     label: 'Finish Task',
-    description: 'Mark the current task with a final status and end the session. Use "completed" when done, "blocked" if stuck, "pending" to retry, or "backlogged" to deprioritize.',
+    description: 'Mark the current task with a final status and end the session. Use "completed" when done, "review_requested" when human review is required, "blocked" if stuck, "pending" to retry, or "backlogged" to deprioritize.',
     promptSnippet: 'finish_task — mark current task done/blocked and exit',
     promptGuidelines: [
       'Always call finish_task when you are done with the current task. Do not just stop — explicitly finish.',

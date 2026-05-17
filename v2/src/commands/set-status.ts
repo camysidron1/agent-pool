@@ -4,7 +4,7 @@ import type { TaskStatus } from '../stores/interfaces.js';
 import { TaskService } from '../services/task-service.js';
 import { notifyDaemon } from '../util/notify-daemon.js';
 
-const VALID_STATUSES: TaskStatus[] = ['pending', 'in_progress', 'completed', 'blocked', 'backlogged', 'cancelled'];
+const VALID_STATUSES: TaskStatus[] = ['pending', 'in_progress', 'completed', 'blocked', 'backlogged', 'cancelled', 'review_requested'];
 
 export function registerSetStatusCommand(program: Command, ctx: AppContext): void {
   program

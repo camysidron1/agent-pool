@@ -277,7 +277,10 @@ export class AgentRunner {
       // Write task log
       this.writeTaskLog(agentCtx, startedAt, completedAt, exitCode);
 
-      if (exitCode === 0) {
+      const latestTask = this.ctx.stores.tasks.get(task.id);
+      if (latestTask && latestTask.status !== 'in_progress') {
+        console.log(`${this.agentId} left task ${task.id} as ${latestTask.status}`);
+      } else if (exitCode === 0) {
         this.ctx.stores.tasks.mark(task.id, 'completed');
         console.log(`${this.agentId} completed task ${task.id}`);
       } else {

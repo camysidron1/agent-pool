@@ -7,6 +7,10 @@ export type EventType =
   | "task.completed"
   | "task.blocked"
   | "task.cancelled"
+  | "task.review_requested"
+  | "task.review_accepted"
+  | "task.review_changes_requested"
+  | "task.feedback_delivered"
   | "agent.ready"
   | "agent.stuck";
 
@@ -16,6 +20,10 @@ export const VALID_EVENT_TYPES: ReadonlySet<string> = new Set<EventType>([
   "task.completed",
   "task.blocked",
   "task.cancelled",
+  "task.review_requested",
+  "task.review_accepted",
+  "task.review_changes_requested",
+  "task.feedback_delivered",
   "agent.ready",
   "agent.stuck",
 ]);

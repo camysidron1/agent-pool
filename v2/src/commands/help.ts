@@ -17,7 +17,7 @@ export function registerHelpCommand(program: Command, _ctx: AppContext): void {
       console.log('  unblock <task-id>        Unblock a blocked task');
       console.log('  backlog <task-id>        Move task to backlog');
       console.log('  activate <task-id>       Activate a backlogged task');
-      console.log('  set-status <id> <status> Set task status directly');
+      console.log('  set-status <id> <status> Set task status directly (pending, in_progress, completed, blocked, backlogged, cancelled, review_requested)');
       console.log('  status                   Show project status overview');
       console.log('  project <subcommand>     Manage projects');
       console.log('  docs                     Open documentation');
